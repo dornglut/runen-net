@@ -710,7 +710,10 @@ mod tests {
             .connection_lost(second, second_connection, policy)
             .unwrap();
 
-        assert_eq!(session.advance_recovery_clock(1).unwrap(), vec![second, first]);
+        assert_eq!(
+            session.advance_recovery_clock(1).unwrap(),
+            vec![second, first]
+        );
     }
 
     #[test]
