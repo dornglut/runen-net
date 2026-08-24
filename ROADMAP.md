@@ -38,17 +38,17 @@ Implement the production QUIC adapter with explicit mapping from RunenNet delive
 
 **Gate:** QUIC passes the same semantic transport conformance expectations as the deterministic transport where applicable; payload size never silently changes delivery guarantees.
 
-## RN6 — Runenwerk clean cutover
+## RN6 — Public standalone framework surface
 
-Implement downstream Runenwerk/RunenECS integration, switch Runenwerk to RunenNet authority, and delete the old engine-owned networking semantic crates/state.
+Refine the engine-independent user API around the proven core and production transport: client/server composition, protocol/schema registration, diagnostics, optional derive/macros where justified, and stable standalone examples/guides.
 
-**Gate:** dependency direction is one-way from Runenwerk to RunenNet; no forwarding crate, duplicate protocol authority, or compatibility shim remains.
+**Gate:** ordinary standalone use is coherent and documented without Runenwerk-specific concepts, while advanced integrations retain explicit host/transport escape hatches.
 
-## RN7 — Public framework API
+## RN7 — Runenwerk clean cutover
 
-Refine standalone user ergonomics: client/server composition, registration, diagnostics, optional derive/macros where justified, and stable examples/guides.
+Implement downstream Runenwerk/RunenECS integration against the accepted standalone framework surface, switch Runenwerk to RunenNet authority, and delete the old engine-owned networking semantic crates/state.
 
-**Gate:** ordinary framework use does not require expert transport/runtime hooks, while advanced integrations retain explicit escape hatches.
+**Gate:** dependency direction is one-way from Runenwerk to RunenNet; the engine integration does not redefine framework semantics; no forwarding crate, duplicate protocol authority, or compatibility shim remains.
 
 ## RN8 — Advanced semantics
 
