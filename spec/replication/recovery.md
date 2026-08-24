@@ -120,7 +120,7 @@ Emission evidence MUST distinguish at least:
 - ReplicationCursor;
 - whether the emitted snapshot was Full or Delta;
 - the replication lineage;
-- for a full snapshot emitted during authority FullSnapshotRequired, the authority recovery generation in which that full snapshot was emitted.
+- for a full snapshot designated as a recovery candidate, the authority recovery generation for which it was designated.
 
 The authority MAY discard old evidence under finite policy once it is no longer required for confirmation handling.
 
@@ -195,6 +195,18 @@ The authority enters FullSnapshotRequired when:
 - an authorized replacement transport connection is bound to the retained participant under the initial recovery profile; or
 - another rule in this specification explicitly requires full recovery.
 
+## Crossing into authority recovery
+
+The transition into FullSnapshotRequired is a semantic send boundary.
+
+When a lineage enters a new FullSnapshotRequired recovery generation:
+
+- any delta snapshot already emitted before the boundary remains an emitted historical fact;
+- any delta candidate or submission for that lineage that has **not** yet become emitted under the consistency specification MUST NOT later become emitted;
+- the implementation MUST cancel, reject, invalidate, or otherwise prevent such not-yet-emitted delta work from crossing the boundary into the recovery generation.
+
+This rule does not retract an already emitted unreliable or reliable delta from the network. Client-side recovery and candidate rules determine whether any later-arriving snapshot can commit.
+
 ## Recovery generation
 
 A **recovery generation** identifies one authority-side attempt to re-establish a delta-eligible full baseline for a lineage.
@@ -207,17 +219,22 @@ A new recovery generation MUST begin whenever authority state transitions from D
 
 An authorized connection replacement MUST begin a new recovery generation even if the lineage was already FullSnapshotRequired. The new generation's start cursor watermark is taken at that replacement boundary.
 
-A repeated recovery demand, baseline-unavailable observation, or retry while already FullSnapshotRequired does not begin another recovery generation in this revision. Such events MAY update diagnostics or reason detail and MAY cause another full snapshot to be emitted in the same generation.
+A repeated recovery demand, baseline-unavailable observation, or retry while already FullSnapshotRequired does not begin another recovery generation in this revision. Such events MAY update diagnostics or reason detail and MAY cause another full snapshot to be produced in the same generation.
 
 No other event begins a new recovery generation in this revision.
 
-A full snapshot qualifies to satisfy a recovery generation only if:
+## Qualifying recovery full snapshots
 
-- it is emitted while that generation is current;
-- authority emission evidence associates it with that generation; and
-- its ReplicationCursor is greater than the generation's start cursor watermark when a watermark exists.
+A full snapshot qualifies to satisfy a recovery generation only if all of these hold:
 
-An older full snapshot MUST NOT be retrospectively reclassified, re-tagged, or merely retransmitted under the current generation to satisfy recovery completion.
+- it is explicitly created or designated by the authority as a recovery-full candidate **after that recovery generation began**;
+- its ReplicationCursor is greater than the generation's start cursor watermark when a watermark exists;
+- it becomes emitted while that generation is still current; and
+- authority emission evidence records the same current recovery generation for that snapshot.
+
+A full snapshot created, staged, submitted, or emitted for an older generation MUST NOT be retrospectively reclassified or re-tagged to satisfy a newer generation.
+
+Merely retransmitting an older snapshot revision does not make it a qualifying current-generation recovery full.
 
 A conforming implementation MUST be able to determine whether a full-snapshot acknowledgement refers to a qualifying full snapshot from the current recovery generation.
 
@@ -228,8 +245,8 @@ A delayed acknowledgement for a full snapshot emitted in an older recovery gener
 While authority state is FullSnapshotRequired:
 
 - the authority MUST NOT emit a delta snapshot for that lineage;
-- it MAY emit one or more newer full snapshots;
-- each recovery full candidate MUST satisfy the current recovery-generation qualification rules above;
+- it MAY create and emit one or more newer full snapshots;
+- each recovery full candidate intended to clear recovery MUST satisfy the qualification rules above;
 - emitting or RN1B-accepting a full snapshot MUST NOT by itself clear FullSnapshotRequired;
 - delivery or exposure of a full snapshot without a qualifying Confirmed acknowledgement MUST NOT by itself clear FullSnapshotRequired.
 
@@ -308,13 +325,14 @@ A conforming implementation MUST make at least these replication-recovery outcom
 - client FullSnapshotRequired and its reason class;
 - authority FullSnapshotRequired, its reason class, and current recovery generation identity sufficient for conformance comparison;
 - current recovery-generation start cursor watermark;
+- not-yet-emitted delta invalidation at an authority recovery boundary;
 - MissingBase;
 - malformed/reconstruction/commit delta failure;
 - baseline eviction;
 - qualifying recovery full snapshot emitted and its recovery generation;
 - recovery full snapshot committed on client;
 - recovery full acknowledgement Confirmed;
-- recovery full acknowledgement rejected for recovery completion because it belongs to an older generation or fails the current-generation watermark rule;
+- recovery full acknowledgement rejected for recovery completion because it belongs to an older generation or fails current-generation qualification;
 - Confirmed acknowledgement whose baseline is unavailable;
 - state-image resource failure.
 
