@@ -28,9 +28,13 @@ The mechanism used to satisfy that requirement is not defined by this revision. 
 
 ## Participant identity
 
-A **ParticipantId** identifies one participant identity within one session.
+A **ParticipantId** identifies one participant incarnation within one session.
 
-ParticipantId uniqueness is scoped by SessionId. A ParticipantId MUST NOT identify more than one participant within the same session, and once a ParticipantId has identified a participant it MUST NOT later identify a different participant before that session ends.
+A participant incarnation is one session-scoped identity lifetime. External account or authentication identity does not determine whether two participant incarnations are the same.
+
+ParticipantId uniqueness is scoped by SessionId. A ParticipantId MUST NOT identify more than one participant incarnation within the same session, and once assigned it MUST NOT be assigned to a later participant incarnation before that session ends.
+
+This prevents delayed or retained participant-scoped traffic from becoming applicable to a later participation solely because an identifier was recycled.
 
 A ParticipantId is distinct from:
 
@@ -47,7 +51,7 @@ Whether the participant is admitted, bound to a transport connection, retained a
 
 A **NetworkEntityId** identifies one network entity incarnation within one session.
 
-NetworkEntityId uniqueness is scoped by SessionId. A NetworkEntityId MUST NOT identify more than one entity incarnation within the same session, and once assigned it MUST NOT later identify a different entity incarnation before that session ends.
+NetworkEntityId uniqueness is scoped by SessionId. A NetworkEntityId MUST NOT identify more than one entity incarnation within the same session, and once assigned it MUST NOT be assigned to a later entity incarnation before that session ends.
 
 This prevents delayed or retained network state from becoming applicable to a later entity solely because an identifier was recycled.
 
