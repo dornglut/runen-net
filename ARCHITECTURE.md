@@ -25,16 +25,16 @@ World/game policy such as spatial relevancy, ownership facts, and application si
 
 ## Implementation packages
 
-RN0 intentionally does not ratify a multi-crate implementation topology. Creating `runen-net-core`, protocol, runtime, transport, macro, or adapter crates before their independent ownership is demonstrated would make package shape precede semantic evidence.
+RN0 intentionally does not ratify a multi-crate product topology. Creating `runen-net-core`, protocol, runtime, transport, macro, or adapter crates before their independent ownership is demonstrated would make package shape precede semantic evidence.
 
-RN2 may introduce the minimum package decomposition justified by accepted RN1 semantics and conformance needs.
+The repository currently contains only repository tooling under `tools/`. RN2 may introduce the minimum product package decomposition justified by accepted RN1 semantics and conformance needs.
 
 ## Top-level artifact areas
 
 - `spec/` — normative specification artifacts;
 - `docs/` — non-normative architecture, verification, decisions, research, and guides;
-- future `crates/` — implementation packages only after package ownership is accepted;
-- future `tools/` — repository tooling only;
+- `tools/` — repository tooling only;
+- future `crates/` — product implementation packages only after package ownership is accepted;
 - future `examples/` — consumer-facing examples and standalone proofs;
 - future `conformance/` — executable conformance assets when required by the accepted verification design.
 
