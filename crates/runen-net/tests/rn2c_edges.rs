@@ -233,8 +233,8 @@ fn malformed_and_reconstruction_failures_are_atomic_recovery_transitions() {
         .apply_delta(
             malformed_key,
             DeltaSnapshot::new(
-                ReplicationCursor::new(1),
-                ReplicationCursor::new(1),
+                ReplicationCursor::new(3),
+                ReplicationCursor::new(2),
                 SimulationTick::new(2),
                 (),
             ),
