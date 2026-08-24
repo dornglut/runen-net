@@ -110,12 +110,7 @@ fn authority_recovery_survives_aggregate_rejection_and_retries_same_generation()
     emit_full(&mut authority, participant, 1, 1, 1, 4, true);
     assert_eq!(
         authority
-            .acknowledge_authorized(
-                &session,
-                connection,
-                participant,
-                ReplicationCursor::new(1),
-            )
+            .acknowledge_authorized(&session, connection, participant, ReplicationCursor::new(1),)
             .unwrap(),
         AuthorityAckOutcome::Confirmed
     );
@@ -179,12 +174,7 @@ fn authority_recovery_survives_aggregate_rejection_and_retries_same_generation()
         .expect("conforming retry is emitted");
     assert_eq!(
         authority
-            .acknowledge_authorized(
-                &session,
-                connection,
-                participant,
-                ReplicationCursor::new(2),
-            )
+            .acknowledge_authorized(&session, connection, participant, ReplicationCursor::new(2),)
             .unwrap(),
         AuthorityAckOutcome::Confirmed
     );
@@ -212,7 +202,12 @@ fn client_recovery_survives_aggregate_rejection_without_host_commit_and_retries(
         .unwrap();
     client.require_connection_replacement_full(key).unwrap();
 
-    let state_before = client.lineage(key).unwrap().current_state().unwrap().clone();
+    let state_before = client
+        .lineage(key)
+        .unwrap()
+        .current_state()
+        .unwrap()
+        .clone();
     let cursor_before = client.lineage(key).unwrap().current_cursor();
     let bytes_before = client.retained_state_bytes();
     let recovery_before = client.lineage(key).unwrap().replication_state();
