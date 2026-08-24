@@ -4,8 +4,6 @@ Status: **provisional incomplete normative**
 
 This document owns the initial RunenNet delivery-flow lifetime, message submission/acceptance/exposure model, and delivery modes. Identity vocabulary is defined by [Core identity and time](../core/identity.md). Session membership and connection binding are defined by [Session and authority lifecycle](../session/lifecycle.md).
 
-Resource limits and pressure outcomes are owned by [Delivery pressure and resource policy](pressure.md).
-
 ## Scope
 
 This revision defines:
@@ -17,7 +15,7 @@ This revision defines:
 - terminal flow failure when an accepted reliable guarantee can no longer be upheld;
 - transport-realization requirements that prevent silent semantic downgrade.
 
-Wire flow identifiers, serialization, packetization, fragmentation algorithms, bandwidth priority, deadlines, keyed supersession, replication policy, input buffering, and reconnect recovery are not defined by this revision.
+Resource limits and pressure policy, wire flow identifiers, serialization, packetization, fragmentation algorithms, bandwidth priority, deadlines, keyed supersession, replication policy, input buffering, and reconnect recovery are not defined by this revision.
 
 ## Message unit
 
@@ -25,7 +23,7 @@ For this delivery layer, a **message** is one finite opaque byte payload submitt
 
 A receiver either exposes a complete message payload or does not expose that message. Transport fragmentation, stream chunking, packet boundaries, and reassembly are realization details and MUST NOT become partial message exposure.
 
-The maximum accepted message size is governed by the delivery pressure specification and by any stricter capability negotiated for the selected realization.
+This document does not define the maximum accepted message size.
 
 ## Delivery flow
 
@@ -60,14 +58,16 @@ Flow termination MUST be observable to the host. The concrete error type and pub
 
 **Submission** is the act of offering one complete message to a delivery flow.
 
-A submission has exactly one of these initial outcomes:
+When RunenNet decides a submission, the result is exactly one of:
 
 - **Accepted** — RunenNet has admitted the message under that flow's delivery mode; or
 - **Rejected** — RunenNet has not admitted the message and makes no delivery guarantee for it.
 
+This document does not require a synchronous, blocking, or asynchronous submission API. A runtime may defer deciding a submission, but it MUST NOT report acceptance before the message has actually entered the selected delivery contract.
+
 A rejected submission MUST NOT consume the delivery sequence assigned to accepted `UnreliableSequenced` messages.
 
-Rejection reasons required by resource or realization limits are defined by the delivery pressure specification or later transport profiles.
+This document does not define rejection reasons.
 
 **Exposure** occurs when the receiving RunenNet delivery layer makes one complete accepted message available to the receiving host/session semantics.
 
@@ -97,7 +97,7 @@ For an `UnreliableUnordered` flow, an accepted message MAY be lost before exposu
 
 Accepted messages MAY be exposed in any order relative to other accepted messages on the same flow.
 
-This revision does not guarantee duplicate suppression for `UnreliableUnordered`. A receiving realization MAY expose duplicate copies produced by the underlying network or transport unless a later profile adds stronger duplicate handling.
+This revision does not guarantee duplicate suppression for `UnreliableUnordered`. A receiving realization MAY expose duplicate copies produced by the underlying network or transport unless a later specification adds stronger duplicate handling.
 
 A transport or implementation MUST NOT claim successful reliable delivery merely because a particular unreliable message happened to be exposed.
 
@@ -115,7 +115,7 @@ When such a message is exposed, its sequence value becomes the new most recently
 
 The receiver does not wait for missing sequence values. Exposure MAY skip any number of accepted-but-lost or otherwise unexposed messages.
 
-A newer received message that is discarded before exposure because of permitted unreliable pressure or validation failure does not by itself advance the most recently exposed sequence value.
+A newer received message that is discarded before exposure does not by itself advance the most recently exposed sequence value.
 
 `UnreliableSequenced` defines receiver-side stale/duplicate rejection. It does not require sender-side coalescing, keyed latest-value replacement, or eviction of older accepted messages solely because a newer message was accepted.
 
@@ -135,7 +135,7 @@ Payload size, current path MTU, stream availability, congestion state, queue occ
 
 If a realization cannot support the selected mode for a flow or message, it MUST reject establishment/submission before semantic acceptance where possible, or terminate the affected flow with an explicit failure if the inability is discovered after acceptance. It MUST NOT silently downgrade the mode.
 
-A realization MAY provide behavior stronger than the minimum permitted by an unreliable mode, but that stronger observed behavior does not become a RunenNet guarantee and MUST NOT be exposed as though the flow had changed modes.
+A realization MAY incidentally provide behavior stronger than the minimum permitted by an unreliable mode, but that stronger observed behavior does not become a RunenNet guarantee and MUST NOT be represented as though the flow had changed modes.
 
 Transport-native ordering does not define RunenNet flow ordering. If a realization maps one `ReliableOrdered` flow across transport mechanisms that do not themselves provide the required single ordering domain, RunenNet ordering metadata or another conforming mechanism MUST preserve the flow semantics.
 
