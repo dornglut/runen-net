@@ -190,12 +190,7 @@ fn fixed_contract_size_and_active_flow_limits_are_enforced() {
         OutboundPressureBehavior::EvictOldestUnreliable,
         ReceiverPressureBehavior::TerminateReliable,
     );
-    let result = endpoint.establish_flow(
-        key,
-        DeliveryMode::ReliableOrdered,
-        invalid,
-        connection,
-    );
+    let result = endpoint.establish_flow(key, DeliveryMode::ReliableOrdered, invalid, connection);
     assert_eq!(
         result,
         Err(FlowEstablishmentError::InvalidPolicy(
@@ -274,16 +269,12 @@ fn outbound_pressure_preserves_reliable_and_same_flow_unreliable_rules() {
     );
     let blocked = endpoint.submit(reliable_flow, b"blocked".to_vec()).unwrap();
     assert_eq!(blocked, SubmissionOutcome::RejectedPressure);
-    endpoint
-        .commit_outbound_custody(reliable_flow, 0)
-        .unwrap();
+    endpoint.commit_outbound_custody(reliable_flow, 0).unwrap();
     assert_eq!(
         accepted(endpoint.submit(reliable_flow, b"next".to_vec()).unwrap()),
         1
     );
-    endpoint
-        .commit_outbound_custody(reliable_flow, 1)
-        .unwrap();
+    endpoint.commit_outbound_custody(reliable_flow, 1).unwrap();
 
     let policy = unreliable(
         2,
@@ -343,17 +334,11 @@ fn rejected_sequenced_submission_consumes_no_sequence() {
         scope(2, 8, 64),
     );
 
-    assert_eq!(
-        accepted(endpoint.submit(key, b"zero".to_vec()).unwrap()),
-        0
-    );
+    assert_eq!(accepted(endpoint.submit(key, b"zero".to_vec()).unwrap()), 0);
     let rejected = endpoint.submit(key, b"reject".to_vec()).unwrap();
     assert_eq!(rejected, SubmissionOutcome::RejectedPressure);
     endpoint.commit_outbound_custody(key, 0).unwrap();
-    assert_eq!(
-        accepted(endpoint.submit(key, b"one".to_vec()).unwrap()),
-        1
-    );
+    assert_eq!(accepted(endpoint.submit(key, b"one".to_vec()).unwrap()), 1);
 }
 
 #[test]
@@ -376,7 +361,10 @@ fn session_resource_association_accounts_existing_state_only() {
     let session = Session::new(SessionId::new(9), SessionLimits::new(nz(4), nz(2)).unwrap());
     assert_eq!(session.live_memberships(), 0);
     let too_small = endpoint.associate_flow_with_session(first, &session, scope(1, 1, 16));
-    assert_eq!(too_small, Err(SessionAssociationError::ResourceLimitExceeded));
+    assert_eq!(
+        too_small,
+        Err(SessionAssociationError::ResourceLimitExceeded)
+    );
 
     let session_limits = scope(1, 2, 16);
     let associated = endpoint
@@ -393,7 +381,10 @@ fn session_resource_association_accounts_existing_state_only() {
         scope(2, 8, 64),
     );
     let exhausted = endpoint.associate_flow_with_session(second, &session, session_limits);
-    assert_eq!(exhausted, Err(SessionAssociationError::ResourceLimitExceeded));
+    assert_eq!(
+        exhausted,
+        Err(SessionAssociationError::ResourceLimitExceeded)
+    );
 
     let mut closed = Session::new(
         SessionId::new(10),
@@ -451,7 +442,10 @@ fn reliable_reorder_and_duplication_expose_exactly_once_in_order() {
             local_pressure_drops: 0
         }
     );
-    assert_eq!(exposed(&mut target, target_flow), vec![b"a".to_vec(), b"b".to_vec()]);
+    assert_eq!(
+        exposed(&mut target, target_flow),
+        vec![b"a".to_vec(), b"b".to_vec()]
+    );
     assert_eq!(target.diagnostics().reliable_duplicate_suppressions, 1);
 }
 
@@ -599,7 +593,10 @@ fn unreliable_faults_preserve_unordered_and_sequenced_semantics() {
     assert_eq!(newest.accepted_index(), 2);
     let stale = stage.deliver(0, &mut target);
     assert_eq!(stale, ReceiveOutcome::StaleSequenced);
-    assert_eq!(target.last_exposed_sequence(sequenced_target).unwrap(), Some(2));
+    assert_eq!(
+        target.last_exposed_sequence(sequenced_target).unwrap(),
+        Some(2)
+    );
 }
 
 #[test]
@@ -715,7 +712,9 @@ fn connection_replacement_starts_fresh_delivery_state() {
         ),
         limits,
     );
-    endpoint.submit(reliable_flow, b"reliable".to_vec()).unwrap();
+    endpoint
+        .submit(reliable_flow, b"reliable".to_vec())
+        .unwrap();
     endpoint
         .submit(unreliable_flow, b"unreliable".to_vec())
         .unwrap();
@@ -765,9 +764,7 @@ fn direct_and_faulted_reliable_paths_have_identical_exposure() {
     );
     for payload in [b"left".as_slice(), b"right".as_slice()] {
         let transfer = submit_take(&mut direct_source, direct_source_flow, payload);
-        direct_target
-            .receive(direct_target_flow, transfer)
-            .unwrap();
+        direct_target.receive(direct_target_flow, transfer).unwrap();
     }
     let direct = exposed(&mut direct_target, direct_target_flow);
 
