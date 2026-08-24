@@ -19,7 +19,9 @@ Consumer integrations may depend on RunenNet plus their host frameworks outside 
 
 ## Dependency law
 
-Networking semantics are established before transport realization. Transport-independent semantic packages MUST NOT depend on a production transport, socket API, or executor-specific runtime API. Transport/runtime adapters may realize accepted contracts but MUST NOT silently alter their reliability, ordering, sequencing, supersession, priority, recovery, or pressure semantics.
+Networking semantics are established before transport realization. Transport-independent semantic packages MUST NOT depend on a production transport, socket API, or executor-specific runtime API. Transport/runtime adapters may realize accepted contracts but MUST NOT silently alter any accepted RunenNet delivery, pressure, recovery, protocol, or replication semantics.
+
+Terms or feature families that are not yet normatively defined — including currently deferred priority, keyed supersession, advanced reconnect/history, prediction, and interest semantics — are not implementation authority merely because a future adapter or consumer needs them.
 
 World/game policy such as spatial relevancy, ownership facts, and application simulation remains consumer-owned and enters RunenNet through explicit host-neutral contracts.
 
@@ -27,7 +29,7 @@ World/game policy such as spatial relevancy, ownership facts, and application si
 
 RN0 intentionally does not ratify a multi-crate product topology. Creating `runen-net-core`, protocol, runtime, transport, macro, or adapter crates before their independent ownership is demonstrated would make package shape precede semantic evidence.
 
-The repository currently contains only repository tooling under `tools/`. RN2 may introduce the minimum product package decomposition justified by accepted RN1 semantics and conformance needs.
+RN1 established the initial semantic ownership boundaries without requiring those boundaries to map one-to-one to crates. RN2 may introduce only the minimum product package decomposition justified by accepted RN1 semantics and conformance needs.
 
 ## Top-level artifact areas
 
@@ -42,7 +44,7 @@ The repository currently contains only repository tooling under `tools/`. RN2 ma
 
 Current Runenwerk networking source is migration evidence, not package authority. Extraction MUST separate reusable networking semantics from engine-specific realization instead of moving the current `net/` tree wholesale.
 
-RunenNet may own transport-independent concerns such as sessions, delivery contracts, protocol identity, replication cursors/baselines, acknowledgements, resynchronization, network-oriented retention, prediction/input protocol contracts, generic interest vocabulary, recovery semantics, and transport interfaces.
+RunenNet may own transport-independent concerns such as sessions, delivery contracts, protocol identity, replication cursors/baselines, acknowledgements, resynchronization, network-oriented retention, prediction/input protocol contracts, generic interest vocabulary, recovery semantics, and transport interfaces when those concerns have accepted standalone semantic owners.
 
 RunenNet does not automatically own general simulation, ECS world access, engine schedules/resources, spatial queries, rendering smoothing, gameplay policy, or archival/editor replay.
 
