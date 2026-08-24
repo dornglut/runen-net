@@ -2,9 +2,7 @@
 
 use std::collections::VecDeque;
 
-use runen_net::delivery::{
-    DeliveryEndpoint, DeliveryFlowKey, DeliveryTransfer, ReceiveOutcome,
-};
+use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryTransfer, ReceiveOutcome};
 
 #[derive(Debug)]
 struct Staged {
