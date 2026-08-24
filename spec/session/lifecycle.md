@@ -63,7 +63,7 @@ An admission attempt targets one Open session.
 On **admission acceptance**:
 
 - the admission MUST target the intended SessionId;
-- a newly created membership MUST receive a ParticipantId not previously used for another participant in that session;
+- a newly created membership MUST receive a ParticipantId not previously assigned in that session;
 - an existing retained membership MUST keep its existing ParticipantId;
 - the accepted transport connection MUST become the participant's current authorized binding.
 
