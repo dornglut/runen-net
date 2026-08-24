@@ -9,14 +9,15 @@ This document owns the initial RunenNet delivery resource bounds and local press
 This revision defines:
 
 - finite message-size limits;
-- finite per-flow and per-binding queue/storage limits;
+- finite per-flow, per-binding, and per-session delivery storage limits;
+- finite active delivery-flow counts;
 - outbound submission behavior under local pressure;
 - receiver behavior under local pressure;
 - reliable versus unreliable pressure rules;
 - minimum observable pressure outcomes required for conformance;
 - adapter obligations around hidden buffering and unsupported size/capacity constraints.
 
-Bandwidth priority, send cadence, deadlines, application-keyed supersession, congestion-control algorithms, packet MTU discovery, and public configuration API shape are not defined by this revision.
+Bandwidth priority, send cadence, deadlines, application-keyed supersession, congestion-control algorithms, packet MTU discovery, participant-count/admission policy, and public configuration API shape are not defined by this revision.
 
 ## Pressure policy attachment
 
@@ -34,15 +35,27 @@ Those limits and pressure behaviors MUST remain semantically stable for the flow
 
 Exact numeric defaults are not defined by this revision.
 
-## Per-binding aggregate bounds
+## Aggregate delivery bounds
 
-Every current participant connection binding MUST also have explicit finite aggregate bounds on locally queued/pending delivery message count and payload bytes across all of its flows.
+Every current participant connection binding MUST have explicit finite aggregate bounds on:
 
-The aggregate bounds apply even when the binding currently has only one delivery flow.
+- active delivery-flow count;
+- locally queued/pending delivery message count across its flows;
+- locally queued/pending delivery payload bytes across its flows.
 
-A realization MUST NOT evade aggregate bounds by creating additional delivery flows or transport-native streams for the same binding.
+Those aggregate bounds apply even when the binding currently has only one delivery flow.
 
-Any additional RunenNet-owned staging queue, retry queue, reassembly buffer, transport-adapter queue, or pending-submission structure that can grow from local or remote message activity MUST have an explicit finite bound or be directly covered by a flow/binding bound above.
+Every Open session MUST also have explicit finite aggregate delivery bounds on:
+
+- active delivery-flow count across all current bindings;
+- locally queued/pending delivery message count across all current bindings;
+- locally queued/pending delivery payload bytes across all current bindings.
+
+These are delivery-resource bounds, not participant-count or admission-policy semantics. A session may use any admission policy that remains consistent with its finite delivery-resource budget.
+
+A realization MUST NOT evade an aggregate bound by creating additional delivery flows, connection bindings, or transport-native streams.
+
+Any additional RunenNet-owned staging queue, retry queue, reassembly buffer, transport-adapter queue, flow registry, or pending-submission structure that can grow from local or remote message activity MUST have an explicit finite bound or be directly covered by a flow/binding/session bound above.
 
 ## Message-size validation
 
@@ -62,7 +75,7 @@ The initial outbound pressure behaviors are **RejectNew** and **EvictOldestUnrel
 
 RejectNew is valid for every delivery mode.
 
-When accepting a submitted message would exceed a per-flow or per-binding local bound:
+When accepting a submitted message would exceed a per-flow, per-binding, or per-session local bound:
 
 - the new submission is rejected;
 - no delivery sequence is consumed for that rejected submission;
@@ -102,7 +115,7 @@ This requirement does not imply that the sender can know remote application expo
 
 The initial unreliable receiver pressure behaviors are **DropIncomingUnreliable** and **EvictOldestBufferedUnreliable**. A flow using an unreliable delivery mode MUST select one of them before accepting its first message.
 
-Receiver-side storage influenced by incoming traffic MUST remain within the attached flow and binding bounds.
+Receiver-side storage influenced by incoming traffic MUST remain within the attached flow and aggregate binding/session bounds.
 
 ### Reliable receiver pressure
 
@@ -130,15 +143,17 @@ For `UnreliableSequenced`, a message discarded before exposure because of receiv
 
 ## Aggregate pressure
 
-A message that fits its per-flow limits may still exceed the aggregate resource budget for the current participant connection binding.
+A message that fits its per-flow limits may still exceed a binding-level or session-level aggregate delivery budget.
 
 Aggregate pressure MUST preserve the same reliability distinction:
 
-- accepted reliable messages MUST NOT be silently discarded to satisfy the aggregate bound;
+- accepted reliable messages MUST NOT be silently discarded to satisfy an aggregate bound;
 - new reliable submissions may remain unaccepted or be rejected;
 - unreliable submissions/received messages may be rejected or deliberately dropped only according to their selected explicit pressure behavior.
 
 If a flow-local unreliable eviction cannot resolve aggregate pressure without evicting another flow's data, the new message MUST be rejected or dropped rather than implicitly changing another flow's policy.
+
+If a new delivery flow would exceed a binding-level or session-level active-flow bound, that flow MUST NOT begin accepting messages.
 
 ## Adapter and transport buffering
 
@@ -159,6 +174,7 @@ A conforming implementation MUST make at least the following outcome classes dis
 - submission accepted;
 - submission rejected because the message exceeds its size limit;
 - submission rejected because of local pressure;
+- delivery-flow establishment rejected because an aggregate active-flow bound is exhausted;
 - accepted unreliable message deliberately dropped by local pressure;
 - received unreliable message deliberately dropped by local pressure;
 - terminal flow failure because a reliable delivery obligation could not be preserved.
