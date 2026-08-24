@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 
@@ -292,11 +292,7 @@ impl ValidatedOffer {
         self.offer.schemas.iter().find(|entry| entry.id == id)
     }
 
-    fn supports_schema_binding(
-        &self,
-        id: SchemaId,
-        binding: SelectedSchema,
-    ) -> bool {
+    fn supports_schema_binding(&self, id: SchemaId, binding: SelectedSchema) -> bool {
         self.schema(id).is_some_and(|schema| {
             schema.contracts.iter().any(|contract| {
                 contract.contract_id == binding.contract_id
@@ -366,11 +362,13 @@ impl NegotiatedContract {
         schema_id: SchemaId,
         binding: SelectedSchema,
     ) -> Result<(), SchemaBindingError> {
-        if self.schemas.contains_key(&schema_id) {
-            return Err(SchemaBindingError::AlreadyBound);
+        match self.schemas.entry(schema_id) {
+            Entry::Occupied(_) => Err(SchemaBindingError::AlreadyBound),
+            Entry::Vacant(entry) => {
+                entry.insert(binding);
+                Ok(())
+            }
         }
-        self.schemas.insert(schema_id, binding);
-        Ok(())
     }
 
     pub fn schema_binding(&self, schema_id: SchemaId) -> Option<SelectedSchema> {
@@ -471,9 +469,13 @@ impl EstablishedNegotiation {
     pub const fn contract(&self) -> &NegotiatedContract {
         &self.contract
     }
+
+    pub(crate) fn into_parts(self) -> (ConnectionHandle, NegotiatedContract) {
+        (self.connection, self.contract)
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NegotiationAttempt {
     connection: ConnectionHandle,
     authority_offer: ValidatedOffer,
@@ -875,7 +877,7 @@ impl NegotiationManager {
         authority_offer: CompatibilityOffer,
         peer_offer: CompatibilityOffer,
     ) -> Result<(), NegotiationManagerError> {
-        if self.attempts.contains_key(&connection) {
+        if self.attempts.get(&connection).is_some() {
             return Err(NegotiationManagerError::ConnectionAlreadyNegotiating);
         }
         if self.attempts.len() >= self.limits.max_concurrent_attempts {
@@ -906,7 +908,8 @@ impl NegotiationManager {
         contract: NegotiatedContract,
         requirements: &NegotiationRequirements,
     ) -> Result<(), NegotiationManagerError> {
-        self.attempt_mut(connection)?.propose(contract, requirements)?;
+        self.attempt_mut(connection)?
+            .propose(contract, requirements)?;
         Ok(())
     }
 
@@ -915,9 +918,7 @@ impl NegotiationManager {
         connection: ConnectionHandle,
         contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationManagerError> {
-        Ok(self
-            .attempt_mut(connection)?
-            .validate_authority(contract)?)
+        Ok(self.attempt_mut(connection)?.validate_authority(contract)?)
     }
 
     pub fn validate_peer(
@@ -1023,18 +1024,23 @@ where
         key: K,
         value: V,
     ) -> Result<SemanticRegistrationOutcome, SemanticRegistrationError> {
-        if let Some(existing) = self.entries.get(&key) {
-            return if existing == &value {
-                Ok(SemanticRegistrationOutcome::AlreadyRegistered)
-            } else {
-                Err(SemanticRegistrationError::ContradictoryRegistration)
-            };
+        let at_capacity = self.entries.len() >= self.max_entries.get();
+        match self.entries.entry(key) {
+            Entry::Occupied(entry) => {
+                if entry.get() == &value {
+                    Ok(SemanticRegistrationOutcome::AlreadyRegistered)
+                } else {
+                    Err(SemanticRegistrationError::ContradictoryRegistration)
+                }
+            }
+            Entry::Vacant(entry) => {
+                if at_capacity {
+                    return Err(SemanticRegistrationError::CapacityExceeded);
+                }
+                entry.insert(value);
+                Ok(SemanticRegistrationOutcome::Inserted)
+            }
         }
-        if self.entries.len() >= self.max_entries.get() {
-            return Err(SemanticRegistrationError::CapacityExceeded);
-        }
-        self.entries.insert(key, value);
-        Ok(SemanticRegistrationOutcome::Inserted)
     }
 
     pub fn len(&self) -> usize {
@@ -1293,7 +1299,7 @@ mod tests {
         let offer_limits = OfferLimits::default();
         let reservation = offer_limits.max_attempt_reservation().unwrap();
         let manager_limits = NegotiationManagerLimits {
-            max_concurrent_attempts: 1,
+            max_concurrent_attempts: 2,
             max_aggregate_accounted_bytes: reservation,
         };
         let mut manager = NegotiationManager::new(offer_limits, manager_limits).unwrap();
@@ -1303,6 +1309,25 @@ mod tests {
             .unwrap();
         assert_eq!(manager.active_attempts(), 1);
         assert_eq!(manager.reserved_bytes(), reservation);
+        assert_eq!(
+            manager.start(ConnectionHandle::new(2), authority, peer),
+            Err(NegotiationManagerError::AggregateLimitExceeded)
+        );
+    }
+
+    #[test]
+    fn manager_also_bounds_attempt_count() {
+        let offer_limits = OfferLimits::default();
+        let reservation = offer_limits.max_attempt_reservation().unwrap();
+        let manager_limits = NegotiationManagerLimits {
+            max_concurrent_attempts: 1,
+            max_aggregate_accounted_bytes: reservation * 2,
+        };
+        let mut manager = NegotiationManager::new(offer_limits, manager_limits).unwrap();
+        let (authority, peer) = common_offers();
+        manager
+            .start(ConnectionHandle::new(1), authority.clone(), peer.clone())
+            .unwrap();
         assert_eq!(
             manager.start(ConnectionHandle::new(2), authority, peer),
             Err(NegotiationManagerError::AttemptLimitExceeded)
