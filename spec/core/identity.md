@@ -28,7 +28,7 @@ The mechanism used to satisfy that requirement is not defined by this revision. 
 
 ## Participant identity
 
-A **ParticipantId** identifies one admitted participant within one session.
+A **ParticipantId** identifies one admitted participant membership within one session.
 
 ParticipantId uniqueness is scoped by SessionId. Within a session, the authority MUST NOT assign the same ParticipantId to two distinct participant memberships, and a retired ParticipantId MUST NOT be reused before that session ends.
 
@@ -41,7 +41,7 @@ A ParticipantId is distinct from:
 
 An application MAY use external authentication or account information when deciding which participant is being admitted, but that external identity does not become RunenNet ParticipantId authority merely by being supplied to admission.
 
-A ParticipantId MAY remain the same when an authorized replacement transport connection is bound to the same participant according to the session lifecycle rules.
+ParticipantId lifetime follows participant-membership lifetime. Connection loss, retention, and authorized connection replacement are owned by [Session and authority lifecycle](../session/lifecycle.md).
 
 ## Network entity identity
 
