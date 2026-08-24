@@ -945,7 +945,6 @@ impl<S, D> AuthorityReplicationSession<S, D> {
             && self.retained_image_count() + pending_count <= self.limits.max_retained_images()
             && self.retained_state_bytes() + pending_target_state_bytes
                 <= self.limits.max_retained_state_bytes()
-            && self.emission_evidence_count() + pending_count
-                <= self.limits.max_emission_evidence()
+            && self.emission_evidence_count() + pending_count <= self.limits.max_emission_evidence()
     }
 }
