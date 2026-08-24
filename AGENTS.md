@@ -10,4 +10,4 @@ Do not create compatibility aliases, duplicate authorities, speculative crate sp
 
 RunenNet MUST remain independently usable without Runenwerk, a concrete ECS, engine plugins/schedules, rendering, or spatial frameworks.
 
-Before proposing acceptance, run the canonical validation defined by [TESTING.md](TESTING.md) once that gate is established, and review the exact changed head.
+Before proposing acceptance, run the canonical validation defined by [TESTING.md](TESTING.md) and review the exact changed head.
