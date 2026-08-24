@@ -11,3 +11,7 @@ Runenwerk is a downstream consumer of RunenNet, not its architectural host. Exis
 - [Roadmap](ROADMAP.md) — sequencing and acceptance gates.
 - [Repository testing](TESTING.md) — canonical mechanical validation.
 - [Documentation architecture](docs/documentation-architecture.md) — documentation ownership and dependency direction.
+
+## License
+
+RunenNet is available under the [GNU General Public License v3.0 only](LICENSE). A separate commercial license may be available from copyright holder(s) authorized to grant it; see [LICENSING.md](LICENSING.md).
