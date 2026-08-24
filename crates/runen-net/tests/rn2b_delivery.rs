@@ -1,4 +1,5 @@
-use std::collections::VecDeque;
+mod support;
+
 use std::num::NonZeroUsize;
 
 use runen_net::delivery::{
@@ -10,6 +11,8 @@ use runen_net::delivery::{
 };
 use runen_net::identity::{ConnectionHandle, SessionId};
 use runen_net::session::{Session, SessionLimits};
+
+use support::FaultStage;
 
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
@@ -78,102 +81,6 @@ fn exposed(endpoint: &mut DeliveryEndpoint, flow: DeliveryFlowKey) -> Vec<Vec<u8
         output.push(message.payload().to_vec());
     }
     output
-}
-
-#[derive(Debug)]
-struct Staged {
-    source: DeliveryFlowKey,
-    target: DeliveryFlowKey,
-    transfer: DeliveryTransfer,
-}
-
-#[derive(Debug)]
-struct FaultStage {
-    max_messages: usize,
-    max_bytes: usize,
-    bytes: usize,
-    queue: VecDeque<Staged>,
-}
-
-impl FaultStage {
-    fn new(max_messages: usize, max_bytes: usize) -> Self {
-        Self {
-            max_messages,
-            max_bytes,
-            bytes: 0,
-            queue: VecDeque::new(),
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.queue.len()
-    }
-
-    fn has_capacity(&self, bytes: usize) -> bool {
-        self.queue.len() < self.max_messages
-            && self
-                .bytes
-                .checked_add(bytes)
-                .is_some_and(|total| total <= self.max_bytes)
-    }
-
-    fn take(
-        &mut self,
-        source: &mut DeliveryEndpoint,
-        source_flow: DeliveryFlowKey,
-        target_flow: DeliveryFlowKey,
-    ) -> bool {
-        let Some(preview) = source.peek_outbound(source_flow).unwrap() else {
-            return false;
-        };
-        if !self.has_capacity(preview.payload_len()) {
-            return false;
-        }
-
-        let transfer = source
-            .commit_outbound_custody(source_flow, preview.accepted_index())
-            .unwrap();
-        self.bytes += transfer.payload_len();
-        self.queue.push_back(Staged {
-            source: source_flow,
-            target: target_flow,
-            transfer,
-        });
-        true
-    }
-
-    fn duplicate(&mut self, index: usize) -> bool {
-        let Some(staged) = self.queue.get(index) else {
-            return false;
-        };
-        if !self.has_capacity(staged.transfer.payload_len()) {
-            return false;
-        }
-
-        let copy = Staged {
-            source: staged.source,
-            target: staged.target,
-            transfer: staged.transfer.clone(),
-        };
-        self.bytes += copy.transfer.payload_len();
-        self.queue.push_back(copy);
-        true
-    }
-
-    fn swap(&mut self, first: usize, second: usize) {
-        self.queue.swap(first, second);
-    }
-
-    fn remove(&mut self, index: usize) -> Staged {
-        let staged = self.queue.remove(index).unwrap();
-        self.bytes -= staged.transfer.payload_len();
-        staged
-    }
-
-    fn deliver(&mut self, index: usize, target: &mut DeliveryEndpoint) -> ReceiveOutcome {
-        let staged = self.remove(index);
-        target.receive(staged.target, staged.transfer).unwrap()
-    }
 }
 
 #[test]
@@ -502,7 +409,7 @@ fn reliable_receiver_pressure_and_custody_loss_are_terminal() {
     source.submit(custody_flow, b"critical".to_vec()).unwrap();
     let mut custody_stage = FaultStage::new(1, 16);
     assert!(custody_stage.take(&mut source, custody_flow, target_flow));
-    custody_stage.remove(0);
+    custody_stage.drop_at(0);
     let termination = source.fail_reliable_custody(custody_flow).unwrap();
     assert_eq!(
         termination.reason,
@@ -546,10 +453,10 @@ fn unreliable_faults_preserve_unordered_and_sequenced_semantics() {
     for _ in 0..3 {
         stage.take(&mut source, unordered_source, unordered_target);
     }
-    stage.remove(0);
+    stage.drop_at(0);
     assert!(stage.duplicate(0));
     stage.swap(0, 1);
-    while stage.len() > 0 {
+    for _ in 0..3 {
         let outcome = stage.deliver(0, &mut target);
         assert_eq!(
             outcome,
@@ -586,7 +493,7 @@ fn unreliable_faults_preserve_unordered_and_sequenced_semantics() {
     for _ in 0..3 {
         stage.take(&mut source, sequenced_source, sequenced_target);
     }
-    stage.remove(1);
+    stage.drop_at(1);
     stage.swap(0, 1);
     stage.deliver(0, &mut target);
     let newest = target.poll_exposure(sequenced_target).unwrap().unwrap();
