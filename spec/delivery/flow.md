@@ -2,20 +2,20 @@
 
 Status: **provisional incomplete normative**
 
-This document owns the initial RunenNet delivery-flow lifetime, message submission/acceptance/exposure model, and delivery modes. Identity vocabulary is defined by [Core identity and time](../core/identity.md). Session membership and connection binding are defined by [Session and authority lifecycle](../session/lifecycle.md).
+This document owns the initial RunenNet delivery-flow lifetime, message submission/acceptance/exposure model, and delivery modes. Transport-connection, admission, participant-membership, and connection-binding semantics are defined by [Session and authority lifecycle](../session/lifecycle.md).
 
 ## Scope
 
 This revision defines:
 
-- unidirectional delivery flows;
-- flow lifetime relative to one current participant connection binding;
+- unidirectional delivery flows over one transport-connection lifetime;
+- delivery flows that may exist before or after participant admission;
 - message submission, acceptance, rejection, and receiver exposure;
 - `ReliableOrdered`, `UnreliableUnordered`, and `UnreliableSequenced` delivery modes;
 - terminal flow failure when an accepted reliable guarantee can no longer be upheld;
 - transport-realization requirements that prevent silent semantic downgrade.
 
-Resource limits and pressure policy, wire flow identifiers, serialization, packetization, fragmentation algorithms, bandwidth priority, deadlines, keyed supersession, replication policy, input buffering, and reconnect recovery are not defined by this revision.
+Resource limits and pressure policy, admission authorization, wire flow identifiers, serialization, packetization, fragmentation algorithms, bandwidth priority, deadlines, keyed supersession, replication policy, input buffering, and reconnect recovery are not defined by this revision.
 
 ## Message unit
 
@@ -27,30 +27,39 @@ This document does not define the maximum accepted message size.
 
 ## Delivery flow
 
-A **delivery flow** is one unidirectional semantic message-delivery domain within one SessionId and one current authorized participant connection binding.
+A **delivery flow** is one unidirectional semantic message-delivery domain established over one transport-connection lifetime.
 
-In the initial client/server model, a flow direction is either:
+A delivery flow has one sending endpoint and one receiving endpoint for its lifetime. Flow direction is therefore sender to receiver; the two directions of one transport connection are separate delivery-flow domains.
 
-- authority to one Bound participant; or
-- one Bound participant to the authority.
-
-A delivery flow is not a transport connection, QUIC stream, QUIC DATAGRAM context, socket, executor task, or engine queue. A realization MAY map one delivery flow onto one or more transport-native mechanisms only if the resulting behavior conforms to the flow's selected delivery mode.
+A delivery flow is not the transport connection itself, a transport connection identifier, QUIC stream, QUIC DATAGRAM context, socket, executor task, or engine queue. A realization MAY map one delivery flow onto one or more transport-native mechanisms only if the resulting behavior conforms to the flow's selected delivery mode.
 
 Different delivery flows are independent ordering and sequencing domains. Ordering or sequencing in one flow does not constrain exposure in another flow.
 
 The concrete representation used to distinguish delivery flows is not defined by this revision.
 
+## Admission and authorization are separate
+
+A delivery flow MAY exist on an established transport connection before participant admission. This permits transport-independent control and admission protocols to use the same delivery semantics without first inventing a participant identity.
+
+Creating a delivery flow, accepting a message on it, or exposing a message from it does not create participant membership and does not by itself authorize participant traffic.
+
+After admission, whether traffic received on a connection may be interpreted as one participant's traffic remains governed by the current authorized connection binding in the session lifecycle specification.
+
+A flow MAY therefore carry pre-admission control traffic, admitted participant traffic, authority traffic, or other protocol traffic whose meaning is owned by a later specification. Delivery mode does not determine that meaning or authorization.
+
 ## Flow establishment and lifetime
 
-A delivery flow exists only while its participant has the current authorized connection binding required by the session lifecycle specification.
+A delivery flow may be established only while its underlying transport connection exists.
 
 The flow's direction and delivery mode are fixed for that flow lifetime. They MUST be selected before any message on the flow is accepted for delivery.
 
-When that connection binding ends, every delivery flow scoped to that binding terminates. An authorized replacement connection creates new delivery-flow lifetimes even when the same retained ParticipantId is rebound.
+When the underlying transport connection ends, every delivery flow established over that connection terminates.
 
-Accepted messages from a terminated flow MUST NOT be silently transferred to a replacement flow. A later recovery specification may define explicit application-level recovery or resubmission without changing this rule.
+An authorized replacement transport connection creates new delivery-flow lifetimes. Existing flow acceptance order and sequence state do not transfer automatically to the replacement connection, even when the same retained participant membership is later rebound.
 
-A flow MAY also terminate before binding loss when its realization reports that the selected delivery contract can no longer be upheld.
+Accepted messages from a terminated flow MUST NOT be silently transferred to a flow on a replacement connection. A later recovery specification may define explicit application-level recovery or resubmission without changing this rule.
+
+A flow MAY also terminate before its transport connection ends when its realization reports that the selected delivery contract can no longer be upheld.
 
 Flow termination MUST be observable to the host. The concrete error type and public API representation are not defined by this revision.
 
@@ -69,7 +78,9 @@ A rejected submission MUST NOT consume the delivery sequence assigned to accepte
 
 This document does not define rejection reasons.
 
-**Exposure** occurs when the receiving RunenNet delivery layer makes one complete accepted message available to the receiving host/session semantics.
+**Exposure** occurs when the receiving RunenNet delivery layer makes one complete accepted message available to the receiving protocol/host layer.
+
+Exposure does not imply that the message is semantically valid, admitted, authorized, or accepted by a higher protocol layer.
 
 Transport receipt, transport acknowledgement, packet acknowledgement, byte reassembly, and internal queue insertion are not by themselves exposure.
 
@@ -89,7 +100,7 @@ An accepted `ReliableOrdered` message MUST NOT be intentionally discarded, evict
 
 If the implementation determines that it can no longer uphold these requirements, it MUST terminate the flow with an observable terminal failure. Such termination may leave accepted messages unexposed; those messages MUST NOT be represented as successfully delivered.
 
-`ReliableOrdered` therefore does not promise successful eventual exposure across connection loss, process failure, session closure, or another terminal flow failure.
+`ReliableOrdered` therefore does not promise successful eventual exposure across connection loss, process failure, or another terminal flow failure.
 
 ### UnreliableUnordered
 
@@ -141,10 +152,10 @@ Transport-native ordering does not define RunenNet flow ordering. If a realizati
 
 ## Flow termination and connection replacement
 
-Connection loss, connection closure, membership termination, or session closure terminates affected flows according to the session lifecycle specification.
+Transport connection loss or closure terminates every flow established over that connection.
 
 For `ReliableOrdered`, termination with accepted but unexposed messages is an observable terminal delivery failure for those messages; they are not silently considered delivered.
 
 For unreliable modes, flow termination may leave accepted messages unexposed without per-message delivery failure because loss is already permitted by the mode. The flow termination itself remains observable.
 
-A new connection binding does not continue the sequence or acceptance order of a terminated flow. Any later recovery protocol that reconstructs higher-level state must do so explicitly above these flow lifetimes.
+A new transport connection does not continue the sequence or acceptance order of a terminated flow. Any later recovery protocol that reconstructs higher-level state must do so explicitly above these flow lifetimes.
