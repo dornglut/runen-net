@@ -138,7 +138,9 @@ impl Session {
     }
 
     pub fn membership_state(&self, participant: ParticipantId) -> Option<MembershipState> {
-        self.memberships.get(&participant).map(|record| record.state)
+        self.memberships
+            .get(&participant)
+            .map(|record| record.state)
     }
 
     pub fn participant_for_connection(
@@ -191,6 +193,7 @@ impl Session {
         connection: ConnectionHandle,
         policy: RetentionPolicy,
     ) -> Result<ConnectionLossOutcome, SessionError> {
+        self.require_open()?;
         let state = self
             .memberships
             .get(&participant)
@@ -288,6 +291,7 @@ impl Session {
         &mut self,
         new_value: u64,
     ) -> Result<Vec<ParticipantId>, SessionError> {
+        self.require_open()?;
         if new_value < self.recovery_clock {
             return Err(SessionError::RecoveryClockRegression);
         }
@@ -740,6 +744,14 @@ mod tests {
                 ParticipantId::new(6),
                 negotiation.established(second_connection).unwrap(),
             ),
+            Err(SessionError::Closed)
+        );
+        assert_eq!(
+            session.connection_lost(participant, connection, RetentionPolicy::Terminate),
+            Err(SessionError::Closed)
+        );
+        assert_eq!(
+            session.advance_recovery_clock(1),
             Err(SessionError::Closed)
         );
     }
