@@ -44,23 +44,23 @@ Refine the engine-independent user API around the proven core and production tra
 
 **Gate:** ordinary standalone use is coherent and documented without Runenwerk-specific concepts, while advanced integrations retain explicit host/transport escape hatches.
 
-## RN7 — Runenwerk clean cutover
+## RN7 — Migration semantic closure
 
-Implement downstream Runenwerk/RunenECS integration against the accepted standalone framework surface, switch Runenwerk to RunenNet authority, and delete the old engine-owned networking semantic crates/state.
+Audit the networking behavior still relied on by Runenwerk after the standalone core is established and close every semantic capability required for a clean cutover through independent RunenNet authority. Expected candidates include prediction/reconciliation, interest/relevancy budgeting, reconnect/history recovery, and related diagnostics, but the accepted migration inventory determines the actual scope.
 
-**Gate:** dependency direction is one-way from Runenwerk to RunenNet; the engine integration does not redefine framework semantics; no forwarding crate, duplicate protocol authority, or compatibility shim remains.
+**Gate:** every Runenwerk networking capability that must survive cutover either has an accepted RunenNet semantic owner and implementation or is explicitly retired by accepted Runenwerk product authority; no required behavior depends on keeping the old semantic core alive.
 
-## RN8 — Advanced semantics
+## RN8 — Runenwerk clean cutover
 
-Add prediction/reconciliation, interest/relevancy budgeting, recovery/history features, lag compensation, or related capabilities only through separately accepted semantic work.
+Implement downstream Runenwerk/RunenECS integration against the accepted standalone framework surface and migration-closed semantics, switch Runenwerk to RunenNet authority, and delete the old engine-owned networking semantic crates/state.
 
-**Gate:** each feature composes with existing profiles without weakening core semantics or host independence.
+**Gate:** dependency direction is one-way from Runenwerk to RunenNet; the engine integration does not redefine framework semantics; no forwarding crate, duplicate protocol authority, compatibility shim, or required legacy semantic implementation remains.
 
-## RN9 — Maturity
+## RN9 — Maturity and post-cutover extensions
 
-Add fuzzing, benchmarks, compatibility/version policy, ecosystem hardening, and additional transports only when independent demand demonstrates the need.
+Add fuzzing, benchmarks, compatibility/version policy, ecosystem hardening, lag compensation or other new semantics, and additional transports only through separately accepted work justified by independent framework demand.
 
-**Gate:** pre-1.0 stability criteria are explicit and independently verifiable.
+**Gate:** pre-1.0 stability criteria are explicit and independently verifiable; extensions compose without weakening accepted core semantics or host independence.
 
 ## Sequencing rule
 
