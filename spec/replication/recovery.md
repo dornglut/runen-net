@@ -61,16 +61,21 @@ At minimum the policy MUST bound:
 
 The authority MUST additionally impose finite session-level aggregate bounds on:
 
-- active and retained replication-lineage state;
+- active plus retained replication-lineage count;
+- active and retained replication-lineage state bytes;
 - retained committed state-image count;
 - retained committed state bytes;
 - emitted-snapshot evidence entries.
 
-The client MUST impose finite aggregate replication-state bounds across all active session/lineage state it can hold concurrently.
+The client MUST impose finite aggregate bounds on:
 
-Any additional RunenNet-owned baseline cache, reconstruction cache, candidate-state buffer, emitted-cursor registry, or recovery queue that can grow from peer activity MUST have an explicit finite bound or be covered directly by a bound above.
+- concurrently active or retained replication-lineage count;
+- replication-state bytes across all such lineages;
+- retained committed state-image count and bytes across all such lineages.
 
-An implementation-defined byte-accounting method MAY be used for decoded/host-neutral state images whose semantic representation has no normative byte layout. When used, the implementation MUST document the accounting basis and MUST apply it consistently for admission and eviction decisions. The accounting basis MUST NOT permit peer-influenced storage to grow without a finite enforced bound.
+Any additional RunenNet-owned baseline cache, reconstruction cache, candidate-state buffer, emitted-cursor registry, recovery queue, or per-lineage metadata structure that can grow from peer activity MUST have an explicit finite bound or be covered directly by a bound above.
+
+An implementation-defined byte-accounting method MAY be used for decoded or host-neutral state images whose semantic representation has no normative byte layout. When used, the implementation MUST document the accounting basis, MUST apply it consistently for admission and eviction decisions, and MUST include all RunenNet-owned memory materially attributable to the bounded state rather than only encoded payload bytes. The accounting basis MUST NOT permit peer-influenced storage to grow without a finite enforced bound.
 
 Exact numeric defaults are not defined by this revision.
 
@@ -196,13 +201,25 @@ A **recovery generation** identifies one authority-side attempt to re-establish 
 
 Recovery generation is scoped to one replication lineage. Its concrete representation and wire encoding are not defined by this revision; it may exist only in authority-side semantic state and emitted-snapshot evidence.
 
+Each recovery generation records a **start cursor watermark** equal to the greatest ReplicationCursor previously emitted for that lineage before the generation began, or absence when none has ever been emitted.
+
 A new recovery generation MUST begin whenever authority state transitions from DeltaEligible to FullSnapshotRequired.
 
-An authorized connection replacement MUST begin a new recovery generation even if the lineage was already FullSnapshotRequired. This invalidates older recovery-full candidates for the purpose of clearing recovery on the replacement connection.
+An authorized connection replacement MUST begin a new recovery generation even if the lineage was already FullSnapshotRequired. The new generation's start cursor watermark is taken at that replacement boundary.
 
-Other events that occur while already FullSnapshotRequired MAY update or enrich the reason without beginning another recovery generation unless they explicitly invalidate all recovery-full candidates already emitted in the current generation.
+A repeated recovery demand, baseline-unavailable observation, or retry while already FullSnapshotRequired does not begin another recovery generation in this revision. Such events MAY update diagnostics or reason detail and MAY cause another full snapshot to be emitted in the same generation.
 
-A conforming implementation MUST be able to determine whether a full snapshot acknowledgement refers to a full snapshot emitted in the current recovery generation.
+No other event begins a new recovery generation in this revision.
+
+A full snapshot qualifies to satisfy a recovery generation only if:
+
+- it is emitted while that generation is current;
+- authority emission evidence associates it with that generation; and
+- its ReplicationCursor is greater than the generation's start cursor watermark when a watermark exists.
+
+An older full snapshot MUST NOT be retrospectively reclassified, re-tagged, or merely retransmitted under the current generation to satisfy recovery completion.
+
+A conforming implementation MUST be able to determine whether a full-snapshot acknowledgement refers to a qualifying full snapshot from the current recovery generation.
 
 A delayed acknowledgement for a full snapshot emitted in an older recovery generation MAY still be interpreted by the consistency ACK rules as truthful confirmation of a committed cursor, but it MUST NOT by itself clear the current FullSnapshotRequired state.
 
@@ -212,25 +229,23 @@ While authority state is FullSnapshotRequired:
 
 - the authority MUST NOT emit a delta snapshot for that lineage;
 - it MAY emit one or more newer full snapshots;
-- each such recovery full snapshot MUST be associated in authority evidence with the current recovery generation;
+- each recovery full candidate MUST satisfy the current recovery-generation qualification rules above;
 - emitting or RN1B-accepting a full snapshot MUST NOT by itself clear FullSnapshotRequired;
-- delivery/exposure of a full snapshot without a qualifying Confirmed acknowledgement MUST NOT by itself clear FullSnapshotRequired.
-
-A full snapshot emitted while the authority is FullSnapshotRequired is a **recovery full snapshot** for the recovery generation in which it was emitted.
+- delivery or exposure of a full snapshot without a qualifying Confirmed acknowledgement MUST NOT by itself clear FullSnapshotRequired.
 
 The authority may return to DeltaEligible only after all of these hold:
 
 1. it receives a Confirmed acknowledgement for a full snapshot;
-2. authority emission evidence proves that full snapshot was emitted in the **current recovery generation**; and
+2. authority emission evidence proves that full snapshot qualifies for the **current recovery generation**; and
 3. the exact complete state image for that confirmed full cursor is still BaselineAvailable.
 
 The confirmed full cursor then becomes the DeltaEligible base cursor.
 
-If the current-generation recovery full state was evicted before its acknowledgement arrives, the acknowledgement can still become Confirmed according to consistency rules, but FullSnapshotRequired remains because the confirmed state is not BaselineAvailable. The authority must establish another usable full baseline.
+If the current-generation recovery full state was evicted before its acknowledgement arrives, the acknowledgement can still become Confirmed according to consistency rules, but FullSnapshotRequired remains because the confirmed state is not BaselineAvailable. The authority must establish another usable full baseline in the same current recovery generation.
 
 If an acknowledgement confirms a recovery full from an older generation, latest-confirmed state may advance according to the consistency specification, but the current recovery generation remains unsatisfied and no delta may be emitted until a qualifying current-generation full is confirmed and BaselineAvailable.
 
-This prevents “sent one full snapshot” or “received some old full ACK” from becoming false recovery completion after a newer recovery boundary.
+This prevents “sent one full snapshot,” “re-tagged an old full,” or “received some old full ACK” from becoming false recovery completion after a newer recovery boundary.
 
 ## Authority behavior while DeltaEligible
 
@@ -254,14 +269,6 @@ DuplicateConfirmation and StaleConfirmation do not change authority recovery sta
 FutureConfirmation does not change authority recovery state.
 
 UnverifiableConfirmation does not advance latest confirmed cursor and does not by itself require abandoning an already BaselineAvailable DeltaEligible cursor.
-
-## Recovery demand while already recovering
-
-A repeated client recovery demand while authority state is already FullSnapshotRequired does not by itself require a new recovery generation. The authority MAY resend or emit a newer full snapshot in the same generation.
-
-If the event carrying that recovery demand also establishes a new connection replacement or another semantic continuity break that invalidates recovery-full candidates from the current generation, the authority MUST begin a new generation according to the applicable rule.
-
-This avoids generation churn from ordinary retry signaling while preserving a hard boundary for connection replacement and other explicit continuity resets.
 
 ## Missing-base recovery is per lineage
 
@@ -300,17 +307,18 @@ A conforming implementation MUST make at least these replication-recovery outcom
 - authority DeltaEligible and its base cursor;
 - client FullSnapshotRequired and its reason class;
 - authority FullSnapshotRequired, its reason class, and current recovery generation identity sufficient for conformance comparison;
+- current recovery-generation start cursor watermark;
 - MissingBase;
 - malformed/reconstruction/commit delta failure;
 - baseline eviction;
-- recovery full snapshot emitted and its recovery generation;
+- qualifying recovery full snapshot emitted and its recovery generation;
 - recovery full snapshot committed on client;
 - recovery full acknowledgement Confirmed;
-- recovery full acknowledgement rejected for recovery completion because it belongs to an older generation;
+- recovery full acknowledgement rejected for recovery completion because it belongs to an older generation or fails the current-generation watermark rule;
 - Confirmed acknowledgement whose baseline is unavailable;
 - state-image resource failure.
 
-The exact public event, enum, or generation representation is not defined here.
+The exact public event, enum, generation representation, or byte-accounting representation is not defined here.
 
 ## Deferred recovery semantics
 
