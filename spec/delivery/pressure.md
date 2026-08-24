@@ -18,59 +18,73 @@ This revision defines:
 
 Bandwidth priority, send cadence, deadlines, application-keyed supersession, congestion-control algorithms, packet MTU discovery, and public configuration API shape are not defined by this revision.
 
-## Resource policy is explicit and finite
+## Pressure policy attachment
 
-Every delivery flow MUST operate under an explicit finite resource policy.
+Before a delivery flow accepts its first message, the implementation MUST attach an explicit finite resource policy to that flow.
 
-At minimum, a conforming realization MUST bound:
+The policy MUST define:
 
-- maximum bytes in one message presented to the delivery layer;
-- maximum locally queued/pending message count for one flow;
-- maximum locally queued/pending payload bytes for one flow.
+- maximum message bytes;
+- maximum locally queued/pending message count for the flow;
+- maximum locally queued/pending payload bytes for the flow;
+- the outbound pressure behavior for that flow;
+- the receiver pressure behavior for that flow.
 
-A conforming realization that maintains multiple flows for one current participant connection binding MUST also impose finite aggregate bounds on locally queued/pending message count and payload bytes attributable to that binding.
-
-Any additional RunenNet-owned staging queue, retry queue, reassembly buffer, transport-adapter queue, or pending-submission structure that can grow from local or remote message activity MUST have an explicit finite bound or be directly covered by one of the bounds above.
+Those limits and pressure behaviors MUST remain semantically stable for the flow lifetime. A realization MAY reduce internal transport capacity dynamically, but such a change does not authorize silent weakening of the attached RunenNet policy or delivery mode.
 
 Exact numeric defaults are not defined by this revision.
 
+## Per-binding aggregate bounds
+
+Every current participant connection binding MUST also have explicit finite aggregate bounds on locally queued/pending delivery message count and payload bytes across all of its flows.
+
+The aggregate bounds apply even when the binding currently has only one delivery flow.
+
+A realization MUST NOT evade aggregate bounds by creating additional delivery flows or transport-native streams for the same binding.
+
+Any additional RunenNet-owned staging queue, retry queue, reassembly buffer, transport-adapter queue, or pending-submission structure that can grow from local or remote message activity MUST have an explicit finite bound or be directly covered by a flow/binding bound above.
+
 ## Message-size validation
 
-A submission whose payload exceeds the flow's configured maximum message size MUST be rejected before delivery acceptance.
+A submission whose payload exceeds the flow's maximum message size MUST be rejected before delivery acceptance.
 
 Payload size MUST NOT cause the delivery mode to change.
 
-When an inbound framing or transport realization supplies a claimed message length, a conforming implementation MUST validate that length against the applicable finite limit before allocating storage proportional to the claimed length.
+When inbound framing or transport input supplies a claimed message length, a conforming implementation MUST validate that length against the applicable finite limit before allocating storage proportional to the claimed length.
 
 An inbound message that exceeds the applicable maximum MUST NOT be exposed. The later wire/protocol specification may define whether such input terminates a protocol session, terminates a flow, or is otherwise classified as a protocol violation; this document only requires bounded allocation and non-exposure.
 
-## Outbound pressure before acceptance
+## Outbound pressure behaviors
 
-When accepting a submitted message would exceed a per-flow or per-binding local queue/storage bound, the implementation MUST apply an explicit pressure outcome before accepting the new message, except where the selected unreliable eviction policy below deliberately frees capacity first.
+The initial outbound pressure behaviors are **RejectNew** and **EvictOldestUnreliable**.
 
-Every flow MUST support **RejectNew** pressure behavior:
+### RejectNew
+
+RejectNew is valid for every delivery mode.
+
+When accepting a submitted message would exceed a per-flow or per-binding local bound:
 
 - the new submission is rejected;
 - no delivery sequence is consumed for that rejected submission;
 - previously accepted messages are unaffected.
 
-A `ReliableOrdered` flow MUST NOT free capacity by discarding, evicting, superseding, or replacing an accepted reliable message. If capacity is unavailable, the new submission MUST remain unaccepted or be rejected according to the runtime's submission API; it MUST NOT be reported as accepted and then silently dropped because of local pressure.
+A `ReliableOrdered` flow MUST use RejectNew when local pressure prevents immediate acceptance. It MUST NOT free capacity by discarding, evicting, superseding, or replacing an accepted reliable message.
 
-This specification does not require a blocking or waiting submission API. If an implementation owns a queue of submissions waiting for capacity, that queue is itself subject to explicit finite bounds.
+This specification does not require a blocking or waiting submission API. A runtime MAY defer deciding a reliable submission until capacity exists, but any RunenNet-owned structure that stores deferred submissions is itself subject to explicit finite bounds and the message MUST remain unaccepted until the decision is made.
 
-## Optional unreliable eviction policy
+### EvictOldestUnreliable
 
-An unreliable flow MAY be configured with **EvictOldestUnreliable** instead of RejectNew as its local outbound queue-pressure policy.
+EvictOldestUnreliable is valid only for `UnreliableUnordered` and `UnreliableSequenced` flows.
 
 When a new submission would exceed a local bound under this policy, the implementation MAY discard the oldest locally pending accepted messages from the same unreliable flow until the new message fits or until no permitted eviction can make it fit.
 
 Each deliberate eviction MUST be classified as a local unreliable pressure drop. If sufficient capacity is obtained, the new submission may then be accepted normally. If sufficient capacity cannot be obtained, the new submission is rejected.
 
-`EvictOldestUnreliable` is valid only for `UnreliableUnordered` and `UnreliableSequenced` flows. It MUST NOT be used for `ReliableOrdered`.
+EvictOldestUnreliable MUST NOT evict accepted reliable messages or messages owned by another flow merely to admit the new submission.
 
-This pressure policy is FIFO queue eviction only. It does not define application-keyed latest-value supersession, semantic replacement, or cancellation.
+This behavior is FIFO queue eviction only. It does not define application-keyed latest-value supersession, semantic replacement, or cancellation.
 
-For `UnreliableSequenced`, discarding a locally pending message does not alter the receiver's most-recently-exposed sequence value. Receiver sequence behavior remains owned by the delivery-flow specification.
+For `UnreliableSequenced`, discarding a locally pending message does not alter the receiver's most-recently-exposed sequence value.
 
 ## Local custody after reliable acceptance
 
@@ -84,29 +98,47 @@ A stage MUST NOT report successful transfer merely because bytes were copied int
 
 This requirement does not imply that the sender can know remote application exposure before a flow ends. Reliable delivery remains conditional on an operational flow as defined by the delivery-flow specification.
 
-## Receiver pressure
+## Receiver pressure behaviors
 
-Receiver-side storage influenced by incoming traffic MUST remain within the finite policy bounds.
+The initial unreliable receiver pressure behaviors are **DropIncomingUnreliable** and **EvictOldestBufferedUnreliable**. A flow using an unreliable delivery mode MUST select one of them before accepting its first message.
 
-For `ReliableOrdered` traffic, receiver pressure MUST NOT silently discard an accepted/in-order message while leaving the flow operational. A conforming realization MUST instead apply bounded backpressure before accepting additional reliable data where the realization permits it, or terminate the affected flow/binding with an observable terminal pressure failure if the reliable obligation can no longer be preserved.
+Receiver-side storage influenced by incoming traffic MUST remain within the attached flow and binding bounds.
 
-For unreliable traffic, the receiver MAY discard a complete incoming message when local pressure prevents bounded admission. Such a deliberate local discard MUST be classified as a local unreliable pressure drop and the message MUST NOT be exposed.
+### Reliable receiver pressure
+
+For `ReliableOrdered` traffic, receiver pressure MUST NOT silently discard a received message while leaving the flow operational.
+
+A conforming realization MUST apply bounded backpressure before admitting additional reliable data where the realization permits it, or terminate the affected flow/binding with an observable terminal pressure failure if the reliable obligation can no longer be preserved.
+
+Reliable receiver pressure MUST NOT use either unreliable receiver-drop behavior below.
+
+### DropIncomingUnreliable
+
+When a complete incoming unreliable message cannot be admitted without exceeding a local bound, the receiver discards that incoming message and does not expose it.
+
+The discard MUST be classified as a local unreliable pressure drop.
+
+### EvictOldestBufferedUnreliable
+
+When a complete incoming unreliable message cannot be admitted without exceeding a local bound, the receiver MAY discard the oldest buffered, not-yet-exposed message from the same unreliable flow until the incoming message fits or until no permitted eviction can make it fit.
+
+Each eviction MUST be classified as a local unreliable pressure drop. If sufficient capacity still cannot be obtained, the incoming message is also discarded and classified as a local unreliable pressure drop.
+
+This behavior MUST NOT evict reliable messages or messages from another flow.
 
 For `UnreliableSequenced`, a message discarded before exposure because of receiver pressure does not advance the most-recently-exposed sequence value.
-
-The specific choice between dropping a newly arrived unreliable message and evicting an older buffered unreliable message is an implementation/configuration policy unless a later profile standardizes it. Whatever policy is selected MUST be bounded and MUST NOT be silently applied to reliable traffic.
 
 ## Aggregate pressure
 
 A message that fits its per-flow limits may still exceed the aggregate resource budget for the current participant connection binding.
 
-Aggregate pressure MUST apply the same reliability distinction as per-flow pressure:
+Aggregate pressure MUST preserve the same reliability distinction:
 
 - accepted reliable messages MUST NOT be silently discarded to satisfy the aggregate bound;
 - new reliable submissions may remain unaccepted or be rejected;
-- unreliable traffic may be rejected or deliberately dropped only according to an explicit bounded unreliable policy.
+- unreliable submissions/received messages may be rejected or deliberately dropped only according to their selected explicit pressure behavior.
 
-A realization MUST NOT evade aggregate bounds by creating additional delivery flows or transport-native streams for the same binding.
+If a flow-local unreliable eviction cannot resolve aggregate pressure without evicting another flow's data, the new message MUST be rejected or dropped rather than implicitly changing another flow's policy.
 
 ## Adapter and transport buffering
 
@@ -114,9 +146,9 @@ Transport adapters MUST configure or wrap transport-native queues and buffers so
 
 A transport adapter MUST NOT use payload size or queue pressure to switch a message to a different delivery mode.
 
-A transport-native API that can deliberately discard previously queued data under local pressure MUST NOT be used as an unobservable substitute for the configured RunenNet pressure policy.
+A transport-native API that can deliberately discard previously queued data under local pressure MUST NOT be used as an unobservable substitute for the selected RunenNet pressure behavior.
 
-For unreliable modes, transport/network loss that is intrinsic to the selected unreliable realization remains permitted by the delivery mode. Deliberate local RunenNet/adapter pressure drops that are under implementation control remain subject to the explicit pressure policy and observability requirements in this document.
+For unreliable modes, transport/network loss intrinsic to the selected unreliable realization remains permitted by the delivery mode. Deliberate local RunenNet/adapter pressure drops under implementation control remain subject to the explicit pressure behavior and observability requirements in this document.
 
 For reliable mode, any transport or adapter condition that would require loss of an accepted message MUST instead preserve bounded backpressure or cause observable terminal flow failure.
 
@@ -128,6 +160,7 @@ A conforming implementation MUST make at least the following outcome classes dis
 - submission rejected because the message exceeds its size limit;
 - submission rejected because of local pressure;
 - accepted unreliable message deliberately dropped by local pressure;
+- received unreliable message deliberately dropped by local pressure;
 - terminal flow failure because a reliable delivery obligation could not be preserved.
 
 This revision does not require those outcomes to be public per-message events, wire messages, or a particular Rust enum. Aggregate diagnostics are sufficient where the individual message cannot be identified, provided deterministic conformance tests can distinguish the required behavior.
