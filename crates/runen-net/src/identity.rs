@@ -119,7 +119,10 @@ mod tests {
         let third = NetworkEntityId::new(13);
 
         assert_eq!(registry.claim(first), Ok(()));
-        assert_eq!(registry.claim(first), Err(IncarnationClaimError::AlreadyUsed));
+        assert_eq!(
+            registry.claim(first),
+            Err(IncarnationClaimError::AlreadyUsed)
+        );
         assert_eq!(registry.claim(second), Ok(()));
         assert_eq!(
             registry.claim(third),
