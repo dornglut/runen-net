@@ -25,7 +25,7 @@ Peer-to-peer, multi-authority, authority handoff, and preservation of one Sessio
 
 When establishing a new session lifetime, the authority MUST supply the SessionId for that lifetime. The SessionId MUST satisfy the identity and non-confusion requirements defined by the core identity specification.
 
-When creating a new participant membership, the authority MUST assign its ParticipantId. When assigning a NetworkEntityId for a session-scoped replicated entity, the authority MUST assign that identity. Both assignments MUST satisfy the applicable session-scoped uniqueness and non-reuse requirements defined by the core identity specification.
+When creating a new participant membership, the authority MUST assign its ParticipantId. When assigning a NetworkEntityId for a session-scoped network entity, the authority MUST assign that identity. Both assignments MUST satisfy the applicable session-scoped uniqueness and non-reuse requirements defined by the core identity specification.
 
 The generation algorithms and concrete representations of these identifiers are not defined by this document.
 
@@ -50,7 +50,7 @@ Graceful drain/shutdown phases may be introduced by a later runtime/profile spec
 
 A **transport connection** is one realized communication relationship supplied by a transport/runtime adapter.
 
-Transport connection establishment does not create a RunenNet participant membership and does not by itself authorize application, input, replication, or authority traffic.
+Transport connection establishment MUST NOT create a RunenNet participant membership and MUST NOT by itself authorize participant or authority traffic.
 
 A transport adapter MAY expose a local opaque connection handle. Its representation and native transport identifiers are implementation concerns. The handle is used only to associate transport events with the semantic binding described below.
 
@@ -81,7 +81,7 @@ The initial client/server profile permits at most one current transport connecti
 
 A participant with a current authorized binding is **Bound**. A retained membership without a current connection binding is **Unbound**.
 
-Only a Bound participant may originate traffic that the session interprets as that participant's traffic.
+A session MUST interpret participant-originated traffic as belonging to a participant only while that participant is Bound to the transport connection from which the traffic was received.
 
 A participant membership ends when:
 
@@ -95,14 +95,14 @@ After membership ends, that membership MUST NOT be rebound. ParticipantId reuse 
 
 Loss or closure of the currently bound transport connection MUST remove that connection binding.
 
-Connection loss does not implicitly transfer authority and MUST NOT cause another connection to inherit the participant identity without an explicit authorized admission or rebind decision.
+Connection loss MUST NOT implicitly transfer authority and MUST NOT cause another connection to inherit the participant identity without an explicit authorized admission or rebind decision.
 
 A session policy MUST select one of these membership outcomes after binding loss:
 
 - **Terminate** — the participant membership ends when the binding is lost; or
 - **RetainForRecovery** — the participant becomes Unbound under an explicit bounded retention policy.
 
-RetainForRecovery MUST have a finite bound expressed by host/runtime policy. An Unbound participant cannot originate participant traffic and MUST NOT retain unbounded remotely influenced resources solely because the connection disappeared.
+RetainForRecovery MUST have a finite bound expressed by host/runtime policy. An Unbound participant MUST NOT be treated as the originator of participant traffic and MUST NOT retain unbounded remotely influenced resources solely because the connection disappeared.
 
 This revision defines membership retention only. The protocol for reconnect attempts, proof of continuity, state recovery, baseline recovery, and retry timing is not defined here.
 
