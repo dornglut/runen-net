@@ -36,7 +36,7 @@ fn nz(value: usize) -> NonZeroUsize {
 }
 
 fn accounted(state: &CounterState) -> AccountedState<CounterState> {
-    AccountedState::new(state.clone(), std::mem::size_of::<CounterState>())
+    AccountedState::new(state.clone(), size_of::<CounterState>())
 }
 
 fn protocol_contract() -> ProtocolContract {
@@ -281,7 +281,7 @@ fn run() {
                         CounterState {
                             value: base.value + *delta,
                         },
-                        std::mem::size_of::<CounterState>(),
+                        size_of::<CounterState>(),
                     ))
                 },
                 |state| {
