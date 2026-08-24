@@ -11,5 +11,7 @@ Implementation packages, Runenwerk behavior, roadmap items, and research records
 - [Session and authority lifecycle](session/lifecycle.md)
 - [Delivery flow semantics](delivery/flow.md)
 - [Delivery pressure and resource policy](delivery/pressure.md)
+- [Authoritative replication consistency](replication/consistency.md)
+- [Replication retention and full-snapshot recovery](replication/recovery.md)
 
 Semantic areas not linked from this index are not defined by this revision.
