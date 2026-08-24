@@ -1,4 +1,4 @@
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 use std::hash::Hash;
 use std::num::NonZeroUsize;
 
@@ -117,10 +117,7 @@ impl CompatibilityOffer {
         }
     }
 
-    pub fn validate(
-        self,
-        limits: &OfferLimits,
-    ) -> Result<ValidatedOffer, OfferValidationError> {
+    pub fn validate(self, limits: &OfferLimits) -> Result<ValidatedOffer, OfferValidationError> {
         limits.validate()?;
 
         if self.protocols.is_empty() {
@@ -475,8 +472,8 @@ impl EstablishedNegotiation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NegotiationAttempt {
+#[derive(Debug, PartialEq, Eq)]
+struct NegotiationAttempt {
     connection: ConnectionHandle,
     authority_offer: ValidatedOffer,
     peer_offer: ValidatedOffer,
@@ -488,7 +485,7 @@ pub struct NegotiationAttempt {
 }
 
 impl NegotiationAttempt {
-    pub fn new(
+    fn new(
         connection: ConnectionHandle,
         authority_offer: CompatibilityOffer,
         peer_offer: CompatibilityOffer,
@@ -525,11 +522,7 @@ impl NegotiationAttempt {
         })
     }
 
-    pub const fn connection(&self) -> ConnectionHandle {
-        self.connection
-    }
-
-    pub fn accounted_bytes(&self) -> usize {
+    fn accounted_bytes(&self) -> usize {
         self.authority_offer
             .accounted_bytes()
             .saturating_add(self.peer_offer.accounted_bytes())
@@ -541,7 +534,7 @@ impl NegotiationAttempt {
             )
     }
 
-    pub fn status(&self) -> NegotiationStatus {
+    fn status(&self) -> NegotiationStatus {
         if self.aborted {
             NegotiationStatus::Aborted
         } else if self.authority_validated && self.peer_validated {
@@ -556,7 +549,7 @@ impl NegotiationAttempt {
         }
     }
 
-    pub fn propose(
+    fn propose(
         &mut self,
         contract: NegotiatedContract,
         requirements: &NegotiationRequirements,
@@ -576,25 +569,25 @@ impl NegotiationAttempt {
         Ok(())
     }
 
-    pub fn validate_authority(
+    fn validate_authority(
         &mut self,
         contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationError> {
         self.validate_party(contract, true)
     }
 
-    pub fn validate_peer(
+    fn validate_peer(
         &mut self,
         contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationError> {
         self.validate_party(contract, false)
     }
 
-    pub fn abort(&mut self) {
+    fn abort(&mut self) {
         self.aborted = true;
     }
 
-    pub fn into_established(self) -> Result<EstablishedNegotiation, NegotiationError> {
+    fn into_established(self) -> Result<EstablishedNegotiation, NegotiationError> {
         if self.status() != NegotiationStatus::Established {
             return Err(if self.aborted {
                 NegotiationError::Aborted
@@ -664,7 +657,9 @@ impl NegotiationAttempt {
             if !self
                 .authority_offer
                 .supports_schema_binding(*schema_id, *binding)
-                || !self.peer_offer.supports_schema_binding(*schema_id, *binding)
+                || !self
+                    .peer_offer
+                    .supports_schema_binding(*schema_id, *binding)
             {
                 return Err(NegotiationError::InvalidSelection);
             }
@@ -891,12 +886,8 @@ impl NegotiationManager {
             return Err(NegotiationManagerError::AggregateLimitExceeded);
         }
 
-        let attempt = NegotiationAttempt::new(
-            connection,
-            authority_offer,
-            peer_offer,
-            self.offer_limits,
-        )?;
+        let attempt =
+            NegotiationAttempt::new(connection, authority_offer, peer_offer, self.offer_limits)?;
         self.attempts.insert(connection, attempt);
         self.reserved_bytes += self.per_attempt_reservation;
         Ok(())
@@ -1060,12 +1051,7 @@ mod tests {
         ProtocolContract::new(ProtocolId::new(1), ProtocolRevision::new(value))
     }
 
-    fn schema(
-        id: u128,
-        requirement: RequirementLevel,
-        contract: u128,
-        codec: u128,
-    ) -> SchemaOffer {
+    fn schema(id: u128, requirement: RequirementLevel, contract: u128, codec: u128) -> SchemaOffer {
         SchemaOffer::new(
             SchemaId::new(id),
             requirement,
@@ -1095,18 +1081,12 @@ mod tests {
         (
             offer(
                 protocol(1),
-                Some(CapabilityOffer::new(
-                    capability,
-                    RequirementLevel::Optional,
-                )),
+                Some(CapabilityOffer::new(capability, RequirementLevel::Optional)),
                 Some(schema(schema_id.get(), RequirementLevel::Optional, 10, 11)),
             ),
             offer(
                 protocol(1),
-                Some(CapabilityOffer::new(
-                    capability,
-                    RequirementLevel::Optional,
-                )),
+                Some(CapabilityOffer::new(capability, RequirementLevel::Optional)),
                 Some(schema(schema_id.get(), RequirementLevel::Optional, 10, 11)),
             ),
         )
@@ -1126,12 +1106,8 @@ mod tests {
 
     #[test]
     fn offer_validation_rejects_duplicate_and_empty_schema_entries() {
-        let duplicate_protocol = CompatibilityOffer::new(
-            vec![protocol(1), protocol(1)],
-            vec![],
-            vec![],
-            None,
-        );
+        let duplicate_protocol =
+            CompatibilityOffer::new(vec![protocol(1), protocol(1)], vec![], vec![], None);
         assert_eq!(
             duplicate_protocol.validate(&OfferLimits::default()),
             Err(OfferValidationError::DuplicateProtocolAlternative)
@@ -1159,12 +1135,8 @@ mod tests {
             max_protocols: 1,
             ..OfferLimits::default()
         };
-        let too_many = CompatibilityOffer::new(
-            vec![protocol(1), protocol(2)],
-            vec![],
-            vec![],
-            None,
-        );
+        let too_many =
+            CompatibilityOffer::new(vec![protocol(1), protocol(2)], vec![], vec![], None);
         assert_eq!(
             too_many.validate(&limits),
             Err(OfferValidationError::TooManyProtocolAlternatives)
@@ -1337,11 +1309,8 @@ mod tests {
     #[test]
     fn established_negotiation_is_extracted_from_the_connection_attempt() {
         let offer_limits = OfferLimits::default();
-        let mut manager = NegotiationManager::new(
-            offer_limits,
-            NegotiationManagerLimits::default(),
-        )
-        .unwrap();
+        let mut manager =
+            NegotiationManager::new(offer_limits, NegotiationManagerLimits::default()).unwrap();
         let connection = ConnectionHandle::new(44);
         let (authority, peer) = common_offers();
         manager.start(connection, authority, peer).unwrap();
