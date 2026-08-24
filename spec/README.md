@@ -9,5 +9,7 @@ Implementation packages, Runenwerk behavior, roadmap items, and research records
 - [Specification conventions](conventions.md)
 - [Core identity and time](core/identity.md)
 - [Session and authority lifecycle](session/lifecycle.md)
+- [Delivery flow semantics](delivery/flow.md)
+- [Delivery pressure and resource policy](delivery/pressure.md)
 
 Semantic areas not linked from this index are not defined by this revision.
