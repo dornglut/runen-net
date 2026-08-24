@@ -10,7 +10,7 @@ Establish the standalone product boundary, documentation authority, specificatio
 
 ## RN1 — Semantic contracts
 
-Specify the minimum transport-independent model required for implementation: identity, session/authority lifecycle, delivery contracts, replication baseline/acknowledgement/resynchronization semantics, resource-bound invariants, and conformance claims.
+Specify the minimum transport-independent model required for implementation: identity, session/authority lifecycle, delivery contracts, replication baseline/acknowledgement/resynchronization semantics, resource-bound invariants, protocol/schema compatibility, and conformance claims.
 
 **Gate:** implementation-critical invariants have normative owners; unresolved items are explicit rather than filled by implementation convenience.
 
@@ -28,7 +28,9 @@ Provide a plain-Rust authoritative client/server example using ordinary host-own
 
 ## RN4 — Fault and adversarial hardening
 
-Expand assurance around the accepted core under loss, reordering, duplication, saturation, malformed input, reconnect, retention pressure, and hostile resource claims. Harden implementation limits without postponing correctness rules that belong to RN1/RN2.
+Expand assurance around the accepted core under loss, reordering, duplication, saturation, malformed input, connection loss/replacement, retention pressure, and hostile resource claims. Harden implementation limits without postponing correctness rules that belong to RN1/RN2.
+
+This stage hardens the conservative connection-replacement/recovery semantics already accepted by RN1. Advanced reconnect/history continuity that avoids a fresh baseline is not implied here and remains migration/extension work unless separately specified.
 
 **Gate:** conformance and fault tests demonstrate bounded, deterministic recovery behavior across the supported failure model.
 
@@ -46,7 +48,7 @@ Refine the engine-independent user API around the proven core and production tra
 
 ## RN7 — Migration semantic closure
 
-Audit the networking behavior still relied on by Runenwerk after the standalone core is established and close every semantic capability required for a clean cutover through independent RunenNet authority. Expected candidates include prediction/reconciliation, interest/relevancy budgeting, reconnect/history recovery, and related diagnostics, but the accepted migration inventory determines the actual scope.
+Audit the networking behavior still relied on by Runenwerk after the standalone core is established and close every semantic capability required for a clean cutover through independent RunenNet authority. Expected candidates include prediction/reconciliation, interest/relevancy budgeting, advanced reconnect/history recovery, and related diagnostics, but the accepted migration inventory determines the actual scope.
 
 **Gate:** every Runenwerk networking capability that must survive cutover either has an accepted RunenNet semantic owner and implementation or is explicitly retired by accepted Runenwerk product authority; no required behavior depends on keeping the old semantic core alive.
 
