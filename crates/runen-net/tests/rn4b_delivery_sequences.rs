@@ -96,9 +96,7 @@ fn take_transfer(
         SubmissionOutcome::Accepted { accepted_index, .. } => accepted_index,
         other => panic!("expected accepted transfer, got {other:?}"),
     };
-    sender
-        .commit_outbound_custody(key, accepted_index)
-        .unwrap()
+    sender.commit_outbound_custody(key, accepted_index).unwrap()
 }
 
 #[test]
@@ -326,12 +324,20 @@ fn inbound_sequence_releases_accounting_on_terminal_pressure_and_unreliable_evic
     assert_accounting(&receiver, &[unreliable_in]);
 
     assert_eq!(
-        receiver.poll_exposure(unreliable_in).unwrap().unwrap().payload(),
+        receiver
+            .poll_exposure(unreliable_in)
+            .unwrap()
+            .unwrap()
+            .payload(),
         b"b"
     );
     assert_accounting(&receiver, &[unreliable_in]);
     assert_eq!(
-        receiver.poll_exposure(unreliable_in).unwrap().unwrap().payload(),
+        receiver
+            .poll_exposure(unreliable_in)
+            .unwrap()
+            .unwrap()
+            .payload(),
         b"c"
     );
     assert_accounting(&receiver, &[unreliable_in]);
@@ -359,10 +365,20 @@ fn session_scope_capacity_is_released_only_when_associated_flow_ends() {
     );
 
     endpoint
-        .establish_flow(flow_a, DeliveryMode::ReliableOrdered, policy, connection_limits)
+        .establish_flow(
+            flow_a,
+            DeliveryMode::ReliableOrdered,
+            policy,
+            connection_limits,
+        )
         .unwrap();
     endpoint
-        .establish_flow(flow_b, DeliveryMode::ReliableOrdered, policy, connection_limits)
+        .establish_flow(
+            flow_b,
+            DeliveryMode::ReliableOrdered,
+            policy,
+            connection_limits,
+        )
         .unwrap();
     let accepted_a = match endpoint.submit(flow_a, b"aa".to_vec()).unwrap() {
         SubmissionOutcome::Accepted { accepted_index, .. } => accepted_index,
@@ -408,7 +424,12 @@ fn session_scope_capacity_is_released_only_when_associated_flow_ends() {
     assert_accounting(&endpoint, &[]);
 
     endpoint
-        .establish_flow(flow_c, DeliveryMode::ReliableOrdered, policy, connection_limits)
+        .establish_flow(
+            flow_c,
+            DeliveryMode::ReliableOrdered,
+            policy,
+            connection_limits,
+        )
         .unwrap();
     assert_eq!(
         endpoint
