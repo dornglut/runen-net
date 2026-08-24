@@ -32,10 +32,6 @@ impl FaultStage {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
-        self.queue.len()
-    }
-
     fn has_capacity(&self, bytes: usize) -> bool {
         self.queue.len() < self.max_messages
             && self
