@@ -9,7 +9,7 @@ This document owns the initial RunenNet delivery resource bounds and local press
 This revision defines:
 
 - finite message-size limits;
-- finite per-flow, per-binding, and per-session delivery storage limits;
+- finite per-flow, per-connection, and aggregate delivery storage limits;
 - finite active delivery-flow counts;
 - outbound submission behavior under local pressure;
 - receiver behavior under local pressure;
@@ -17,7 +17,7 @@ This revision defines:
 - minimum observable pressure outcomes required for conformance;
 - adapter obligations around hidden buffering and unsupported size/capacity constraints.
 
-Bandwidth priority, send cadence, deadlines, application-keyed supersession, congestion-control algorithms, packet MTU discovery, participant-count/admission policy, and public configuration API shape are not defined by this revision.
+Bandwidth priority, send cadence, deadlines, application-keyed supersession, congestion-control algorithms, packet MTU discovery, transport-connection admission/count policy, participant-count policy, and public configuration API shape are not defined by this revision.
 
 ## Pressure policy attachment
 
@@ -35,27 +35,27 @@ Those limits and pressure behaviors MUST remain semantically stable for the flow
 
 Exact numeric defaults are not defined by this revision.
 
-## Aggregate delivery bounds
+## Connection and aggregate delivery bounds
 
-Every current participant connection binding MUST have explicit finite aggregate bounds on:
+Every transport connection that owns delivery flows MUST have explicit finite aggregate bounds on:
 
 - active delivery-flow count;
 - locally queued/pending delivery message count across its flows;
 - locally queued/pending delivery payload bytes across its flows.
 
-Those aggregate bounds apply even when the binding currently has only one delivery flow.
+These connection-level bounds apply before and after participant admission.
 
-Every Open session MUST also have explicit finite aggregate delivery bounds on:
+A realization that can maintain more than one concurrent transport connection MUST also impose a finite higher-level aggregate delivery-resource bound across those connections, including pre-admission connections. At minimum that aggregate MUST bound:
 
-- active delivery-flow count across all current bindings;
-- locally queued/pending delivery message count across all current bindings;
-- locally queued/pending delivery payload bytes across all current bindings.
+- active delivery-flow count;
+- locally queued/pending delivery message count;
+- locally queued/pending delivery payload bytes.
 
-These are delivery-resource bounds, not participant-count or admission-policy semantics. A session may use any admission policy that remains consistent with its finite delivery-resource budget.
+When delivery flows are associated with an Open session after admission, the realization MUST additionally impose finite aggregate delivery bounds for that session across its admitted connections. These are delivery-resource bounds, not transport-connection or participant admission-count semantics.
 
-A realization MUST NOT evade an aggregate bound by creating additional delivery flows, connection bindings, or transport-native streams.
+A realization MUST NOT evade an aggregate bound by creating additional delivery flows, transport connections, session bindings, or transport-native streams.
 
-Any additional RunenNet-owned staging queue, retry queue, reassembly buffer, transport-adapter queue, flow registry, or pending-submission structure that can grow from local or remote message activity MUST have an explicit finite bound or be directly covered by a flow/binding/session bound above.
+Any additional RunenNet-owned staging queue, retry queue, reassembly buffer, transport-adapter queue, flow registry, or pending-submission structure that can grow from local or remote message activity MUST have an explicit finite bound or be directly covered by a flow/connection/aggregate bound above.
 
 ## Message-size validation
 
@@ -65,7 +65,7 @@ Payload size MUST NOT cause the delivery mode to change.
 
 When inbound framing or transport input supplies a claimed message length, a conforming implementation MUST validate that length against the applicable finite limit before allocating storage proportional to the claimed length.
 
-An inbound message that exceeds the applicable maximum MUST NOT be exposed. The later wire/protocol specification may define whether such input terminates a protocol session, terminates a flow, or is otherwise classified as a protocol violation; this document only requires bounded allocation and non-exposure.
+An inbound message that exceeds the applicable maximum MUST NOT be exposed. A later wire/protocol specification may define whether such input terminates a protocol session, terminates a flow, or is otherwise classified as a protocol violation; this document only requires bounded allocation and non-exposure.
 
 ## Outbound pressure behaviors
 
@@ -75,7 +75,7 @@ The initial outbound pressure behaviors are **RejectNew** and **EvictOldestUnrel
 
 RejectNew is valid for every delivery mode.
 
-When accepting a submitted message would exceed a per-flow, per-binding, or per-session local bound:
+When accepting a submitted message would exceed a per-flow, per-connection, session, or higher-level aggregate delivery bound:
 
 - the new submission is rejected;
 - no delivery sequence is consumed for that rejected submission;
@@ -115,13 +115,13 @@ This requirement does not imply that the sender can know remote application expo
 
 The initial unreliable receiver pressure behaviors are **DropIncomingUnreliable** and **EvictOldestBufferedUnreliable**. A flow using an unreliable delivery mode MUST select one of them before accepting its first message.
 
-Receiver-side storage influenced by incoming traffic MUST remain within the attached flow and aggregate binding/session bounds.
+Receiver-side storage influenced by incoming traffic MUST remain within the attached flow, connection, session where applicable, and higher-level aggregate bounds.
 
 ### Reliable receiver pressure
 
 For `ReliableOrdered` traffic, receiver pressure MUST NOT silently discard a received message while leaving the flow operational.
 
-A conforming realization MUST apply bounded backpressure before admitting additional reliable data where the realization permits it, or terminate the affected flow/binding with an observable terminal pressure failure if the reliable obligation can no longer be preserved.
+A conforming realization MUST apply bounded backpressure before admitting additional reliable data where the realization permits it, or terminate the affected flow or transport connection with an observable terminal pressure failure if the reliable obligation can no longer be preserved.
 
 Reliable receiver pressure MUST NOT use either unreliable receiver-drop behavior below.
 
@@ -143,7 +143,7 @@ For `UnreliableSequenced`, a message discarded before exposure because of receiv
 
 ## Aggregate pressure
 
-A message that fits its per-flow limits may still exceed a binding-level or session-level aggregate delivery budget.
+A message that fits its per-flow limits may still exceed a connection-level, session-level, or higher-level aggregate delivery budget.
 
 Aggregate pressure MUST preserve the same reliability distinction:
 
@@ -153,7 +153,7 @@ Aggregate pressure MUST preserve the same reliability distinction:
 
 If a flow-local unreliable eviction cannot resolve aggregate pressure without evicting another flow's data, the new message MUST be rejected or dropped rather than implicitly changing another flow's policy.
 
-If a new delivery flow would exceed a binding-level or session-level active-flow bound, that flow MUST NOT begin accepting messages.
+If a new delivery flow would exceed any applicable active-flow bound, that flow MUST NOT begin accepting messages.
 
 ## Adapter and transport buffering
 
@@ -174,7 +174,7 @@ A conforming implementation MUST make at least the following outcome classes dis
 - submission accepted;
 - submission rejected because the message exceeds its size limit;
 - submission rejected because of local pressure;
-- delivery-flow establishment rejected because an aggregate active-flow bound is exhausted;
+- delivery-flow establishment rejected because an applicable active-flow bound is exhausted;
 - accepted unreliable message deliberately dropped by local pressure;
 - received unreliable message deliberately dropped by local pressure;
 - terminal flow failure because a reliable delivery obligation could not be preserved.
