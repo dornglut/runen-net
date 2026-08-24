@@ -16,8 +16,8 @@ The migration issue and pull request retain the exact transition evidence for re
 
 ## Contributions
 
-Commercial dual licensing requires sufficient rights over the complete covered codebase. Until Dornglut adopts reviewed inbound contribution terms that preserve the commercial relicensing path, external code pull requests are not accepted for RunenNet.
+Commercial dual licensing requires sufficient rights over accepted copyright-bearing repository content. Until Dornglut adopts reviewed inbound contribution terms that preserve the commercial relicensing path, external pull requests that add tracked repository content are not accepted for RunenNet, including code, documentation, tests, examples, build scripts, or assets.
 
-Issue reports, design discussion, review, reproducible cases, and other non-code participation may still be accepted under the repository's contribution policy.
+Issue reports, design discussion, reviews, reproducible cases supplied through discussion, and other participation that does not add third-party repository content may still be accepted under the repository's contribution policy.
 
 See Dornglut Engineering ADR 0007 and the organization licensing standard for the governing repository policy.
