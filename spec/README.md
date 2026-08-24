@@ -6,4 +6,4 @@ The specification defines engine- and transport-independent RunenNet semantics. 
 
 - [Specification conventions](conventions.md)
 
-RN1 will add the first semantic owners for identity, sessions/authority, delivery, replication/recovery, resource bounds, and conformance claims. Those areas are intentionally not pre-specified by this index.
+Semantic areas not linked from this index are not defined by this revision.
