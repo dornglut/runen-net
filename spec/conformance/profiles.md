@@ -4,6 +4,8 @@ Status: **provisional normative**
 
 This document owns the initial RunenNet conformance-profile taxonomy, composition, and claim rules. It does not restate networking semantics owned by other specification artifacts.
 
+All normative artifacts included by a profile are interpreted according to [Specification conventions](../conventions.md). The conventions document governs specification interpretation/authority; it is not itself an implementation feature.
+
 ## Conformance claim
 
 A **RunenNet conformance claim** states:
@@ -11,7 +13,7 @@ A **RunenNet conformance claim** states:
 - the exact RunenNet specification version being claimed; and
 - one or more claimable profile names defined by that specification version.
 
-An implementation MUST satisfy every normative rule included by every profile it claims.
+An implementation MUST satisfy every implementation-applicable normative rule included by every profile it claims.
 
 The current provisional revision does not define independently versioned profile contracts. A profile name identifies the profile contract defined by the claimed RunenNet specification version.
 
@@ -29,9 +31,8 @@ An implementation MAY describe partial or experimental support in ordinary docum
 
 **Core** is the base RunenNet conformance profile.
 
-A Core claim includes the normative rules owned by:
+A Core claim includes the implementation-applicable normative rules owned by:
 
-- [Specification conventions](../conventions.md);
 - [Core identity and time](../core/identity.md);
 - [Session and authority lifecycle](../session/lifecycle.md);
 - [Delivery flow semantics](../delivery/flow.md);
@@ -39,7 +40,7 @@ A Core claim includes the normative rules owned by:
 - [Protocol, schema, codec, and capability identity](../protocol/identity.md);
 - [Protocol and schema negotiation](../protocol/negotiation.md).
 
-A Core implementation MUST preserve the dependency and authority boundaries of those specifications; implementing equivalent behavior through a different internal architecture does not permit changing their observable semantics.
+A Core implementation MUST preserve the authority boundaries and observable semantics of those specifications; implementing equivalent behavior through a different internal architecture does not permit changing their normative behavior.
 
 ### Core is freestanding
 
@@ -64,12 +65,12 @@ An in-memory or deterministic fault transport can therefore be sufficient to exe
 
 **AuthoritativeReplication** extends Core with the initial single-authority replication consistency and recovery contract.
 
-An AuthoritativeReplication claim includes all Core rules plus the normative rules owned by:
+An AuthoritativeReplication claim includes all Core rules plus the implementation-applicable normative rules owned by:
 
 - [Authoritative replication consistency](../replication/consistency.md);
 - [Replication retention and full-snapshot recovery](../replication/recovery.md).
 
-An implementation MUST NOT claim AuthoritativeReplication without also satisfying Core.
+An implementation MUST NOT claim AuthoritativeReplication without satisfying Core.
 
 AuthoritativeReplication does not require:
 
@@ -94,6 +95,16 @@ AuthoritativeReplication includes Core by definition.
 The absence of a profile for another feature does not authorize an implementation to infer standardized semantics for that feature from analogy, implementation behavior, or external frameworks.
 
 No claimable Prediction, Interest, RecoveryHistory, QUIC, WebTransport, Hosted, Realtime, or similar profile is defined by this revision.
+
+## Profile requirements cannot be negotiated away
+
+Runtime compatibility negotiation selects mutually supported contracts for one connection. It MUST NOT weaken a conformance profile's normative requirements.
+
+If a future standardized protocol/capability/schema identity is required to realize a claimed profile over an interoperating connection, the normative owner introducing that identity must define the requirement explicitly, and negotiation must satisfy it according to the protocol negotiation specification.
+
+Marking such an identity Optional in a local offer does not change the profile requirement.
+
+The current Core and AuthoritativeReplication profiles define semantic behavior but do not standardize one required production CodecId, transport, or wire-format identity.
 
 ## Conformance is not runtime capability negotiation
 
@@ -157,7 +168,9 @@ A published standardized conformance claim MUST identify the claimed RunenNet sp
 For this revision, examples of structurally valid claim descriptions are:
 
 - `RunenNet 0.1-provisional — Core`;
-- `RunenNet 0.1-provisional — Core + AuthoritativeReplication`.
+- `RunenNet 0.1-provisional — AuthoritativeReplication` (which includes Core).
+
+Listing both `Core + AuthoritativeReplication` is permitted but redundant because AuthoritativeReplication includes Core.
 
 These examples define claim shape only; they are not evidence that any implementation has passed conformance.
 
