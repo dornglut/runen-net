@@ -39,10 +39,6 @@ impl FaultStage {
         self.queue.len()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
     pub(crate) const fn payload_bytes(&self) -> usize {
         self.bytes
     }
