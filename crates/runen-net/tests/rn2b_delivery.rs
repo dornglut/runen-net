@@ -456,7 +456,7 @@ fn unreliable_faults_preserve_unordered_and_sequenced_semantics() {
     stage.drop_at(0);
     assert!(stage.duplicate(0));
     stage.swap(0, 1);
-    while stage.len() > 0 {
+    for _ in 0..3 {
         let outcome = stage.deliver(0, &mut target);
         assert_eq!(
             outcome,
