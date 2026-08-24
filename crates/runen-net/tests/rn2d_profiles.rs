@@ -12,8 +12,8 @@ use runen_net::identity::{ConnectionHandle, ParticipantId, SessionId, Simulation
 use runen_net::protocol::{
     CodecId, CompatibilityOffer, ConnectionNegotiationTermination, NegotiatedContract,
     NegotiationManager, NegotiationManagerLimits, NegotiationRequirements, NegotiationStatus,
-    OfferLimits, ProtocolContract, ProtocolId, ProtocolRevision, RequirementLevel, SchemaContractId,
-    SchemaContractOffer, SchemaId, SchemaOffer, SelectedSchema,
+    OfferLimits, ProtocolContract, ProtocolId, ProtocolRevision, RequirementLevel,
+    SchemaContractId, SchemaContractOffer, SchemaId, SchemaOffer, SelectedSchema,
 };
 use runen_net::replication::{
     AccountedState, AuthorityAckOutcome, AuthorityAggregateLimits, AuthorityRecoveryReason,
@@ -22,9 +22,7 @@ use runen_net::replication::{
     DeltaSnapshot, FullSnapshot, ReplicationCursor, ReplicationLineageKey,
     ReplicationRetentionLimits,
 };
-use runen_net::session::{
-    ConnectionLossOutcome, RetentionPolicy, Session, SessionLimits,
-};
+use runen_net::session::{ConnectionLossOutcome, RetentionPolicy, Session, SessionLimits};
 
 use support::FaultStage;
 
@@ -151,19 +149,33 @@ fn core_profile_composes_negotiation_session_delivery_and_replacement() {
     let mut sender = DeliveryEndpoint::new(aggregate);
     let mut receiver = DeliveryEndpoint::new(aggregate);
     sender
-        .establish_flow(first_outbound, DeliveryMode::ReliableOrdered, policy, aggregate)
+        .establish_flow(
+            first_outbound,
+            DeliveryMode::ReliableOrdered,
+            policy,
+            aggregate,
+        )
         .unwrap();
     receiver
-        .establish_flow(first_inbound, DeliveryMode::ReliableOrdered, policy, aggregate)
+        .establish_flow(
+            first_inbound,
+            DeliveryMode::ReliableOrdered,
+            policy,
+            aggregate,
+        )
         .unwrap();
 
     // Pre-admission delivery does not create participant membership or authority.
     assert!(matches!(
-        sender.submit(first_outbound, b"bootstrap-a".to_vec()).unwrap(),
+        sender
+            .submit(first_outbound, b"bootstrap-a".to_vec())
+            .unwrap(),
         SubmissionOutcome::Accepted { .. }
     ));
     assert!(matches!(
-        sender.submit(first_outbound, b"bootstrap-b".to_vec()).unwrap(),
+        sender
+            .submit(first_outbound, b"bootstrap-b".to_vec())
+            .unwrap(),
         SubmissionOutcome::Accepted { .. }
     ));
     assert_eq!(session.live_memberships(), 0);
@@ -271,7 +283,9 @@ fn core_profile_composes_negotiation_session_delivery_and_replacement() {
         )
         .unwrap();
     assert_eq!(
-        sender.submit(replacement_outbound, b"fresh".to_vec()).unwrap(),
+        sender
+            .submit(replacement_outbound, b"fresh".to_vec())
+            .unwrap(),
         SubmissionOutcome::Accepted {
             accepted_index: 0,
             local_pressure_drops: 0,
@@ -303,7 +317,12 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         session_id,
         AuthorityAggregateLimits::new(nz(4), nz(512), nz(16), nz(512), nz(16)),
     );
-    assert_eq!(authority.add_lineage(participant, retention_limits()).unwrap(), key);
+    assert_eq!(
+        authority
+            .add_lineage(participant, retention_limits())
+            .unwrap(),
+        key
+    );
 
     let aggregate = delivery_limits();
     let policy = reliable_policy();
@@ -312,18 +331,24 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
     let mut sender = DeliveryEndpoint::new(aggregate);
     let mut receiver = DeliveryEndpoint::new(aggregate);
     sender
-        .establish_flow(first_outbound, DeliveryMode::ReliableOrdered, policy, aggregate)
+        .establish_flow(
+            first_outbound,
+            DeliveryMode::ReliableOrdered,
+            policy,
+            aggregate,
+        )
         .unwrap();
     receiver
-        .establish_flow(first_inbound, DeliveryMode::ReliableOrdered, policy, aggregate)
+        .establish_flow(
+            first_inbound,
+            DeliveryMode::ReliableOrdered,
+            policy,
+            aggregate,
+        )
         .unwrap();
     let mut stage = FaultStage::new(8, 256);
 
-    let full_one = FullSnapshot::new(
-        ReplicationCursor::new(1),
-        SimulationTick::new(1),
-        state(1),
-    );
+    let full_one = FullSnapshot::new(ReplicationCursor::new(1), SimulationTick::new(1), state(1));
     authority
         .prepare_full(participant, full_one.clone(), true)
         .unwrap();
@@ -337,7 +362,10 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         None
     );
     assert_eq!(
-        authority.lineage(participant).unwrap().greatest_emitted_cursor(),
+        authority
+            .lineage(participant)
+            .unwrap()
+            .greatest_emitted_cursor(),
         None
     );
 
@@ -428,10 +456,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
                 |base, delta, _| {
                     reconstructed_from = base.get("value").copied();
                     Ok(AccountedState::new(
-                        BTreeMap::from([(
-                            "value",
-                            base.get("value").copied().unwrap() + *delta,
-                        )]),
+                        BTreeMap::from([("value", base.get("value").copied().unwrap() + *delta)]),
                         8,
                     ))
                 },
@@ -441,7 +466,10 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         ClientSnapshotOutcome::Committed(ReplicationCursor::new(3))
     );
     assert_eq!(reconstructed_from, Some(1));
-    assert_eq!(client.lineage(key).unwrap().current_state(), Some(&BTreeMap::from([("value", 3)])));
+    assert_eq!(
+        client.lineage(key).unwrap().current_state(),
+        Some(&BTreeMap::from([("value", 3)]))
+    );
     assert_eq!(
         authority
             .acknowledge_authorized(
@@ -464,20 +492,13 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
             .evict_retained_state(participant, ReplicationCursor::new(3))
             .unwrap()
     );
-    let generation_before_replacement = match authority
-        .lineage(participant)
-        .unwrap()
-        .replication_state()
-    {
-        AuthorityReplicationState::FullSnapshotRequired { generation, .. } => generation,
-        other => panic!("expected full recovery after baseline eviction, got {other:?}"),
-    };
+    let generation_before_replacement =
+        match authority.lineage(participant).unwrap().replication_state() {
+            AuthorityReplicationState::FullSnapshotRequired { generation, .. } => generation,
+            other => panic!("expected full recovery after baseline eviction, got {other:?}"),
+        };
 
-    let full_four = FullSnapshot::new(
-        ReplicationCursor::new(4),
-        SimulationTick::new(4),
-        state(4),
-    );
+    let full_four = FullSnapshot::new(ReplicationCursor::new(4), SimulationTick::new(4), state(4));
     authority
         .prepare_full(participant, full_four.clone(), true)
         .unwrap();
@@ -517,18 +538,15 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         .connection_replaced(&session, replacement, participant)
         .unwrap();
 
-    let generation_after_replacement = match authority
-        .lineage(participant)
-        .unwrap()
-        .replication_state()
-    {
-        AuthorityReplicationState::FullSnapshotRequired {
-            reason: AuthorityRecoveryReason::ConnectionReplacement,
-            generation,
-            ..
-        } => generation,
-        other => panic!("expected replacement recovery generation, got {other:?}"),
-    };
+    let generation_after_replacement =
+        match authority.lineage(participant).unwrap().replication_state() {
+            AuthorityReplicationState::FullSnapshotRequired {
+                reason: AuthorityRecoveryReason::ConnectionReplacement,
+                generation,
+                ..
+            } => generation,
+            other => panic!("expected replacement recovery generation, got {other:?}"),
+        };
     assert_ne!(generation_after_replacement, generation_before_replacement);
     assert_eq!(
         client.lineage(key).unwrap().replication_state(),
@@ -575,11 +593,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         )
         .unwrap();
 
-    let full_five = FullSnapshot::new(
-        ReplicationCursor::new(5),
-        SimulationTick::new(5),
-        state(5),
-    );
+    let full_five = FullSnapshot::new(ReplicationCursor::new(5), SimulationTick::new(5), state(5));
     authority
         .prepare_full(participant, full_five.clone(), true)
         .unwrap();
@@ -596,11 +610,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
     authority
         .record_delivery_submission(participant, accepted_full_five)
         .unwrap();
-    assert!(stage.take(
-        &mut sender,
-        replacement_outbound,
-        replacement_inbound
-    ));
+    assert!(stage.take(&mut sender, replacement_outbound, replacement_inbound));
     stage.deliver(0, &mut receiver);
     assert_reliable_exposure(&mut receiver, replacement_inbound, &[b"full-5"]);
     assert_eq!(
