@@ -9,7 +9,7 @@ Evidence snapshot:
 - Runenwerk: `37a267e41e49317516d6513b02794f8fc480056a` (observed 2026-08-24)
 - Lightyear: `0.29.0` documentation (observed 2026-08-24)
 - QUIC: RFC 9000
-- netcode: 1.02 standard on the observed upstream branch
+- netcode: `1.02` standard at `12d25754a8dafdaa77b9cc306901089576685777` (observed 2026-08-24)
 
 ## Questions under review
 
@@ -82,7 +82,7 @@ Source: [Lightyear 0.29.0 crate documentation](https://docs.rs/lightyear/0.29.0/
 
 The observed netcode 1.02 standard carries a client ID in authenticated connection-token data while maintaining separate endpoint/encryption mappings and packet sequence/replay state. This again illustrates that client/application identity need not be the network address or transient connection realization.
 
-Source: [netcode standard](https://github.com/mas-bandwidth/netcode/blob/main/STANDARD.md).
+Source: [netcode 1.02 standard](https://github.com/mas-bandwidth/netcode/blob/12d25754a8dafdaa77b9cc306901089576685777/STANDARD.md).
 
 ## Resulting design pressure
 
