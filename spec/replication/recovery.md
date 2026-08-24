@@ -2,9 +2,9 @@
 
 Status: **provisional incomplete normative**
 
-This document owns the initial RunenNet live replication baseline-retention, baseline-usability, and full-snapshot-recovery semantics. It depends on [Authoritative replication consistency](consistency.md).
+This document owns the initial RunenNet live replication baseline-retention, baseline-usability, recovery-generation, and full-snapshot-recovery semantics. It depends on [Authoritative replication consistency](consistency.md).
 
-Session membership/connection replacement is defined by [Session and authority lifecycle](../session/lifecycle.md). RN1B delivery-flow lifetimes remain independent of replication lineage state.
+Session membership and connection replacement are defined by [Session and authority lifecycle](../session/lifecycle.md). Delivery-flow lifetimes are defined by [Delivery flow semantics](../delivery/flow.md) and remain independent of replication lineage state.
 
 ## Scope
 
@@ -14,7 +14,8 @@ This revision defines:
 - retained committed baselines on client and authority;
 - bounded emitted-snapshot evidence used for ACK verification;
 - client persistent `FullSnapshotRequired` recovery state;
-- authority delta eligibility versus full-snapshot-required state;
+- authority `DeltaEligible` versus `FullSnapshotRequired` state;
+- authority recovery generations that prevent stale recovery acknowledgements from clearing a newer recovery episode;
 - recovery after missing baseline, malformed/unreconstructable delta, baseline eviction, and connection replacement;
 - separation of live replication retention from prediction/interpolation and archival replay.
 
@@ -52,15 +53,15 @@ Before a replication lineage becomes active, each endpoint MUST operate it under
 
 At minimum the policy MUST bound:
 
-- maximum attributable bytes for one complete retained replication state image;
+- maximum accountable bytes in one complete retained replication state image;
 - maximum retained committed state-image count per lineage;
-- maximum attributable retained committed state bytes per lineage;
+- maximum accountable retained committed state bytes per lineage;
 - maximum in-progress candidate/reconstruction state bytes per lineage;
 - maximum retained emitted-snapshot evidence entries per lineage on the authority.
 
 The authority MUST additionally impose finite session-level aggregate bounds on:
 
-- active/retained replication-lineage state;
+- active and retained replication-lineage state;
 - retained committed state-image count;
 - retained committed state bytes;
 - emitted-snapshot evidence entries.
@@ -68,6 +69,8 @@ The authority MUST additionally impose finite session-level aggregate bounds on:
 The client MUST impose finite aggregate replication-state bounds across all active session/lineage state it can hold concurrently.
 
 Any additional RunenNet-owned baseline cache, reconstruction cache, candidate-state buffer, emitted-cursor registry, or recovery queue that can grow from peer activity MUST have an explicit finite bound or be covered directly by a bound above.
+
+An implementation-defined byte-accounting method MAY be used for decoded/host-neutral state images whose semantic representation has no normative byte layout. When used, the implementation MUST document the accounting basis and MUST apply it consistently for admission and eviction decisions. The accounting basis MUST NOT permit peer-influenced storage to grow without a finite enforced bound.
 
 Exact numeric defaults are not defined by this revision.
 
@@ -81,7 +84,7 @@ A state-image resource failure is not automatically classified as recoverable by
 
 ## Client retained committed history
 
-While synchronized, the client MUST retain its current committed state image as BaselineAvailable.
+While Synchronized, the client MUST retain its current committed state image as BaselineAvailable.
 
 The client MAY retain older committed state images so newer delta snapshots can reconstruct from the authority's latest ACKed baseline even after the client has advanced to a newer current cursor.
 
@@ -95,11 +98,11 @@ A client therefore need not preserve arbitrary history indefinitely to make ackn
 
 The authority MAY retain complete emitted state images for each lineage under its finite live-retention policy.
 
-For ordinary delta operation, the exact state image at the lineage's latest confirmed cursor must be BaselineAvailable on the authority.
+For ordinary delta operation, the exact state image at the lineage's latest confirmed cursor MUST be BaselineAvailable on the authority.
 
 If that latest confirmed state is not BaselineAvailable, the lineage is not delta-eligible even though the client confirmation remains valid.
 
-The authority MAY evict historical/unconfirmed state images to remain within policy. If eviction removes the exact latest-confirmed baseline, authority recovery state MUST become FullSnapshotRequired as defined below.
+The authority MAY evict historical or unconfirmed state images to remain within policy. If eviction removes the exact latest-confirmed baseline, authority recovery state MUST become FullSnapshotRequired as defined below.
 
 A slow participant MUST NOT force the authority to violate session aggregate retention bounds. Full-snapshot recovery is the correctness fallback when live delta history is evicted.
 
@@ -111,21 +114,21 @@ Emission evidence MUST distinguish at least:
 
 - ReplicationCursor;
 - whether the emitted snapshot was Full or Delta;
-- its lineage;
-- its emission order relative to the authority's current recovery state.
+- the replication lineage;
+- for a full snapshot emitted during authority FullSnapshotRequired, the authority recovery generation in which that full snapshot was emitted.
 
 The authority MAY discard old evidence under finite policy once it is no longer required for confirmation handling.
 
 If a higher non-future acknowledgement arrives after the authority has discarded the evidence needed to establish that it was emitted, the acknowledgement is UnverifiableConfirmation. It does not advance latest confirmed cursor.
 
-UnverifiableConfirmation alone does not retroactively invalidate an already usable older confirmed baseline. A host may continue from that older confirmed baseline if it remains BaselineAvailable; if the client no longer retains that base, the client's MissingBase recovery path will request a full snapshot.
+UnverifiableConfirmation alone does not retroactively invalidate an already usable older confirmed baseline. A host may continue from that older confirmed baseline if it remains BaselineAvailable; if the client no longer retains that base, the client's MissingBase recovery path will require a full snapshot.
 
 ## Client recovery state
 
 For each active lineage, the client recovery state is one of:
 
 - **Synchronized** — the client has a usable current committed replication state and is allowed to process newer delta snapshots using retained declared baselines;
-- **FullSnapshotRequired(reason)** — incremental delta processing is suspended until a valid newer full snapshot is committed.
+- **FullSnapshotRequired(reason)** — incremental delta commit is suspended until a valid newer full snapshot is committed.
 
 A newly established lineage begins FullSnapshotRequired with reason **InitialBaseline**.
 
@@ -140,7 +143,7 @@ The concrete wire/control message used to tell the authority that a full snapsho
 While Synchronized, a newer delta causes FullSnapshotRequired when any of these occur:
 
 - **MissingBase** — the exact declared committed baseline is not retained;
-- **MalformedDelta** — the delta cannot be completely decoded/validated;
+- **MalformedDelta** — the delta cannot be completely decoded or validated;
 - **ReconstructionFailure** — applying the transform to the exact declared base fails to produce a valid complete target;
 - **DeltaTickRegression** — the newer target violates the consistency tick-order rule;
 - **DeltaCommitFailure** — required host integration cannot establish the reconstructed complete target as current without violating atomic commit.
@@ -149,18 +152,18 @@ In all cases the prior current committed state remains unchanged.
 
 A Stale or DuplicateCurrent snapshot does not by itself require recovery because it cannot advance or corrupt current state.
 
-A malformed/invalid newer full snapshot does not destroy an otherwise usable synchronized current baseline. It is rejected without commit. If the client was already FullSnapshotRequired, it remains FullSnapshotRequired.
+A malformed or invalid newer full snapshot does not destroy an otherwise usable synchronized current baseline. It is rejected without commit. If the client was already FullSnapshotRequired, it remains FullSnapshotRequired.
 
-## Behavior while FullSnapshotRequired
+## Behavior while client FullSnapshotRequired
 
 While the client is FullSnapshotRequired:
 
 - it MUST NOT commit a delta snapshot, even if that delta happens to reference a retained historical baseline;
-- stale/duplicate input MUST NOT clear recovery state;
+- stale or duplicate input MUST NOT clear recovery state;
 - it MAY receive and evaluate newer full snapshots;
 - only successful commit of a valid newer full snapshot clears the client state to Synchronized.
 
-This makes “full required” an explicit recovery barrier rather than a hint that an arbitrary later delta may accidentally clear.
+This makes full-required state an explicit recovery barrier rather than a hint that an arbitrary later delta may accidentally clear.
 
 ## Client connection-replacement recovery
 
@@ -175,17 +178,33 @@ A later advanced recovery profile may define proof of baseline continuity across
 For each active lineage, the authority replication send state is one of:
 
 - **DeltaEligible(base_cursor)** — `base_cursor` is the latest confirmed cursor and its exact state image is BaselineAvailable under live retention;
-- **FullSnapshotRequired(reason)** — the authority MUST establish a newly confirmed usable full baseline before emitting further deltas.
+- **FullSnapshotRequired(reason, generation)** — the authority MUST establish a newly confirmed usable full baseline from the current recovery generation before emitting further deltas.
 
-A newly established lineage begins FullSnapshotRequired with reason InitialBaseline.
+A newly established lineage begins FullSnapshotRequired with reason InitialBaseline and an initial recovery generation.
 
 The authority enters FullSnapshotRequired when:
 
 - no confirmed cursor exists;
 - the latest confirmed cursor is not BaselineAvailable;
-- the participant/host communicates a valid full-snapshot recovery demand;
+- the participant or host communicates a valid full-snapshot recovery demand;
 - an authorized replacement transport connection is bound to the retained participant under the initial recovery profile; or
 - another rule in this specification explicitly requires full recovery.
+
+## Recovery generation
+
+A **recovery generation** identifies one authority-side attempt to re-establish a delta-eligible full baseline for a lineage.
+
+Recovery generation is scoped to one replication lineage. Its concrete representation and wire encoding are not defined by this revision; it may exist only in authority-side semantic state and emitted-snapshot evidence.
+
+A new recovery generation MUST begin whenever authority state transitions from DeltaEligible to FullSnapshotRequired.
+
+An authorized connection replacement MUST begin a new recovery generation even if the lineage was already FullSnapshotRequired. This invalidates older recovery-full candidates for the purpose of clearing recovery on the replacement connection.
+
+Other events that occur while already FullSnapshotRequired MAY update or enrich the reason without beginning another recovery generation unless they explicitly invalidate all recovery-full candidates already emitted in the current generation.
+
+A conforming implementation MUST be able to determine whether a full snapshot acknowledgement refers to a full snapshot emitted in the current recovery generation.
+
+A delayed acknowledgement for a full snapshot emitted in an older recovery generation MAY still be interpreted by the consistency ACK rules as truthful confirmation of a committed cursor, but it MUST NOT by itself clear the current FullSnapshotRequired state.
 
 ## Authority behavior while FullSnapshotRequired
 
@@ -193,21 +212,25 @@ While authority state is FullSnapshotRequired:
 
 - the authority MUST NOT emit a delta snapshot for that lineage;
 - it MAY emit one or more newer full snapshots;
+- each such recovery full snapshot MUST be associated in authority evidence with the current recovery generation;
 - emitting or RN1B-accepting a full snapshot MUST NOT by itself clear FullSnapshotRequired;
-- delivery/exposure of a full snapshot without a Confirmed acknowledgement MUST NOT by itself clear FullSnapshotRequired.
+- delivery/exposure of a full snapshot without a qualifying Confirmed acknowledgement MUST NOT by itself clear FullSnapshotRequired.
 
-A full snapshot emitted while the authority is FullSnapshotRequired is a **recovery full snapshot** for that recovery episode.
+A full snapshot emitted while the authority is FullSnapshotRequired is a **recovery full snapshot** for the recovery generation in which it was emitted.
 
-The authority may return to DeltaEligible only after:
+The authority may return to DeltaEligible only after all of these hold:
 
-1. it receives a Confirmed acknowledgement for a recovery full snapshot emitted during the current FullSnapshotRequired episode; and
-2. the exact complete state image for that confirmed full cursor is still BaselineAvailable.
+1. it receives a Confirmed acknowledgement for a full snapshot;
+2. authority emission evidence proves that full snapshot was emitted in the **current recovery generation**; and
+3. the exact complete state image for that confirmed full cursor is still BaselineAvailable.
 
 The confirmed full cursor then becomes the DeltaEligible base cursor.
 
-If the recovery full state was evicted before its acknowledgement arrives, the acknowledgement can still become Confirmed according to consistency rules, but FullSnapshotRequired remains because the confirmed state is not BaselineAvailable. The authority must establish another usable full baseline.
+If the current-generation recovery full state was evicted before its acknowledgement arrives, the acknowledgement can still become Confirmed according to consistency rules, but FullSnapshotRequired remains because the confirmed state is not BaselineAvailable. The authority must establish another usable full baseline.
 
-This prevents “sent one full snapshot” from becoming a false recovery completion when that full snapshot was lost or its baseline cannot be used.
+If an acknowledgement confirms a recovery full from an older generation, latest-confirmed state may advance according to the consistency specification, but the current recovery generation remains unsatisfied and no delta may be emitted until a qualifying current-generation full is confirmed and BaselineAvailable.
+
+This prevents “sent one full snapshot” or “received some old full ACK” from becoming false recovery completion after a newer recovery boundary.
 
 ## Authority behavior while DeltaEligible
 
@@ -222,15 +245,23 @@ Multiple newer delta snapshots MAY therefore be emitted against the same confirm
 When a newer acknowledgement becomes Confirmed:
 
 - if its exact state image is BaselineAvailable, DeltaEligible advances to that newer cursor;
-- if its state image is not BaselineAvailable, authority state becomes FullSnapshotRequired with reason **ConfirmedBaselineUnavailable**.
+- if its state image is not BaselineAvailable, the authority MUST begin a new FullSnapshotRequired recovery generation with reason **ConfirmedBaselineUnavailable**.
 
-If the current DeltaEligible baseline is later evicted, state immediately becomes FullSnapshotRequired with reason **BaselineEvicted**.
+If the current DeltaEligible baseline is later evicted, the authority MUST begin a new FullSnapshotRequired recovery generation with reason **BaselineEvicted**.
 
 DuplicateConfirmation and StaleConfirmation do not change authority recovery state.
 
 FutureConfirmation does not change authority recovery state.
 
 UnverifiableConfirmation does not advance latest confirmed cursor and does not by itself require abandoning an already BaselineAvailable DeltaEligible cursor.
+
+## Recovery demand while already recovering
+
+A repeated client recovery demand while authority state is already FullSnapshotRequired does not by itself require a new recovery generation. The authority MAY resend or emit a newer full snapshot in the same generation.
+
+If the event carrying that recovery demand also establishes a new connection replacement or another semantic continuity break that invalidates recovery-full candidates from the current generation, the authority MUST begin a new generation according to the applicable rule.
+
+This avoids generation churn from ordinary retry signaling while preserving a hard boundary for connection replacement and other explicit continuity resets.
 
 ## Missing-base recovery is per lineage
 
@@ -242,21 +273,22 @@ Session-wide resource pressure may independently evict multiple lineages under t
 
 ## Connection replacement does not transfer delivery state
 
-RN1B delivery flows terminate with their transport connection. A replacement connection creates new delivery-flow lifetimes.
+Delivery flows terminate with their transport connection. A replacement connection creates new delivery-flow lifetimes.
 
-Replication lineage state may remain associated with the retained ParticipantId, but queued/accepted RN1B messages from the old connection MUST NOT be transferred to new flows.
+Replication lineage state may remain associated with the retained ParticipantId, but queued or accepted RN1B messages from the old connection MUST NOT be transferred to new flows.
 
-The initial recovery rule requiring a new full snapshot after rebind is the explicit bridge between persistent participant/replication identity and non-persistent delivery-flow state.
+The initial recovery rule requiring a new full snapshot and a fresh recovery generation after rebind is the explicit bridge between persistent participant/replication identity and non-persistent delivery-flow state.
 
 ## Recovery completion is not observation
 
 Neither client nor authority recovery state may be cleared merely because:
 
-- a recovery flag/state was read;
+- a recovery flag or state was read;
 - a recovery request was queued;
 - a full snapshot was constructed;
 - a full snapshot was submitted to delivery;
-- a full snapshot was exposed but not committed/confirmed as required above.
+- a full snapshot was exposed but not committed or confirmed as required above;
+- an acknowledgement for a full snapshot from an older authority recovery generation was received.
 
 Only the semantic recovery transitions defined in this document clear FullSnapshotRequired.
 
@@ -264,29 +296,31 @@ Only the semantic recovery transitions defined in this document clear FullSnapsh
 
 A conforming implementation MUST make at least these replication-recovery outcomes distinguishable to its conformance/runtime inspection boundary:
 
-- lineage Synchronized / DeltaEligible;
+- client Synchronized;
+- authority DeltaEligible and its base cursor;
 - client FullSnapshotRequired and its reason class;
-- authority FullSnapshotRequired and its reason class;
+- authority FullSnapshotRequired, its reason class, and current recovery generation identity sufficient for conformance comparison;
 - MissingBase;
 - malformed/reconstruction/commit delta failure;
 - baseline eviction;
-- recovery full snapshot emitted;
+- recovery full snapshot emitted and its recovery generation;
 - recovery full snapshot committed on client;
 - recovery full acknowledgement Confirmed;
+- recovery full acknowledgement rejected for recovery completion because it belongs to an older generation;
 - Confirmed acknowledgement whose baseline is unavailable;
 - state-image resource failure.
 
-The exact public event/enum representation is not defined here.
+The exact public event, enum, or generation representation is not defined here.
 
 ## Deferred recovery semantics
 
 The following are not defined by this revision:
 
-- reconstructing a baseline from archival replay/checkpoints;
+- reconstructing a baseline from archival replay or checkpoints;
 - preserving delta eligibility across connection replacement through proof of continuity;
 - transferring in-flight delivery messages across connections;
 - prediction rollback history;
 - interpolation history;
 - lag compensation history.
 
-Those features may later consume the lineage/cursor/commit semantics here but MUST NOT weaken bounded live retention or exact-base reconstruction.
+Those features may later consume the lineage/cursor/commit semantics here but MUST NOT weaken bounded live retention, exact-base reconstruction, or current-generation recovery completion.
