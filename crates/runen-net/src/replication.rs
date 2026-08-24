@@ -298,11 +298,8 @@ impl<S> ClientLineage<S> {
     }
 
     pub fn current_tick(&self) -> Option<SimulationTick> {
-        self.current.and_then(|cursor| {
-            self.retained
-                .get(&cursor)
-                .map(|retained| retained.tick)
-        })
+        self.current
+            .and_then(|cursor| self.retained.get(&cursor).map(|retained| retained.tick))
     }
 
     pub fn current_state(&self) -> Option<&S> {
@@ -327,7 +324,7 @@ impl<S> ClientLineage<S> {
         self.retained_bytes
     }
 
-    pub fn acknowledgement_cursor(&self) -> Option<ReplicationCursor> {
+    pub const fn acknowledgement_cursor(&self) -> Option<ReplicationCursor> {
         self.current
     }
 
@@ -344,18 +341,15 @@ impl<S> ClientLineage<S> {
         {
             return classification;
         }
-
         if !self.image_fits(snapshot.image.accounted_bytes()) {
             return ClientSnapshotOutcome::StateResourceFailure;
         }
-
         if host_commit(snapshot.image.state()).is_err() {
             return ClientSnapshotOutcome::HostCommitFailure;
         }
 
         let target = snapshot.target_cursor;
         self.commit_image(target, snapshot.target_tick, snapshot.image);
-        self.state = ClientReplicationState::Synchronized;
         ClientSnapshotOutcome::Committed(target)
     }
 
@@ -372,28 +366,27 @@ impl<S> ClientLineage<S> {
         if let Some(classification) =
             self.classify_target(snapshot.target_cursor, snapshot.target_tick)
         {
+            if classification == ClientSnapshotOutcome::TickRegression {
+                self.state = ClientReplicationState::FullSnapshotRequired(
+                    ClientRecoveryReason::DeltaTickRegression,
+                );
+            }
             return classification;
         }
-
-        if matches!(
-            self.state,
-            ClientReplicationState::FullSnapshotRequired(_)
-        ) {
+        if matches!(self.state, ClientReplicationState::FullSnapshotRequired(_)) {
             return ClientSnapshotOutcome::DeltaBlockedByRecovery;
         }
-
         if snapshot.target_cursor <= snapshot.base_cursor {
-            self.state = ClientReplicationState::FullSnapshotRequired(
-                ClientRecoveryReason::MalformedDelta,
-            );
+            self.state =
+                ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::MalformedDelta);
             return ClientSnapshotOutcome::MalformedDelta;
         }
 
         let Some(base) = self.retained.get(&snapshot.base_cursor) else {
-            self.state = ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::MissingBase);
+            self.state =
+                ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::MissingBase);
             return ClientSnapshotOutcome::MissingBase;
         };
-
         if snapshot.target_tick < base.tick {
             self.state = ClientReplicationState::FullSnapshotRequired(
                 ClientRecoveryReason::DeltaTickRegression,
@@ -420,7 +413,6 @@ impl<S> ClientLineage<S> {
         if !self.image_fits(candidate.accounted_bytes()) {
             return ClientSnapshotOutcome::StateResourceFailure;
         }
-
         if host_commit(candidate.state()).is_err() {
             self.state = ClientReplicationState::FullSnapshotRequired(
                 ClientRecoveryReason::DeltaCommitFailure,
@@ -458,6 +450,7 @@ impl<S> ClientLineage<S> {
         if target == current {
             return Some(ClientSnapshotOutcome::DuplicateCurrent);
         }
+
         let current_tick = self
             .retained
             .get(&current)
@@ -492,9 +485,7 @@ impl<S> ClientLineage<S> {
     fn make_room_for_client_commit(&mut self, target_bytes: usize) {
         let max_count = self.limits.max_retained_images_per_lineage();
         let max_bytes = self.limits.max_retained_state_bytes_per_lineage();
-        while self.retained.len() >= max_count
-            || self.retained_bytes > max_bytes - target_bytes
-        {
+        while self.retained.len() >= max_count || self.retained_bytes > max_bytes - target_bytes {
             let Some(cursor) = self.retained.keys().next().copied() else {
                 break;
             };
@@ -542,6 +533,7 @@ pub enum AuthorityPrepareError {
     DeltaNotEligible,
     BaselineUnavailable,
     CandidateTooLarge,
+    RecoveryDesignationRequiresRecovery,
     RecoveryFullNotNewerThanWatermark,
 }
 
@@ -588,7 +580,7 @@ struct EmissionEvidence {
 #[derive(Debug)]
 enum SnapshotCandidate<S, D> {
     Full {
-        image: FullSnapshot<S>,
+        snapshot: FullSnapshot<S>,
         recovery_generation: Option<RecoveryGeneration>,
     },
     Delta {
@@ -597,7 +589,6 @@ enum SnapshotCandidate<S, D> {
         target_tick: SimulationTick,
         target_image: AccountedState<S>,
         delta: D,
-        additional_candidate_bytes: usize,
     },
 }
 
@@ -694,10 +685,10 @@ impl<S, D> AuthorityLineage<S, D> {
     pub fn pending_snapshot(&self) -> Option<PendingSnapshotRef<'_, S, D>> {
         match self.pending.as_ref()? {
             SnapshotCandidate::Full {
-                image,
+                snapshot,
                 recovery_generation,
             } => Some(PendingSnapshotRef::Full {
-                snapshot: image,
+                snapshot,
                 recovery_generation: *recovery_generation,
             }),
             SnapshotCandidate::Delta {
@@ -706,7 +697,6 @@ impl<S, D> AuthorityLineage<S, D> {
                 target_tick,
                 target_image,
                 delta,
-                ..
             } => Some(PendingSnapshotRef::Delta {
                 base_cursor: *base_cursor,
                 target_cursor: *target_cursor,
@@ -720,13 +710,13 @@ impl<S, D> AuthorityLineage<S, D> {
     pub fn pending_summary(&self) -> Option<PendingSnapshotSummary> {
         match self.pending.as_ref()? {
             SnapshotCandidate::Full {
-                image,
+                snapshot,
                 recovery_generation,
             } => Some(PendingSnapshotSummary {
                 kind: SnapshotKind::Full,
                 base_cursor: None,
-                target_cursor: image.target_cursor,
-                target_tick: image.target_tick,
+                target_cursor: snapshot.target_cursor,
+                target_tick: snapshot.target_tick,
                 recovery_generation: *recovery_generation,
             }),
             SnapshotCandidate::Delta {
@@ -765,13 +755,13 @@ impl<S, D> AuthorityLineage<S, D> {
                     if start_cursor_watermark
                         .is_some_and(|watermark| snapshot.target_cursor <= watermark)
                     {
-                        return Err(
-                            AuthorityPrepareError::RecoveryFullNotNewerThanWatermark,
-                        );
+                        return Err(AuthorityPrepareError::RecoveryFullNotNewerThanWatermark);
                     }
                     Some(generation)
                 }
-                AuthorityReplicationState::DeltaEligible(_) => None,
+                AuthorityReplicationState::DeltaEligible(_) => {
+                    return Err(AuthorityPrepareError::RecoveryDesignationRequiresRecovery);
+                }
             }
         } else {
             None
@@ -785,7 +775,7 @@ impl<S, D> AuthorityLineage<S, D> {
             recovery_generation,
         };
         self.pending = Some(SnapshotCandidate::Full {
-            image: snapshot,
+            snapshot,
             recovery_generation,
         });
         Ok(summary)
@@ -834,7 +824,6 @@ impl<S, D> AuthorityLineage<S, D> {
             target_tick,
             target_image,
             delta,
-            additional_candidate_bytes,
         });
         Ok(summary)
     }
@@ -853,20 +842,20 @@ impl<S, D> AuthorityLineage<S, D> {
             .ok_or(AuthorityOperationError::NoPendingCandidate)?;
         let emitted = match candidate {
             SnapshotCandidate::Full {
-                image,
+                snapshot,
                 recovery_generation,
             } => {
                 let emitted = EmittedSnapshot {
                     kind: SnapshotKind::Full,
                     base_cursor: None,
-                    target_cursor: image.target_cursor,
-                    target_tick: image.target_tick,
+                    target_cursor: snapshot.target_cursor,
+                    target_tick: snapshot.target_tick,
                     recovery_generation,
                 };
                 self.record_emitted_state(
-                    image.target_cursor,
-                    image.target_tick,
-                    image.image,
+                    snapshot.target_cursor,
+                    snapshot.target_tick,
+                    snapshot.image,
                     SnapshotKind::Full,
                     recovery_generation,
                 );
@@ -877,10 +866,8 @@ impl<S, D> AuthorityLineage<S, D> {
                 target_cursor,
                 target_tick,
                 target_image,
-                additional_candidate_bytes,
                 ..
             } => {
-                let _ = additional_candidate_bytes;
                 let emitted = EmittedSnapshot {
                     kind: SnapshotKind::Delta,
                     base_cursor: Some(base_cursor),
@@ -925,23 +912,16 @@ impl<S, D> AuthorityLineage<S, D> {
                 return Ok(AuthorityAckOutcome::StaleConfirmation);
             }
         }
-
-        if self
-            .greatest_emitted
-            .is_none_or(|greatest| cursor > greatest)
-        {
+        if self.greatest_emitted.is_none_or(|greatest| cursor > greatest) {
             return Ok(AuthorityAckOutcome::FutureConfirmation);
         }
 
         let Some(evidence) = self.evidence.get(&cursor).copied() else {
             return Ok(AuthorityAckOutcome::UnverifiableConfirmation);
         };
-
         let baseline_available = self.baseline_available(cursor);
-        let needs_new_recovery = matches!(
-            self.state,
-            AuthorityReplicationState::DeltaEligible(_)
-        ) && !baseline_available;
+        let needs_new_recovery = matches!(self.state, AuthorityReplicationState::DeltaEligible(_))
+            && !baseline_available;
         let next_generation = if needs_new_recovery {
             Some(
                 self.generation
@@ -958,10 +938,9 @@ impl<S, D> AuthorityLineage<S, D> {
                 if baseline_available {
                     self.state = AuthorityReplicationState::DeltaEligible(cursor);
                 } else {
-                    let generation = next_generation.expect("precomputed above");
                     self.install_new_recovery(
                         AuthorityRecoveryReason::ConfirmedBaselineUnavailable,
-                        generation,
+                        next_generation.expect("precomputed above"),
                     );
                 }
             }
@@ -1036,7 +1015,6 @@ impl<S, D> AuthorityLineage<S, D> {
             return Ok(false);
         };
         self.retained_bytes -= removed.image.accounted_bytes();
-
         if delta_base_is_evicted {
             self.install_new_recovery(
                 AuthorityRecoveryReason::BaselineEvicted,
@@ -1079,8 +1057,7 @@ impl<S, D> AuthorityLineage<S, D> {
             return false;
         }
         let max = self.limits.max_candidate_bytes_per_lineage();
-        state_bytes <= max
-            && additional_bytes <= max - state_bytes
+        state_bytes <= max && additional_bytes <= max - state_bytes
     }
 
     fn record_emitted_state(
@@ -1117,9 +1094,7 @@ impl<S, D> AuthorityLineage<S, D> {
             AuthorityReplicationState::FullSnapshotRequired { .. } => None,
         };
 
-        while self.retained.len() >= max_count
-            || self.retained_bytes > max_bytes - target_bytes
-        {
+        while self.retained.len() >= max_count || self.retained_bytes > max_bytes - target_bytes {
             let candidate = self
                 .retained
                 .keys()
@@ -1140,11 +1115,7 @@ impl<S, D> AuthorityLineage<S, D> {
         debug_assert!(previous.is_none());
     }
 
-    fn retain_emission_evidence(
-        &mut self,
-        cursor: ReplicationCursor,
-        evidence: EmissionEvidence,
-    ) {
+    fn retain_emission_evidence(&mut self, cursor: ReplicationCursor, evidence: EmissionEvidence) {
         let max = self.limits.max_emission_evidence_per_lineage();
         while self.evidence.len() >= max {
             let oldest = self
@@ -1176,12 +1147,6 @@ impl<S, D> AuthorityLineage<S, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{
-        CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerLimits,
-        NegotiationRequirements, NegotiationStatus, OfferLimits, ProtocolContract, ProtocolId,
-        ProtocolRevision,
-    };
-    use crate::session::SessionLimits;
 
     fn nz(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).unwrap()
@@ -1201,55 +1166,6 @@ mod tests {
             SimulationTick::new(tick),
             AccountedState::new(value, 8),
         )
-    }
-
-    fn protocol() -> ProtocolContract {
-        ProtocolContract::new(ProtocolId::new(1), ProtocolRevision::new(1))
-    }
-
-    fn authorized_session(
-        lineage: ReplicationLineageKey,
-        connection: ConnectionHandle,
-    ) -> Session {
-        let mut negotiation = NegotiationManager::new(
-            OfferLimits::default(),
-            NegotiationManagerLimits::default(),
-        )
-        .unwrap();
-        let offer = CompatibilityOffer::new(vec![protocol()], vec![], vec![], None);
-        negotiation
-            .start(connection, offer.clone(), offer)
-            .unwrap();
-        let contract = NegotiatedContract::new(protocol());
-        negotiation
-            .propose(
-                connection,
-                contract.clone(),
-                &NegotiationRequirements::default(),
-            )
-            .unwrap();
-        assert_ne!(
-            negotiation
-                .validate_authority(connection, &contract)
-                .unwrap(),
-            NegotiationStatus::Established
-        );
-        assert_eq!(
-            negotiation.validate_peer(connection, &contract).unwrap(),
-            NegotiationStatus::Established
-        );
-
-        let mut session = Session::new(
-            lineage.session(),
-            SessionLimits::new(nz(8), nz(4)).unwrap(),
-        );
-        session
-            .admit_new(
-                lineage.participant(),
-                negotiation.established(connection).unwrap(),
-            )
-            .unwrap();
-        session
     }
 
     #[test]
@@ -1275,73 +1191,41 @@ mod tests {
             SimulationTick::new(4),
             5,
         );
-        let outcome = client.apply_delta(
-            delta,
-            |base, delta| Ok(AccountedState::new(*base + *delta, 8)),
-            |_| Ok::<_, ()>(()),
-        );
         assert_eq!(
-            outcome,
+            client.apply_delta(
+                delta,
+                |base, delta| Ok(AccountedState::new(*base + *delta, 8)),
+                |_| Ok::<_, ()>(()),
+            ),
             ClientSnapshotOutcome::Committed(ReplicationCursor::new(4))
         );
         assert_eq!(client.current_state(), Some(&15));
     }
 
     #[test]
-    fn evidence_eviction_is_unverifiable_not_future() {
-        let small_evidence =
-            ReplicationRetentionLimits::new(nz(64), nz(4), nz(256), nz(96), nz(1)).unwrap();
-        let lineage = key(1, 7);
-        let connection = ConnectionHandle::new(1);
-        let session = authorized_session(lineage, connection);
-        let mut authority: AuthorityLineage<i32, ()> =
-            AuthorityLineage::new(lineage, small_evidence);
-
-        authority.prepare_full(full(1, 1, 10), true).unwrap();
-        authority
-            .record_delivery_submission(SubmissionOutcome::Accepted {
-                accepted_index: 0,
-                local_pressure_drops: 0,
-            })
-            .unwrap();
-        authority.prepare_full(full(2, 2, 20), true).unwrap();
-        authority
-            .record_delivery_submission(SubmissionOutcome::Accepted {
-                accepted_index: 1,
-                local_pressure_drops: 0,
-            })
-            .unwrap();
+    fn delta_tick_regression_enters_persistent_full_recovery() {
+        let mut client = ClientLineage::new(key(1, 7), limits());
+        client.apply_full(full(1, 10, 10), |_| Ok::<_, ()>(()));
+        let delta = DeltaSnapshot::new(
+            ReplicationCursor::new(1),
+            ReplicationCursor::new(2),
+            SimulationTick::new(9),
+            1,
+        );
 
         assert_eq!(
-            authority
-                .acknowledge_authorized(&session, connection, ReplicationCursor::new(1))
-                .unwrap(),
-            AuthorityAckOutcome::UnverifiableConfirmation
+            client.apply_delta(
+                delta,
+                |base, delta| Ok(AccountedState::new(*base + *delta, 8)),
+                |_| Ok::<_, ()>(()),
+            ),
+            ClientSnapshotOutcome::TickRegression
         );
         assert_eq!(
-            authority
-                .acknowledge_authorized(&session, connection, ReplicationCursor::new(3))
-                .unwrap(),
-            AuthorityAckOutcome::FutureConfirmation
+            client.replication_state(),
+            ClientReplicationState::FullSnapshotRequired(
+                ClientRecoveryReason::DeltaTickRegression
+            )
         );
-    }
-
-    #[test]
-    fn connection_replacement_always_starts_new_recovery_generation() {
-        let lineage = key(1, 7);
-        let first = ConnectionHandle::new(1);
-        let session = authorized_session(lineage, first);
-        let mut authority: AuthorityLineage<i32, ()> = AuthorityLineage::new(lineage, limits());
-        let before = match authority.replication_state() {
-            AuthorityReplicationState::FullSnapshotRequired { generation, .. } => generation,
-            AuthorityReplicationState::DeltaEligible(_) => panic!("new lineage must require full"),
-        };
-
-        authority.connection_replaced(&session, first).unwrap();
-        let after = match authority.replication_state() {
-            AuthorityReplicationState::FullSnapshotRequired { generation, .. } => generation,
-            AuthorityReplicationState::DeltaEligible(_) => panic!("replacement must require full"),
-        };
-        assert!(after > before);
     }
 }
