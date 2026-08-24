@@ -132,7 +132,6 @@ impl CompatibilityOffer {
         if self.schemas.len() > limits.max_schemas {
             return Err(OfferValidationError::TooManySchemas);
         }
-
         if self
             .diagnostic_label
             .as_ref()
@@ -178,6 +177,7 @@ impl CompatibilityOffer {
                 if contract.codecs.len() > limits.max_codecs_per_contract {
                     return Err(OfferValidationError::TooManyCodecs);
                 }
+
                 let mut codecs = HashSet::with_capacity(contract.codecs.len());
                 for codec in &contract.codecs {
                     if !codecs.insert(*codec) {
@@ -432,7 +432,6 @@ pub enum NegotiationStatus {
         peer_validated: bool,
     },
     Established,
-    Aborted,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -448,45 +447,36 @@ pub enum NegotiationError {
     NoProposal,
     ValidationMismatch,
     AlreadyEstablished,
-    Aborted,
-    NotEstablished,
 }
 
-#[derive(Debug)]
-pub struct EstablishedNegotiation {
+#[derive(Debug, Copy, Clone)]
+pub struct EstablishedNegotiation<'a> {
     connection: ConnectionHandle,
-    contract: NegotiatedContract,
+    contract: &'a NegotiatedContract,
 }
 
-impl EstablishedNegotiation {
-    pub const fn connection(&self) -> ConnectionHandle {
+impl<'a> EstablishedNegotiation<'a> {
+    pub const fn connection(self) -> ConnectionHandle {
         self.connection
     }
 
-    pub const fn contract(&self) -> &NegotiatedContract {
-        &self.contract
-    }
-
-    pub(crate) fn into_parts(self) -> (ConnectionHandle, NegotiatedContract) {
-        (self.connection, self.contract)
+    pub const fn contract(self) -> &'a NegotiatedContract {
+        self.contract
     }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct NegotiationAttempt {
-    connection: ConnectionHandle,
     authority_offer: ValidatedOffer,
     peer_offer: ValidatedOffer,
     offer_limits: OfferLimits,
     proposal: Option<NegotiatedContract>,
     authority_validated: bool,
     peer_validated: bool,
-    aborted: bool,
 }
 
 impl NegotiationAttempt {
     fn new(
-        connection: ConnectionHandle,
         authority_offer: CompatibilityOffer,
         peer_offer: CompatibilityOffer,
         offer_limits: OfferLimits,
@@ -511,33 +501,17 @@ impl NegotiationAttempt {
         verify_offer_requirements(&peer_offer, &authority_offer)?;
 
         Ok(Self {
-            connection,
             authority_offer,
             peer_offer,
             offer_limits,
             proposal: None,
             authority_validated: false,
             peer_validated: false,
-            aborted: false,
         })
     }
 
-    fn accounted_bytes(&self) -> usize {
-        self.authority_offer
-            .accounted_bytes()
-            .saturating_add(self.peer_offer.accounted_bytes())
-            .saturating_add(
-                self.proposal
-                    .as_ref()
-                    .and_then(|proposal| proposal.accounted_bytes().ok())
-                    .unwrap_or(0),
-            )
-    }
-
     fn status(&self) -> NegotiationStatus {
-        if self.aborted {
-            NegotiationStatus::Aborted
-        } else if self.authority_validated && self.peer_validated {
+        if self.authority_validated && self.peer_validated {
             NegotiationStatus::Established
         } else if self.proposal.is_some() {
             NegotiationStatus::AwaitingValidation {
@@ -554,9 +528,6 @@ impl NegotiationAttempt {
         contract: NegotiatedContract,
         requirements: &NegotiationRequirements,
     ) -> Result<(), NegotiationError> {
-        if self.aborted {
-            return Err(NegotiationError::Aborted);
-        }
         if self.status() == NegotiationStatus::Established {
             return Err(NegotiationError::AlreadyEstablished);
         }
@@ -583,34 +554,11 @@ impl NegotiationAttempt {
         self.validate_party(contract, false)
     }
 
-    fn abort(&mut self) {
-        self.aborted = true;
-    }
-
-    fn into_established(self) -> Result<EstablishedNegotiation, NegotiationError> {
-        if self.status() != NegotiationStatus::Established {
-            return Err(if self.aborted {
-                NegotiationError::Aborted
-            } else {
-                NegotiationError::NotEstablished
-            });
-        }
-
-        let contract = self.proposal.ok_or(NegotiationError::NoProposal)?;
-        Ok(EstablishedNegotiation {
-            connection: self.connection,
-            contract,
-        })
-    }
-
     fn validate_party(
         &mut self,
         contract: &NegotiatedContract,
         authority: bool,
     ) -> Result<NegotiationStatus, NegotiationError> {
-        if self.aborted {
-            return Err(NegotiationError::Aborted);
-        }
         let proposal = self.proposal.as_ref().ok_or(NegotiationError::NoProposal)?;
         if proposal != contract {
             return Err(NegotiationError::ValidationMismatch);
@@ -751,6 +699,10 @@ fn has_common_schema_binding(
     })
 }
 
+/// Computes the RN2 implementation's accountable in-memory representation size.
+///
+/// These values are implementation accounting units based on the current Rust
+/// identity representation. They are not RunenNet wire-format sizes.
 fn accounted_offer_bytes(offer: &CompatibilityOffer) -> Result<usize, OfferValidationError> {
     const ID_BYTES: usize = 16;
     const REQUIREMENT_BYTES: usize = 1;
@@ -820,7 +772,7 @@ pub enum NegotiationManagerConfigError {
 pub enum NegotiationManagerError {
     AttemptLimitExceeded,
     AggregateLimitExceeded,
-    ConnectionAlreadyNegotiating,
+    ConnectionAlreadyKnown,
     UnknownConnection,
     Negotiation(NegotiationError),
 }
@@ -831,6 +783,18 @@ impl From<NegotiationError> for NegotiationManagerError {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum ConnectionNegotiationTermination {
+    NegotiationAborted,
+    EstablishedContractEnded,
+}
+
+#[derive(Debug)]
+struct EstablishedState {
+    contract: NegotiatedContract,
+    accounted_bytes: usize,
+}
+
 #[derive(Debug)]
 pub struct NegotiationManager {
     offer_limits: OfferLimits,
@@ -838,6 +802,7 @@ pub struct NegotiationManager {
     per_attempt_reservation: usize,
     reserved_bytes: usize,
     attempts: HashMap<ConnectionHandle, NegotiationAttempt>,
+    established: HashMap<ConnectionHandle, EstablishedState>,
 }
 
 impl NegotiationManager {
@@ -863,6 +828,7 @@ impl NegotiationManager {
             per_attempt_reservation,
             reserved_bytes: 0,
             attempts: HashMap::new(),
+            established: HashMap::new(),
         })
     }
 
@@ -872,8 +838,8 @@ impl NegotiationManager {
         authority_offer: CompatibilityOffer,
         peer_offer: CompatibilityOffer,
     ) -> Result<(), NegotiationManagerError> {
-        if self.attempts.get(&connection).is_some() {
-            return Err(NegotiationManagerError::ConnectionAlreadyNegotiating);
+        if self.attempts.contains_key(&connection) || self.established.contains_key(&connection) {
+            return Err(NegotiationManagerError::ConnectionAlreadyKnown);
         }
         if self.attempts.len() >= self.limits.max_concurrent_attempts {
             return Err(NegotiationManagerError::AttemptLimitExceeded);
@@ -886,8 +852,7 @@ impl NegotiationManager {
             return Err(NegotiationManagerError::AggregateLimitExceeded);
         }
 
-        let attempt =
-            NegotiationAttempt::new(connection, authority_offer, peer_offer, self.offer_limits)?;
+        let attempt = NegotiationAttempt::new(authority_offer, peer_offer, self.offer_limits)?;
         self.attempts.insert(connection, attempt);
         self.reserved_bytes += self.per_attempt_reservation;
         Ok(())
@@ -909,7 +874,13 @@ impl NegotiationManager {
         connection: ConnectionHandle,
         contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationManagerError> {
-        Ok(self.attempt_mut(connection)?.validate_authority(contract)?)
+        let status = self
+            .attempt_mut(connection)?
+            .validate_authority(contract)?;
+        if status == NegotiationStatus::Established {
+            self.promote_established(connection)?;
+        }
+        Ok(status)
     }
 
     pub fn validate_peer(
@@ -917,49 +888,55 @@ impl NegotiationManager {
         connection: ConnectionHandle,
         contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationManagerError> {
-        Ok(self.attempt_mut(connection)?.validate_peer(contract)?)
+        let status = self.attempt_mut(connection)?.validate_peer(contract)?;
+        if status == NegotiationStatus::Established {
+            self.promote_established(connection)?;
+        }
+        Ok(status)
     }
 
     pub fn status(
         &self,
         connection: ConnectionHandle,
     ) -> Result<NegotiationStatus, NegotiationManagerError> {
+        if self.established.contains_key(&connection) {
+            return Ok(NegotiationStatus::Established);
+        }
         self.attempts
             .get(&connection)
             .map(NegotiationAttempt::status)
             .ok_or(NegotiationManagerError::UnknownConnection)
     }
 
-    pub fn abort(&mut self, connection: ConnectionHandle) -> Result<(), NegotiationManagerError> {
-        self.attempt_mut(connection)?.abort();
-        Ok(())
+    pub fn established(
+        &self,
+        connection: ConnectionHandle,
+    ) -> Result<EstablishedNegotiation<'_>, NegotiationManagerError> {
+        let state = self
+            .established
+            .get(&connection)
+            .ok_or(NegotiationManagerError::UnknownConnection)?;
+        Ok(EstablishedNegotiation {
+            connection,
+            contract: &state.contract,
+        })
     }
 
-    pub fn remove(&mut self, connection: ConnectionHandle) -> Result<(), NegotiationManagerError> {
-        if self.attempts.remove(&connection).is_none() {
-            return Err(NegotiationManagerError::UnknownConnection);
-        }
-        self.reserved_bytes -= self.per_attempt_reservation;
-        Ok(())
-    }
-
-    pub fn take_established(
+    pub fn terminate(
         &mut self,
         connection: ConnectionHandle,
-    ) -> Result<EstablishedNegotiation, NegotiationManagerError> {
-        let status = self.status(connection)?;
-        if status != NegotiationStatus::Established {
-            return Err(NegotiationManagerError::Negotiation(
-                NegotiationError::NotEstablished,
-            ));
+    ) -> Result<ConnectionNegotiationTermination, NegotiationManagerError> {
+        if self.attempts.remove(&connection).is_some() {
+            self.reserved_bytes -= self.per_attempt_reservation;
+            return Ok(ConnectionNegotiationTermination::NegotiationAborted);
         }
 
-        let attempt = self
-            .attempts
-            .remove(&connection)
-            .ok_or(NegotiationManagerError::UnknownConnection)?;
-        self.reserved_bytes -= self.per_attempt_reservation;
-        Ok(attempt.into_established()?)
+        if let Some(state) = self.established.remove(&connection) {
+            self.reserved_bytes -= state.accounted_bytes;
+            return Ok(ConnectionNegotiationTermination::EstablishedContractEnded);
+        }
+
+        Err(NegotiationManagerError::UnknownConnection)
     }
 
     pub const fn reserved_bytes(&self) -> usize {
@@ -970,13 +947,60 @@ impl NegotiationManager {
         self.attempts.len()
     }
 
+    pub fn established_connections(&self) -> usize {
+        self.established.len()
+    }
+
     fn attempt_mut(
         &mut self,
         connection: ConnectionHandle,
     ) -> Result<&mut NegotiationAttempt, NegotiationManagerError> {
+        if self.established.contains_key(&connection) {
+            return Err(NegotiationManagerError::Negotiation(
+                NegotiationError::AlreadyEstablished,
+            ));
+        }
         self.attempts
             .get_mut(&connection)
             .ok_or(NegotiationManagerError::UnknownConnection)
+    }
+
+    fn promote_established(
+        &mut self,
+        connection: ConnectionHandle,
+    ) -> Result<(), NegotiationManagerError> {
+        let contract_bytes = self
+            .attempts
+            .get(&connection)
+            .and_then(|attempt| attempt.proposal.as_ref())
+            .ok_or(NegotiationManagerError::Negotiation(
+                NegotiationError::NoProposal,
+            ))?
+            .accounted_bytes()
+            .map_err(|_| {
+                NegotiationManagerError::Negotiation(NegotiationError::SelectionTooLarge)
+            })?;
+
+        let attempt = self
+            .attempts
+            .remove(&connection)
+            .ok_or(NegotiationManagerError::UnknownConnection)?;
+        debug_assert_eq!(attempt.status(), NegotiationStatus::Established);
+        let contract = attempt.proposal.ok_or(NegotiationManagerError::Negotiation(
+            NegotiationError::NoProposal,
+        ))?;
+
+        self.reserved_bytes -= self.per_attempt_reservation;
+        self.reserved_bytes += contract_bytes;
+        let previous = self.established.insert(
+            connection,
+            EstablishedState {
+                contract,
+                accounted_bytes: contract_bytes,
+            },
+        );
+        debug_assert!(previous.is_none());
+        Ok(())
     }
 }
 
@@ -1104,6 +1128,27 @@ mod tests {
         contract
     }
 
+    fn establish(manager: &mut NegotiationManager, connection: ConnectionHandle) {
+        let (authority, peer) = common_offers();
+        manager.start(connection, authority, peer).unwrap();
+        let contract = common_contract();
+        manager
+            .propose(
+                connection,
+                contract.clone(),
+                &NegotiationRequirements::default(),
+            )
+            .unwrap();
+        assert_ne!(
+            manager.validate_authority(connection, &contract).unwrap(),
+            NegotiationStatus::Established
+        );
+        assert_eq!(
+            manager.validate_peer(connection, &contract).unwrap(),
+            NegotiationStatus::Established
+        );
+    }
+
     #[test]
     fn offer_validation_rejects_duplicate_and_empty_schema_entries() {
         let duplicate_protocol =
@@ -1157,19 +1202,13 @@ mod tests {
         let peer = offer(protocol(2), None, None);
 
         assert_eq!(
-            NegotiationAttempt::new(
-                ConnectionHandle::new(1),
-                authority.clone(),
-                peer,
-                OfferLimits::default(),
-            ),
+            NegotiationAttempt::new(authority.clone(), peer, OfferLimits::default()),
             Err(NegotiationError::ProtocolIncompatible)
         );
 
         let peer_same_protocol_without_capability = offer(protocol(1), None, None);
         assert_eq!(
             NegotiationAttempt::new(
-                ConnectionHandle::new(1),
                 authority,
                 peer_same_protocol_without_capability,
                 OfferLimits::default(),
@@ -1191,13 +1230,8 @@ mod tests {
             Some(schema(99, RequirementLevel::Optional, 100, 101)),
         );
         let peer = offer(protocol(1), None, None);
-        let mut attempt = NegotiationAttempt::new(
-            ConnectionHandle::new(1),
-            authority,
-            peer,
-            OfferLimits::default(),
-        )
-        .unwrap();
+        let mut attempt =
+            NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
         let contract = NegotiatedContract::new(protocol(1));
         attempt
             .propose(contract.clone(), &NegotiationRequirements::default())
@@ -1218,13 +1252,8 @@ mod tests {
     #[test]
     fn mutual_validation_must_reference_the_same_contract() {
         let (authority, peer) = common_offers();
-        let mut attempt = NegotiationAttempt::new(
-            ConnectionHandle::new(1),
-            authority,
-            peer,
-            OfferLimits::default(),
-        )
-        .unwrap();
+        let mut attempt =
+            NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
         let contract = common_contract();
         attempt
             .propose(contract.clone(), &NegotiationRequirements::default())
@@ -1249,13 +1278,8 @@ mod tests {
     #[test]
     fn imposed_requirements_cannot_be_negotiated_away() {
         let (authority, peer) = common_offers();
-        let mut attempt = NegotiationAttempt::new(
-            ConnectionHandle::new(1),
-            authority,
-            peer,
-            OfferLimits::default(),
-        )
-        .unwrap();
+        let mut attempt =
+            NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
         let mut requirements = NegotiationRequirements::default();
         requirements.require_capability(CapabilityId::new(7));
         requirements.require_schema(SchemaId::new(9));
@@ -1307,29 +1331,76 @@ mod tests {
     }
 
     #[test]
-    fn established_negotiation_is_extracted_from_the_connection_attempt() {
+    fn established_contract_remains_manager_owned_for_connection_lifetime() {
         let offer_limits = OfferLimits::default();
+        let attempt_reservation = offer_limits.max_attempt_reservation().unwrap();
         let mut manager =
             NegotiationManager::new(offer_limits, NegotiationManagerLimits::default()).unwrap();
         let connection = ConnectionHandle::new(44);
-        let (authority, peer) = common_offers();
-        manager.start(connection, authority, peer).unwrap();
-        let contract = common_contract();
-        manager
-            .propose(
-                connection,
-                contract.clone(),
-                &NegotiationRequirements::default(),
-            )
-            .unwrap();
-        manager.validate_authority(connection, &contract).unwrap();
-        manager.validate_peer(connection, &contract).unwrap();
-        let established = manager.take_established(connection).unwrap();
+        establish(&mut manager, connection);
 
+        let established = manager.established(connection).unwrap();
         assert_eq!(established.connection(), connection);
-        assert_eq!(established.contract(), &contract);
+        assert_eq!(established.contract(), &common_contract());
         assert_eq!(manager.active_attempts(), 0);
+        assert_eq!(manager.established_connections(), 1);
+        assert!(manager.reserved_bytes() < attempt_reservation);
+        assert!(manager.reserved_bytes() > 0);
+    }
+
+    #[test]
+    fn terminating_attempt_or_established_connection_releases_owned_state() {
+        let offer_limits = OfferLimits::default();
+        let reservation = offer_limits.max_attempt_reservation().unwrap();
+        let mut manager =
+            NegotiationManager::new(offer_limits, NegotiationManagerLimits::default()).unwrap();
+        let (authority, peer) = common_offers();
+        let attempt_connection = ConnectionHandle::new(1);
+        manager
+            .start(attempt_connection, authority, peer)
+            .unwrap();
+        assert_eq!(manager.reserved_bytes(), reservation);
+        assert_eq!(
+            manager.terminate(attempt_connection).unwrap(),
+            ConnectionNegotiationTermination::NegotiationAborted
+        );
         assert_eq!(manager.reserved_bytes(), 0);
+
+        let established_connection = ConnectionHandle::new(2);
+        establish(&mut manager, established_connection);
+        assert!(manager.reserved_bytes() > 0);
+        assert_eq!(
+            manager.terminate(established_connection).unwrap(),
+            ConnectionNegotiationTermination::EstablishedContractEnded
+        );
+        assert_eq!(manager.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn established_state_counts_against_aggregate_resource_budget() {
+        let offer_limits = OfferLimits::default();
+        let attempt_reservation = offer_limits.max_attempt_reservation().unwrap();
+        let manager_limits = NegotiationManagerLimits {
+            max_concurrent_attempts: 2,
+            max_aggregate_accounted_bytes: attempt_reservation,
+        };
+        let mut manager = NegotiationManager::new(offer_limits, manager_limits).unwrap();
+        let first = ConnectionHandle::new(1);
+        establish(&mut manager, first);
+        let established_bytes = manager.reserved_bytes();
+        assert!(established_bytes > 0);
+
+        let (authority, peer) = common_offers();
+        assert_eq!(
+            manager.start(ConnectionHandle::new(2), authority, peer),
+            Err(NegotiationManagerError::AggregateLimitExceeded)
+        );
+
+        manager.terminate(first).unwrap();
+        let (authority, peer) = common_offers();
+        manager
+            .start(ConnectionHandle::new(2), authority, peer)
+            .unwrap();
     }
 
     #[test]
