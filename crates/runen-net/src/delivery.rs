@@ -233,7 +233,12 @@ impl ScopeUsage {
             .expect("usage addition validated before mutation");
     }
 
-    fn remove(&mut self, active_flows: usize, pending_messages: usize, pending_payload_bytes: usize) {
+    fn remove(
+        &mut self,
+        active_flows: usize,
+        pending_messages: usize,
+        pending_payload_bytes: usize,
+    ) {
         self.active_flows -= active_flows;
         self.pending_messages -= pending_messages;
         self.pending_payload_bytes -= pending_payload_bytes;
@@ -406,12 +411,8 @@ pub enum CustodyCommitError {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ReceiveOutcome {
-    Buffered {
-        local_pressure_drops: usize,
-    },
-    DroppedByPressure {
-        local_pressure_drops: usize,
-    },
+    Buffered { local_pressure_drops: usize },
+    DroppedByPressure { local_pressure_drops: usize },
     DroppedTooLarge,
     StaleSequenced,
     DuplicateReliable,
@@ -539,11 +540,7 @@ impl DeliveryEndpoint {
             return Err(FlowEstablishmentError::FlowAlreadyExists);
         }
 
-        if !self
-            .aggregate
-            .usage
-            .can_add(self.aggregate.limits, 1, 0, 0)
-        {
+        if !self.aggregate.usage.can_add(self.aggregate.limits, 1, 0, 0) {
             return Err(FlowEstablishmentError::ActiveFlowLimitExceeded(
                 ResourceScope::Aggregate,
             ));
@@ -971,8 +968,7 @@ impl DeliveryEndpoint {
 
         if let Some(conflict) = duplicate_or_conflict {
             if conflict {
-                let _ =
-                    self.terminate_flow(key, FlowTerminationReason::ReliableTransferConflict);
+                let _ = self.terminate_flow(key, FlowTerminationReason::ReliableTransferConflict);
                 return Ok(ReceiveOutcome::TerminalReliableFailure);
             }
             self.diagnostics.reliable_duplicate_suppressions = self
