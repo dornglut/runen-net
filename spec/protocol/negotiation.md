@@ -51,6 +51,8 @@ An offer is immutable once submitted for one negotiation attempt. Changing suppo
 
 A protocol alternative is exactly one `(ProtocolId, ProtocolRevision)` pair.
 
+An offer MUST NOT contain the same exact protocol alternative more than once. Multiple ProtocolRevision alternatives for one ProtocolId are permitted when each exact pair is unique.
+
 The two peers are protocol-compatible only if their offers contain at least one exactly equal protocol alternative.
 
 The authority selects exactly one common protocol alternative for the negotiated contract.
@@ -137,6 +139,18 @@ If no common exact binding exists for an optional SchemaId, it is omitted and ne
 
 A SchemaId advertised by only one endpoint as Optional is omitted.
 
+## Protocol- and profile-imposed requirements
+
+Required/Optional flags express endpoint negotiation requirements. They MUST NOT weaken requirements already imposed by the selected ProtocolRevision or by normative RunenNet semantics applicable to the operation/profile being claimed or used.
+
+If the selected ProtocolRevision or another applicable normative owner requires a particular standardized CapabilityId or SchemaId, that requirement MUST be satisfied even when one or both endpoint offers label the entry Optional.
+
+An endpoint MUST NOT obtain compatibility by relabeling a protocol-required capability/schema Optional or by omitting a requirement the selected contract itself mandates.
+
+If such an imposed requirement cannot be satisfied by an exact common capability/schema binding, negotiation is incompatible and MUST NOT become Established.
+
+This document does not create new capability/schema requirements on behalf of another profile; concrete required identities must be owned by the protocol/profile that requires them.
+
 ## Negotiated contract
 
 A successful selection produces one **NegotiatedContract** containing exactly:
@@ -147,7 +161,7 @@ A successful selection produces one **NegotiatedContract** containing exactly:
 
 The negotiated contract MUST contain no protocol alternative, capability, schema contract, or codec that was not supported by both endpoint offers.
 
-Every Required capability and Required SchemaId from either offer MUST be satisfied in the negotiated contract.
+Every Required capability and Required SchemaId from either offer, plus every requirement imposed by the selected protocol/applicable normative profile, MUST be satisfied in the negotiated contract.
 
 A negotiated contract MUST NOT contain more than one selected binding for one SchemaId.
 
@@ -193,7 +207,7 @@ When S is selected, payload interpretation MUST use exactly the selected SchemaC
 
 An implementation MUST NOT:
 
-- choose a different locally registered schema revision because decode succeeds;
+- choose a different locally registered schema contract because decode succeeds;
 - fall back to another codec;
 - infer schema from a Rust/ECS type name;
 - interpret an unselected optional schema;
@@ -215,7 +229,7 @@ A future standardized codec profile may assign concrete CodecId values and byte 
 
 Each endpoint MUST enforce explicit finite limits for peer-controlled negotiation state before proportional allocation or registration.
 
-At minimum the initial compatibility policy MUST bound:
+At minimum the initial compatibility policy MUST bound per negotiation attempt:
 
 - total bootstrap/offer/result bytes or equivalent accountable representation size;
 - number of protocol alternatives per offer;
@@ -226,7 +240,15 @@ At minimum the initial compatibility policy MUST bound:
 - total selected schema-binding count;
 - total diagnostic-label bytes and each individual diagnostic-label length.
 
-Any additional RunenNet-owned unknown-entry, parsing, staging, retry, or negotiation-state structure influenced by peer input MUST be explicitly finite or covered by an aggregate bound above.
+A realization that can maintain more than one concurrent negotiation attempt MUST additionally impose finite higher-level bounds on:
+
+- concurrent RunenNet negotiation-state count;
+- aggregate accountable bytes retained by negotiation state across those attempts;
+- aggregate protocol/capability/schema/codec entry counts when those entries are stored independently of the per-attempt representation bound.
+
+Repeated, duplicated, retried, or reordered bootstrap messages MUST NOT cause an implementation to retain unbounded historical negotiation copies. Retry/history state is subject to the same finite per-attempt and aggregate policy.
+
+Any additional RunenNet-owned unknown-entry, parsing, staging, retry, offer/result-history, or negotiation-state structure influenced by peer input MUST be explicitly finite or covered by an aggregate bound above.
 
 A claimed count/length from a future wire representation MUST be checked against its applicable finite limit before allocating storage proportional to that claim.
 
@@ -236,7 +258,7 @@ The initial offer structure contains no unbounded opaque extension payload. A la
 
 ## Malformed offer outcomes
 
-An offer is Malformed when it violates structural rules including duplicate identities, zero contract alternatives for a schema entry, zero codec alternatives for a schema contract, or configured finite limits.
+An offer is Malformed when it violates structural rules including duplicate exact protocol alternatives, duplicate capability/schema identities, duplicate schema-contract/codec alternatives where prohibited, zero contract alternatives for a schema entry, zero codec alternatives for a schema contract, or configured finite limits.
 
 Malformed peer input MUST NOT be normalized into a valid offer by dropping duplicates, truncating silently, or applying last-wins semantics.
 
