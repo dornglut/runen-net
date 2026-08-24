@@ -2,29 +2,49 @@
 
 Status: **non-normative**
 
-This record supports [RN1C](https://github.com/dornglut/runen-net/issues/8). It compares pinned Runenwerk migration evidence with current external replication designs. It does not define RunenNet semantics.
+This record supports [RN1C](https://github.com/dornglut/runen-net/issues/8). It compares pinned Runenwerk migration evidence with established snapshot-replication designs. It does not define RunenNet semantics.
 
 Evidence snapshot:
 
 - Runenwerk: `37a267e41e49317516d6513b02794f8fc480056a` (observed 2026-08-24)
 - Lightyear replication: `0.29.0` documentation (observed 2026-08-24)
+- Valve Source multiplayer networking documentation (observed 2026-08-24)
+- Gaffer on Games, “Snapshot Compression” (2015)
 - RN1A and RN1B: accepted RunenNet normative specification on the RN1C base revision
 
 ## Current Runenwerk evidence
 
-### Active design and client implementation disagree on strict delta applicability
+### The active design's strict-current claim conflicts with the server's acknowledged-baseline strategy
 
-The active Runenwerk authoritative replication design states that a client delta must advance from the client's current cursor and claims strict delta-base validation is implemented.
+The active Runenwerk authoritative replication design says a client delta must advance from the client's current cursor and claims strict delta-base validation is implemented.
 
 Source: [Runenwerk authoritative replication design](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/docs-site/src/content/docs/design/active/net-authoritative-replication-protocol.md).
 
-The implementation does not enforce that invariant. `ClientReplicationRuntime::apply_delta_snapshot` rejects a non-advancing target cursor, then accepts any `delta.base` that remains present in its `snapshots` map. It does not require `delta.base == last_cursor`.
+The client implementation does not enforce `delta.base == last_cursor`. It accepts any declared base that remains in its retained `snapshots` map, reconstructs a merged target state from that base, and then emits an apply plan containing only the incoming delta operations.
 
 Source: [Runenwerk client replication runtime](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/runtime/client.rs).
 
-This matters because the runtime merges the delta against the retained historical base but emits an apply plan containing only the incoming delta actions. Those actions are then intended to mutate the host's current state. If the current state is newer than the declared base, the transform is being applied to a different state than the one it was derived from. Entity lifecycle operations make this particularly unsafe.
+At first glance this looks like a missing strict-current check. Deeper review shows that conclusion is incomplete because the authority deliberately constructs deltas from the latest client-ACKed cursor.
 
-The standalone semantics therefore need one unambiguous rule: an incremental delta may update the current client baseline only when its declared base is exactly the current committed cursor.
+Source: [Runenwerk authoritative server runtime](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/runtime/server.rs).
+
+Suppose cursor 1 is the authority's last received ACK. The authority can send delta `1→2`; before ACK 2 returns, it can legitimately send another current delta `1→3`. Requiring `base == current` would make `1→3` unusable after the client commits `1→2`, unless the sender waits an RTT for every delta or switches to a fragile unacknowledged chaining model.
+
+The actual Runenwerk correctness defect is therefore more specific: the client reconstructs target 3 from historical base 1, but its host apply plan contains only the `1→3` delta operations and applies those operations to whatever host state is currently installed. That mixes **historical-base reconstruction** with **current-state patch application**.
+
+The standalone semantics should instead make a delta a transform from exactly its declared retained base to one complete target state image. Once that target is reconstructed, committing it means atomically establishing/reconciling the complete target as current state. The delta operation list must never be blindly applied as though it had been derived from the current host state.
+
+### Acknowledged-baseline deltas are established practice
+
+Valve's Source networking documentation describes world updates as delta-compressed against the last acknowledged update, with full snapshots used for initial/recovery cases.
+
+Source: [Source Multiplayer Networking](https://developer.valvesoftware.com/wiki/Source_Multiplayer_Networking).
+
+Gaffer on Games describes the same core pattern: the sender encodes a new snapshot relative to a baseline the receiver has acknowledged, and updates that baseline when a newer ACK arrives. This lets the sender continue transmitting snapshots while tolerating loss and RTT.
+
+Source: [Snapshot Compression](https://gafferongames.com/post/snapshot_compression/).
+
+These are comparison evidence, not RunenNet authority. They demonstrate why acknowledged-baseline reconstruction is useful and why strict-current-only deltas would be an unnecessary protocol restriction.
 
 ### Recovery need is currently a destructive boolean
 
@@ -34,15 +54,17 @@ Malformed delta decode returns `DecodeError` without setting that recovery flag,
 
 Source: [Runenwerk client replication runtime](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/runtime/client.rs).
 
-This supports a persistent semantic recovery state that is cleared only by committing a valid full snapshot, not by observing or attempting to report the state.
+This supports persistent semantic recovery state that is cleared by a successful recovery transition, not by observation.
 
-### Client live baseline retention is unbounded by protocol policy
+### Client baseline history is useful, but it is unbounded by protocol policy
 
-`ClientReplicationRuntime` stores every decoded/merged snapshot in a `BTreeMap<SnapshotCursor, SnapshotPayload>` until reset. Under a strict-current delta model, arbitrary historical client baselines are not required for correctness.
+Because acknowledged-baseline deltas may refer to an older committed cursor, the client does need bounded historical committed state. The current `ClientReplicationRuntime` retains every decoded/merged snapshot in a `BTreeMap` until reset, with no protocol-level count/byte policy.
 
 Source: [Runenwerk client replication runtime](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/runtime/client.rs).
 
-This supports retaining one current committed replication state plus explicitly bounded staging in the minimal core. Prediction history and archival replay are separate domains.
+The correct conclusion is not “retain only current”; it is “retain only a finite live replication baseline history.” If an incoming delta references a baseline already evicted under that policy, the client cannot reconstruct it and must recover with a full snapshot.
+
+Prediction/interpolation history and archival replay remain separate retention domains.
 
 ### Server ACK validation improved but still conflates confirmation with retention
 
@@ -50,14 +72,14 @@ This supports retaining one current committed replication state plus explicitly 
 
 Source: [Runenwerk authoritative server runtime](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/runtime/server.rs).
 
-However, a pruned cursor is rejected as though the client's acknowledgement were semantically invalid. These are different facts:
+However, a pruned cursor is rejected as though the client's acknowledgement were semantically false. These are separate facts:
 
 - the client may truthfully have committed a cursor that the authority emitted;
-- the authority may no longer retain the exact state needed to use that cursor as a delta base.
+- the authority may no longer retain the exact state needed to use that cursor as a delta-compression baseline.
 
 A standalone protocol should preserve the first fact while treating the second as loss of delta eligibility requiring a full snapshot.
 
-The current implementation also treats an ACK equal to the last acknowledged cursor as stale rejection. Idempotent duplicate acknowledgement is safer for retransmission/reordering: equal confirmation can be a no-op without poisoning state, while a lower cursor is stale.
+The current implementation also treats an ACK equal to the last acknowledged cursor as stale rejection. Idempotent duplicate acknowledgement is safer: equal confirmation can be a no-op, while lower confirmation is stale.
 
 ### Baseline/checkpoint authority is duplicated across layers
 
@@ -70,7 +92,7 @@ Sources:
 - [Runenwerk authoritative server runtime](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/runtime/server.rs)
 - [Runenwerk engine networking replication state](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/engine/src/plugins/net/resources.rs)
 
-This is evidence for one RunenNet-owned semantic replication state per consumer lineage. Engine adapters may project/inspect that state but should not independently redefine ACK/baseline/recovery authority.
+This supports one RunenNet-owned semantic replication state per participant lineage. Engine adapters may project/inspect that state but should not independently redefine ACK/baseline/recovery authority.
 
 ### Timeline retention is explicit but not governed by one bounded policy
 
@@ -81,7 +103,7 @@ Sources:
 - [Runenwerk snapshot timeline](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/replication/timeline.rs)
 - [Runenwerk engine networking replication state](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/engine/src/plugins/net/resources.rs)
 
-A slow or disconnected consumer must not force unbounded live-state retention. Evicting its latest confirmed baseline is allowed under a finite policy, but that lineage then requires a new full snapshot before deltas resume.
+A slow or disconnected consumer must not force unbounded live-state retention. Both sides may evict historical baseline state under finite policy. Eviction is a recoverable compression-state loss, not permission to apply a delta to the wrong base.
 
 ### Current cursor scope follows implementation mechanics, not a demonstrated semantic boundary
 
@@ -92,7 +114,7 @@ Sources:
 - [Runenwerk snapshot timeline](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/replication/timeline.rs)
 - [Runenwerk engine networking replication state](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/engine/src/plugins/net/resources.rs)
 
-Because later interest/relevancy can make each participant's authoritative projection different, bare cursors should not acquire accidental global comparability. A participant-scoped replication lineage gives the initial core a clear baseline domain while remaining independent of transport connections.
+Because later interest/relevancy can make each participant's authoritative projection different, bare cursors should not acquire accidental global comparability. A ParticipantId-scoped replication lineage gives the initial core a clear baseline domain while remaining independent of transport connections.
 
 ### Snapshot cursor and simulation tick are already separate concepts
 
@@ -103,9 +125,9 @@ Sources:
 - [Runenwerk snapshot protocol](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/protocol/snapshot.rs)
 - [Runenwerk ACK protocol](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/protocol/ack.rs)
 
-That separation is correct. A replication cursor orders committed authoritative state revisions in its own lineage; a simulation tick names host logical simulation time; RN1B delivery sequence/order belongs to another domain again.
+That separation is correct. A replication cursor orders authoritative state revisions in its lineage; a simulation tick names host logical simulation time; RN1B delivery sequence/order is a third domain.
 
-## External comparison evidence
+## External framework comparison
 
 ### Lightyear keeps delta state as replication-specific retained state
 
@@ -116,7 +138,7 @@ Sources:
 - [Lightyear 0.29.0 replication crate](https://docs.rs/lightyear_replication/0.29.0/lightyear_replication/)
 - [Lightyear 0.29.0 DeltaManager](https://docs.rs/lightyear/0.29.0/lightyear/prelude/struct.DeltaManager.html)
 
-This is not authority for RunenNet, but it reinforces two useful separations: delta-baseline history is a replication concern, and prediction/interpolation history should not be conflated with it.
+This reinforces two useful separations: delta-baseline history is a replication concern, and prediction/interpolation history should not be conflated with it.
 
 ## Resulting design pressure
 
@@ -125,23 +147,24 @@ The evidence supports the following minimal direction for normative review:
 1. One **replication lineage** belongs to one admitted ParticipantId in the initial client/server profile. It survives temporary Unbound membership but ends with the participant incarnation.
 2. `ReplicationCursor` is monotonic only inside one lineage and is not globally comparable with another lineage.
 3. A full snapshot is a baseline-independent complete authoritative state image for that lineage at one cursor/tick.
-4. A delta declares exactly one base cursor and one newer target cursor and denotes a transform from that exact base image to the complete target image.
-5. The client may commit a delta only when `delta.base` equals its current committed cursor. A newer delta with another base cannot be applied to the current state.
-6. Commit is atomic from the replication protocol perspective: validation/decoding/delta application/host acceptance succeed before the current baseline changes.
-7. ACK means the client committed that cursor as its current authoritative baseline. It is not transport receipt or decode acknowledgement.
-8. Duplicate ACK of the currently confirmed cursor should be idempotent; lower ACK is stale; future/unverifiable ACK cannot advance confirmation.
-9. A valid client confirmation and server baseline availability are separate. If the confirmed state was evicted, the ACK can remain true while delta eligibility is false.
-10. The client needs one current committed baseline plus bounded staging for the initial strict-current model, not arbitrary historical snapshots.
-11. Server live-baseline retention is finite by count/bytes. Eviction of a consumer's latest confirmed baseline moves that lineage to full-snapshot-required recovery.
-12. Full-snapshot-required recovery is persistent until a valid full snapshot is committed by the client and confirmed to the authority as a currently usable retained baseline.
-13. A replacement connection does not inherit RN1B flow state. The initial replication profile conservatively requires a new full snapshot after rebind even if the ParticipantId/lineage persists.
-14. Prediction, interest/view construction, schema identity, and archival replay remain separate future owners.
+4. A delta declares exactly one base cursor and one newer target cursor and denotes a deterministic transform from that exact complete base image to a complete target image.
+5. The authority uses its latest client-confirmed cursor as the preferred delta-compression baseline while that exact state remains available. Multiple newer snapshots may legitimately share that ACKed base until a newer confirmation arrives.
+6. For a delta whose target is newer than the client's current state, the client may reconstruct from any retained committed base named by the delta. The base need not equal current.
+7. Reconstruction and host commit are separate: after reconstructing the complete target from the exact historical base, the client atomically establishes/reconciles the complete target as current. Delta operations are never blindly applied against an unrelated current host state.
+8. If the declared baseline is no longer retained, the delta cannot be reconstructed and persistent full-snapshot recovery is required.
+9. ACK means the client committed that cursor as its current authoritative baseline. It is not transport receipt or decode acknowledgement.
+10. Duplicate ACK of the currently confirmed cursor is idempotent; lower ACK is stale; future/unverifiable ACK cannot advance confirmation.
+11. A valid client confirmation and authority baseline availability are separate. If the confirmed state was evicted, confirmation remains true while delta eligibility becomes false.
+12. Client and authority live-baseline histories are finite by count/bytes. Eviction may increase full-snapshot recovery frequency but never weakens correctness.
+13. Full-snapshot-required recovery is persistent until a valid full snapshot is committed by the client and confirmed to the authority as a currently usable retained baseline.
+14. A replacement connection does not inherit RN1B flow state. The initial replication profile conservatively requires a new full snapshot after rebind even if the ParticipantId/lineage persists.
+15. Prediction, interest/view construction, schema identity, and archival replay remain separate future owners.
 
 ## Proposed normative ownership
 
 The evidence supports two one-way owners:
 
-- `spec/replication/consistency.md` — lineage/cursor, full/delta, commit, and acknowledgement semantics;
+- `spec/replication/consistency.md` — lineage/cursor, full/delta reconstruction, commit, and acknowledgement semantics;
 - `spec/replication/recovery.md` — live retention, baseline usability, connection-replacement recovery, and persistent full-snapshot-required state, depending on consistency semantics.
 
 The intended dependency direction is acyclic: identity → session lifecycle → delivery → replication consistency → replication recovery.
