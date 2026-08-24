@@ -266,17 +266,11 @@ impl<S> ClientReplicationSet<S> {
     }
 
     pub fn retained_image_count(&self) -> usize {
-        self.lineages
-            .values()
-            .map(ClientLineage::retained_image_count)
-            .sum()
+        self.checked_retained_image_count().unwrap_or(usize::MAX)
     }
 
     pub fn retained_state_bytes(&self) -> usize {
-        self.lineages
-            .values()
-            .map(ClientLineage::retained_state_bytes)
-            .sum()
+        self.checked_retained_state_bytes().unwrap_or(usize::MAX)
     }
 
     pub fn apply_full<E, F>(
@@ -452,6 +446,18 @@ impl<S> ClientReplicationSet<S> {
         Ok(())
     }
 
+    fn checked_retained_image_count(&self) -> Option<usize> {
+        self.lineages.values().try_fold(0usize, |total, lineage| {
+            total.checked_add(lineage.retained_image_count())
+        })
+    }
+
+    fn checked_retained_state_bytes(&self) -> Option<usize> {
+        self.lineages.values().try_fold(0usize, |total, lineage| {
+            total.checked_add(lineage.retained_state_bytes())
+        })
+    }
+
     fn aggregate_commit_fits(
         &self,
         key: ReplicationLineageKey,
@@ -462,10 +468,24 @@ impl<S> ClientReplicationSet<S> {
             .lineages
             .get(&key)
             .expect("aggregate projection uses existing lineage");
-        let current_count = self.retained_image_count();
-        let current_bytes = self.retained_state_bytes();
-        let projected_count = current_count - lineage.retained_image_count() + plan.resulting_count;
-        let projected_bytes = current_bytes - lineage.retained_state_bytes() + plan.resulting_bytes;
+        let Some(current_count) = self.checked_retained_image_count() else {
+            return false;
+        };
+        let Some(current_bytes) = self.checked_retained_state_bytes() else {
+            return false;
+        };
+        let Some(projected_count) = current_count
+            .checked_sub(lineage.retained_image_count())
+            .and_then(|count| count.checked_add(plan.resulting_count))
+        else {
+            return false;
+        };
+        let Some(projected_bytes) = current_bytes
+            .checked_sub(lineage.retained_state_bytes())
+            .and_then(|bytes| bytes.checked_add(plan.resulting_bytes))
+        else {
+            return false;
+        };
 
         projected_count <= self.limits.max_retained_images()
             && projected_bytes <= self.limits.max_retained_state_bytes()
