@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+use crate::identity::ConnectionHandle;
 use crate::identity::{IncarnationClaimError, IncarnationRegistry, ParticipantId, SessionId};
 use crate::protocol::EstablishedNegotiation;
-use crate::identity::ConnectionHandle;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SessionPhase {
@@ -80,6 +80,7 @@ pub enum SessionError {
     MembershipExpired,
     PreviousConnectionCannotReplaceItself,
     RecoveryClockRegression,
+    RecoveryExpiryOverflow,
 }
 
 #[derive(Debug)]
@@ -193,15 +194,18 @@ impl Session {
             return Err(SessionError::BindingMismatch);
         }
 
-        self.bindings.remove(&connection);
-
         match policy {
             RetentionPolicy::Terminate => {
+                self.bindings.remove(&connection);
                 self.memberships.remove(&participant);
                 Ok(ConnectionLossOutcome::Terminated)
             }
             RetentionPolicy::RetainForRecovery { duration } => {
-                let expires_at = self.recovery_clock.saturating_add(duration.get());
+                let expires_at = self
+                    .recovery_clock
+                    .checked_add(duration.get())
+                    .ok_or(SessionError::RecoveryExpiryOverflow)?;
+                self.bindings.remove(&connection);
                 self.memberships.insert(
                     participant,
                     MembershipState::Unbound {
@@ -280,7 +284,7 @@ impl Session {
         }
         self.recovery_clock = new_value;
 
-        let expired: Vec<_> = self
+        let mut expired: Vec<_> = self
             .memberships
             .iter()
             .filter_map(|(participant, state)| match state {
@@ -290,6 +294,7 @@ impl Session {
                 _ => None,
             })
             .collect();
+        expired.sort_by_key(|participant| participant.get());
 
         for participant in &expired {
             self.memberships.remove(participant);
@@ -444,6 +449,31 @@ mod tests {
     }
 
     #[test]
+    fn connection_loss_rejects_recovery_expiry_overflow_without_mutating_binding() {
+        let participant = ParticipantId::new(5);
+        let connection = ConnectionHandle::new(1);
+        let mut negotiation = manager();
+        establish(&mut negotiation, connection);
+        let mut session = Session::new(SessionId::new(10), limits());
+        session.advance_recovery_clock(u64::MAX).unwrap();
+        session
+            .admit_new(participant, negotiation.established(connection).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            session.connection_lost(
+                participant,
+                connection,
+                RetentionPolicy::RetainForRecovery {
+                    duration: NonZeroU64::new(1).unwrap(),
+                },
+            ),
+            Err(SessionError::RecoveryExpiryOverflow)
+        );
+        assert!(session.is_authorized(participant, connection));
+    }
+
+    #[test]
     fn replacement_requires_unbound_membership_and_new_negotiation() {
         let participant = ParticipantId::new(5);
         let first_connection = ConnectionHandle::new(1);
@@ -460,10 +490,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            session.bind_replacement(
-                participant,
-                negotiation.established(replacement).unwrap()
-            ),
+            session.bind_replacement(participant, negotiation.established(replacement).unwrap()),
             Err(SessionError::MembershipNotUnbound)
         );
 
@@ -477,10 +504,7 @@ mod tests {
             )
             .unwrap();
         session
-            .bind_replacement(
-                participant,
-                negotiation.established(replacement).unwrap(),
-            )
+            .bind_replacement(participant, negotiation.established(replacement).unwrap())
             .unwrap();
 
         assert!(session.is_authorized(participant, replacement));
@@ -540,7 +564,11 @@ mod tests {
             NegotiationStatus::Established
         );
         assert_eq!(
-            negotiation.established(second_connection).unwrap().contract().protocol(),
+            negotiation
+                .established(second_connection)
+                .unwrap()
+                .contract()
+                .protocol(),
             protocol()
         );
 
@@ -651,12 +679,38 @@ mod tests {
         session.advance_recovery_clock(1).unwrap();
 
         assert_eq!(
-            session.bind_replacement(
-                participant,
-                negotiation.established(replacement).unwrap(),
-            ),
+            session.bind_replacement(participant, negotiation.established(replacement).unwrap()),
             Err(SessionError::ParticipantNotFound)
         );
+    }
+
+    #[test]
+    fn expiry_reporting_is_deterministic_by_participant_identity() {
+        let first = ParticipantId::new(9);
+        let second = ParticipantId::new(3);
+        let first_connection = ConnectionHandle::new(1);
+        let second_connection = ConnectionHandle::new(2);
+        let mut negotiation = manager();
+        establish(&mut negotiation, first_connection);
+        establish(&mut negotiation, second_connection);
+        let mut session = Session::new(SessionId::new(10), limits());
+        session
+            .admit_new(first, negotiation.established(first_connection).unwrap())
+            .unwrap();
+        session
+            .admit_new(second, negotiation.established(second_connection).unwrap())
+            .unwrap();
+        let policy = RetentionPolicy::RetainForRecovery {
+            duration: NonZeroU64::new(1).unwrap(),
+        };
+        session
+            .connection_lost(first, first_connection, policy)
+            .unwrap();
+        session
+            .connection_lost(second, second_connection, policy)
+            .unwrap();
+
+        assert_eq!(session.advance_recovery_clock(1).unwrap(), vec![second, first]);
     }
 
     #[test]
