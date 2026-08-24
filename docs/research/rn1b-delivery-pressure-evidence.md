@@ -30,6 +30,14 @@ Sources:
 
 Source: [Runenwerk session runtime command boundary](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/session/ids.rs).
 
+### Delivery must exist before participant admission
+
+Current Runenwerk begins a client session by sending `Hello` and `JoinRequest` while the client has no admitted `ConnectionId`. Only `JoinAccepted` transitions the client to active and records that identity.
+
+That means a generic delivery abstraction cannot require an already-admitted participant membership. Pre-admission control traffic needs delivery semantics over the transport-connection lifetime without granting participant authority.
+
+Source: [Runenwerk client session handoff](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/session/handoff.rs).
+
 ### Current QUIC realization changes guarantee according to payload size
 
 `engine_net_quic::send_envelope` serializes an envelope and calls `send_datagram` whenever the encoded payload fits the current QUIC datagram limit. Otherwise it opens a new unidirectional stream.
@@ -102,17 +110,18 @@ This supports keeping generic delivery guarantees separate from bandwidth priori
 
 The evidence supports a minimal RN1B model:
 
-1. A **delivery flow** is a unidirectional semantic message domain scoped to one current RunenNet session/participant connection binding. It is not a QUIC stream or datagram lane.
-2. A flow's delivery mode is fixed before message submission reaches a transport adapter.
-3. The initial core needs three demonstrated modes: **ReliableOrdered**, **UnreliableUnordered**, and **UnreliableSequenced**.
-4. Reliable unordered delivery is useful in other frameworks but is not required by current Runenwerk migration evidence for RN2; it can be added later without weakening the three initial modes.
-5. `UnreliableSequenced` is receiver-side monotonic exposure: later sequence values may make older arrivals stale. It does not automatically mean sender-side keyed latest-value coalescing.
-6. Message submission must distinguish **rejected before acceptance** from **accepted under a mode**. Reliable messages may be rejected under pressure before acceptance, but accepted reliable messages cannot then be silently evicted while the flow is still operational.
-7. Reliable delivery must be conditional on an operational flow. Connection/flow failure can leave accepted messages unexposed, but that failure must be explicit rather than represented as successful reliable delivery.
-8. Payload size may reject a submission or require same-mode fragmentation/realization; it must never switch the selected delivery mode.
-9. Local pressure needs explicit finite message/byte bounds. Unreliable queues may deliberately evict only under an explicitly selected lossy policy; reliable queues may not.
-10. Receiver pressure follows the same semantic distinction: reliable traffic requires backpressure or explicit terminal failure, while unreliable traffic may be dropped.
-11. Priority, send cadence, application-keyed supersession, deadlines, input buffering, replication policy, and reconnect transfer are separate concerns and should remain undefined until independently justified.
+1. A **delivery flow** is a unidirectional semantic message domain established over one transport-connection lifetime. It is not the transport connection itself, a QUIC stream, or a datagram lane.
+2. Delivery flows may exist before participant admission. Delivery acceptance/exposure does not grant participant authority; session lifecycle remains the owner of admission and connection binding.
+3. A flow's delivery mode is fixed before message submission reaches a transport adapter.
+4. The initial core needs three demonstrated modes: **ReliableOrdered**, **UnreliableUnordered**, and **UnreliableSequenced**.
+5. Reliable unordered delivery is useful in other frameworks but is not required by current Runenwerk migration evidence for RN2; it can be added later without weakening the three initial modes.
+6. `UnreliableSequenced` is receiver-side monotonic exposure: later sequence values may make older arrivals stale. It does not automatically mean sender-side keyed latest-value coalescing.
+7. Message submission must distinguish **rejected before acceptance** from **accepted under a mode**. Reliable messages may be rejected under pressure before acceptance, but accepted reliable messages cannot then be silently evicted while the flow is still operational.
+8. Reliable delivery must be conditional on an operational flow. Connection/flow failure can leave accepted messages unexposed, but that failure must be explicit rather than represented as successful reliable delivery.
+9. Payload size may reject a submission or require same-mode fragmentation/realization; it must never switch the selected delivery mode.
+10. Local pressure needs explicit finite message/byte/flow-count bounds at flow and connection scope, plus aggregate bounds that include pre-admission connections. Unreliable queues may deliberately evict only under an explicitly selected lossy policy; reliable queues may not.
+11. Receiver pressure follows the same semantic distinction: reliable traffic requires backpressure or explicit terminal failure, while unreliable traffic may be dropped.
+12. Priority, send cadence, application-keyed supersession, deadlines, input buffering, replication policy, and reconnect transfer are separate concerns and should remain undefined until independently justified.
 
 ## Proposed normative ownership
 
@@ -121,4 +130,4 @@ The evidence supports two one-way owners:
 - `spec/delivery/flow.md` — delivery-flow lifetime, submission/acceptance/exposure, and delivery modes;
 - `spec/delivery/pressure.md` — finite resource policy and pressure outcomes, depending on the flow semantics.
 
-This dependency direction is acyclic: identity → session lifecycle → delivery flow → delivery pressure.
+This dependency direction is acyclic: session lifecycle → delivery flow → delivery pressure. Identity remains a dependency of session lifecycle rather than being redefined by delivery.
