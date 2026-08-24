@@ -45,7 +45,7 @@ Whether the participant is admitted, bound to a transport connection, retained a
 
 ## Network entity identity
 
-A **NetworkEntityId** identifies one replicated entity incarnation within one session.
+A **NetworkEntityId** identifies one network entity incarnation within one session.
 
 NetworkEntityId uniqueness is scoped by SessionId. A NetworkEntityId MUST NOT identify more than one entity incarnation within the same session, and once assigned it MUST NOT later identify a different entity incarnation before that session ends.
 
@@ -77,8 +77,6 @@ Connection binding and replacement are not defined by this document.
 
 ## Additional identity domains
 
-The initial core does not define a separate authority-generation or authority-epoch identifier.
+No separate authority-generation or authority-epoch identifier is defined by this revision.
 
 Authentication principals, persistent account identities, matchmaking identities, and cross-session persistent entity identities are also outside this identity model.
-
-Preserving one SessionId across replacement of the authority responsible for that session is not defined by this revision.
