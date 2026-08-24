@@ -15,7 +15,7 @@ Each open session has exactly one **authority**. For the lifecycle owned by this
 - authorization of current participant connection bindings and replacements;
 - closure of the session.
 
-Other specifications MAY assign additional authoritative decisions within the same session model. Those responsibilities remain owned by those specifications rather than by this lifecycle document.
+Authority responsibilities outside this lifecycle are not defined by this document.
 
 Authority is a semantic role. It MUST NOT be inferred from a socket address, transport connection identifier, thread, process, ECS resource, or ownership of a transport adapter.
 
