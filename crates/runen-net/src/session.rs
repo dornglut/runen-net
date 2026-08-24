@@ -750,10 +750,7 @@ mod tests {
             session.connection_lost(participant, connection, RetentionPolicy::Terminate),
             Err(SessionError::Closed)
         );
-        assert_eq!(
-            session.advance_recovery_clock(1),
-            Err(SessionError::Closed)
-        );
+        assert_eq!(session.advance_recovery_clock(1), Err(SessionError::Closed));
     }
 
     #[test]
