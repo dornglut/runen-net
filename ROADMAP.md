@@ -10,7 +10,7 @@ Establish the standalone product boundary, documentation authority, specificatio
 
 ## RN1 — Semantic contracts
 
-Specify the minimum transport-independent model required for implementation: identity, session/authority lifecycle, delivery contracts, replication baseline/acknowledgement/resynchronization semantics, resource-bound principles, and conformance claims.
+Specify the minimum transport-independent model required for implementation: identity, session/authority lifecycle, delivery contracts, replication baseline/acknowledgement/resynchronization semantics, resource-bound invariants, and conformance claims.
 
 **Gate:** implementation-critical invariants have normative owners; unresolved items are explicit rather than filled by implementation convenience.
 
@@ -18,7 +18,7 @@ Specify the minimum transport-independent model required for implementation: ide
 
 Implement the accepted RN1 state machines and contracts without Runenwerk, ECS, sockets, or production transport assumptions. Add a deterministic in-memory/fault transport and executable conformance coverage.
 
-**Gate:** semantic behavior is testable independently of engine and production transport realization.
+**Gate:** accepted semantic behavior, including required correctness and resource invariants, is testable independently of engine and production transport realization.
 
 ## RN3 — Standalone proof
 
@@ -26,11 +26,11 @@ Provide a plain-Rust authoritative client/server example using ordinary host-own
 
 **Gate:** the example requires no Runenwerk, concrete ECS, engine plugin/schedule system, or spatial/rendering framework.
 
-## RN4 — Correctness and resource hardening
+## RN4 — Fault and adversarial hardening
 
-Close protocol correctness and adversarial-resource gaps: baseline applicability, explicit resynchronization state, bounded retention/queues, sequencing, pressure policy, malformed input handling, and remotely influenced allocation limits.
+Expand assurance around the accepted core under loss, reordering, duplication, saturation, malformed input, reconnect, retention pressure, and hostile resource claims. Harden implementation limits without postponing correctness rules that belong to RN1/RN2.
 
-**Gate:** conformance and fault tests cover recovery and bounded behavior under loss, reordering, duplication, saturation, malformed input, and reconnect conditions.
+**Gate:** conformance and fault tests demonstrate bounded, deterministic recovery behavior across the supported failure model.
 
 ## RN5 — QUIC realization
 
