@@ -946,7 +946,8 @@ impl<S, D> AuthorityReplicationSession<S, D> {
     }
 
     fn checked_accounted_state_bytes(&self) -> Option<usize> {
-        self.checked_retained_state_bytes()?.checked_add(self.checked_pending_candidate_bytes()?)
+        self.checked_retained_state_bytes()?
+            .checked_add(self.checked_pending_candidate_bytes()?)
     }
 
     fn aggregate_reservations_fit(&self) -> bool {
@@ -978,7 +979,8 @@ impl<S, D> AuthorityReplicationSession<S, D> {
         else {
             return false;
         };
-        let Some(projected_evidence_count) = emission_evidence_count.checked_add(pending_count) else {
+        let Some(projected_evidence_count) = emission_evidence_count.checked_add(pending_count)
+        else {
             return false;
         };
 
