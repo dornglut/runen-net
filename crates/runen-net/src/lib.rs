@@ -7,4 +7,5 @@
 pub mod delivery;
 pub mod identity;
 pub mod protocol;
+pub mod replication;
 pub mod session;
