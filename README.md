@@ -11,5 +11,3 @@ Runenwerk is a downstream consumer of RunenNet, not its architectural host. Exis
 - [Roadmap](ROADMAP.md) — sequencing and acceptance gates.
 - [Repository testing](TESTING.md) — canonical mechanical validation.
 - [Documentation architecture](docs/documentation-architecture.md) — documentation ownership and dependency direction.
-
-Current foundation work is tracked by [RN0 — standalone authority, specification architecture, and extraction boundary](https://github.com/dornglut/runen-net/issues/1).
