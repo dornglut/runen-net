@@ -47,7 +47,11 @@ A **ProtocolRevision** identifies one exact immutable protocol contract within o
 
 ProtocolRevision is opaque and non-ordered for compatibility purposes. Numeric or lexical ordering of its concrete representation, if any, MUST NOT imply backwards, forwards, or mutual compatibility.
 
-Changing a protocol contract in a way that requires different peer interpretation requires a distinct ProtocolRevision unless another normative specification explicitly defines compatibility between those contracts.
+Changing the logical protocol contract in a way that requires different peer interpretation requires a distinct ProtocolRevision unless another normative specification explicitly defines compatibility between those contracts.
+
+Changing only a separately negotiated SchemaContractId, CodecId, application content contract, or optional CapabilityId does **not** by itself require changing ProtocolRevision when the logical protocol contract remains unchanged. Those identity domains evolve independently.
+
+Conversely, changing ProtocolRevision MUST NOT silently change the meaning of an existing SchemaId, SchemaContractId, CodecId, or CapabilityId. Any cross-domain dependency must be stated explicitly by the normative contract that introduces it.
 
 The initial compatibility model recognizes interoperability only through an exact common ProtocolId and ProtocolRevision selected by negotiation.
 
