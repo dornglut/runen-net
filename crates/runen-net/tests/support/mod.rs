@@ -1,12 +1,9 @@
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryTransfer, ReceiveOutcome};
 
 #[derive(Debug)]
 struct Staged {
-    source: DeliveryFlowKey,
     target: DeliveryFlowKey,
     transfer: DeliveryTransfer,
 }
@@ -39,10 +36,6 @@ impl FaultStage {
         self.queue.len()
     }
 
-    pub(crate) const fn payload_bytes(&self) -> usize {
-        self.bytes
-    }
-
     fn has_capacity(&self, bytes: usize) -> bool {
         self.queue.len() < self.max_messages
             && self
@@ -70,7 +63,6 @@ impl FaultStage {
             .unwrap();
         self.bytes += transfer.payload_len();
         self.queue.push_back(Staged {
-            source: source_flow,
             target: target_flow,
             transfer,
         });
@@ -86,7 +78,6 @@ impl FaultStage {
         }
 
         let copy = Staged {
-            source: staged.source,
             target: staged.target,
             transfer: staged.transfer.clone(),
         };
