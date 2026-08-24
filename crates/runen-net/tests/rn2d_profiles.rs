@@ -44,6 +44,16 @@ fn reliable_policy() -> FlowResourcePolicy {
     )
 }
 
+fn unreliable_policy() -> FlowResourcePolicy {
+    FlowResourcePolicy::new(
+        nz(32),
+        nz(16),
+        nz(256),
+        OutboundPressureBehavior::RejectNew,
+        ReceiverPressureBehavior::DropIncomingUnreliable,
+    )
+}
+
 fn flow(connection: ConnectionHandle, direction: FlowDirection, handle: u64) -> DeliveryFlowKey {
     DeliveryFlowKey::new(connection, direction, DeliveryFlowHandle::new(handle))
 }
@@ -325,24 +335,43 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
     );
 
     let aggregate = delivery_limits();
-    let policy = reliable_policy();
-    let first_outbound = flow(first_connection, FlowDirection::Outbound, 7);
-    let first_inbound = flow(first_connection, FlowDirection::Inbound, 7);
+    let full_policy = reliable_policy();
+    let delta_policy = unreliable_policy();
+    let full_outbound = flow(first_connection, FlowDirection::Outbound, 7);
+    let full_inbound = flow(first_connection, FlowDirection::Inbound, 7);
+    let delta_outbound = flow(first_connection, FlowDirection::Outbound, 8);
+    let delta_inbound = flow(first_connection, FlowDirection::Inbound, 8);
     let mut sender = DeliveryEndpoint::new(aggregate);
     let mut receiver = DeliveryEndpoint::new(aggregate);
     sender
         .establish_flow(
-            first_outbound,
+            full_outbound,
             DeliveryMode::ReliableOrdered,
-            policy,
+            full_policy,
             aggregate,
         )
         .unwrap();
     receiver
         .establish_flow(
-            first_inbound,
+            full_inbound,
             DeliveryMode::ReliableOrdered,
-            policy,
+            full_policy,
+            aggregate,
+        )
+        .unwrap();
+    sender
+        .establish_flow(
+            delta_outbound,
+            DeliveryMode::UnreliableUnordered,
+            delta_policy,
+            aggregate,
+        )
+        .unwrap();
+    receiver
+        .establish_flow(
+            delta_inbound,
+            DeliveryMode::UnreliableUnordered,
+            delta_policy,
             aggregate,
         )
         .unwrap();
@@ -353,7 +382,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         .prepare_full(participant, full_one.clone(), true)
         .unwrap();
 
-    let rejected = sender.submit(first_outbound, vec![0; 33]).unwrap();
+    let rejected = sender.submit(full_outbound, vec![0; 33]).unwrap();
     assert_eq!(rejected, SubmissionOutcome::RejectedTooLarge);
     assert_eq!(
         authority
@@ -369,14 +398,14 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         None
     );
 
-    let accepted_full = sender.submit(first_outbound, b"full-1".to_vec()).unwrap();
+    let accepted_full = sender.submit(full_outbound, b"full-1".to_vec()).unwrap();
     authority
         .record_delivery_submission(participant, accepted_full)
         .unwrap()
         .expect("RN1B acceptance records snapshot emission");
-    assert!(stage.take(&mut sender, first_outbound, first_inbound));
+    assert!(stage.take(&mut sender, full_outbound, full_inbound));
     stage.deliver(0, &mut receiver);
-    assert_reliable_exposure(&mut receiver, first_inbound, &[b"full-1"]);
+    assert_reliable_exposure(&mut receiver, full_inbound, &[b"full-1"]);
     assert_eq!(
         client
             .apply_full(key, full_one, |_| Ok::<_, ()>(()))
@@ -399,8 +428,9 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         AuthorityReplicationState::DeltaEligible(ReplicationCursor::new(1))
     );
 
-    // Loss of a newer delta does not move the client and does not make the
-    // authority pick a different historical base while confirmation is unchanged.
+    // Replication semantics remain correct when a later profile chooses a
+    // delivery mode that permits delta loss. The authority keeps using the
+    // exact latest confirmed base rather than substituting another retained base.
     let delta_two = authority
         .prepare_delta(
             participant,
@@ -412,11 +442,11 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         )
         .unwrap();
     assert_eq!(delta_two.base_cursor, Some(ReplicationCursor::new(1)));
-    let accepted_delta_two = sender.submit(first_outbound, b"delta-2".to_vec()).unwrap();
+    let accepted_delta_two = sender.submit(delta_outbound, b"delta-2".to_vec()).unwrap();
     authority
         .record_delivery_submission(participant, accepted_delta_two)
         .unwrap();
-    assert!(stage.take(&mut sender, first_outbound, first_inbound));
+    assert!(stage.take(&mut sender, delta_outbound, delta_inbound));
     stage.drop_at(0);
     assert_eq!(
         client.lineage(key).unwrap().current_cursor(),
@@ -434,13 +464,18 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         )
         .unwrap();
     assert_eq!(delta_three.base_cursor, Some(ReplicationCursor::new(1)));
-    let accepted_delta_three = sender.submit(first_outbound, b"delta-3".to_vec()).unwrap();
+    let accepted_delta_three = sender.submit(delta_outbound, b"delta-3".to_vec()).unwrap();
     authority
         .record_delivery_submission(participant, accepted_delta_three)
         .unwrap();
-    assert!(stage.take(&mut sender, first_outbound, first_inbound));
+    assert!(stage.take(&mut sender, delta_outbound, delta_inbound));
     stage.deliver(0, &mut receiver);
-    assert_reliable_exposure(&mut receiver, first_inbound, &[b"delta-3"]);
+    let delta_exposure = receiver
+        .poll_exposure(delta_inbound)
+        .unwrap()
+        .expect("newer unreliable delta should expose after the older delta is lost");
+    assert_eq!(delta_exposure.payload(), b"delta-3");
+    assert!(receiver.poll_exposure(delta_inbound).unwrap().is_none());
 
     let mut reconstructed_from = None;
     assert_eq!(
@@ -502,13 +537,13 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
     authority
         .prepare_full(participant, full_four.clone(), true)
         .unwrap();
-    let accepted_full_four = sender.submit(first_outbound, b"full-4".to_vec()).unwrap();
+    let accepted_full_four = sender.submit(full_outbound, b"full-4".to_vec()).unwrap();
     authority
         .record_delivery_submission(participant, accepted_full_four)
         .unwrap();
-    assert!(stage.take(&mut sender, first_outbound, first_inbound));
+    assert!(stage.take(&mut sender, full_outbound, full_inbound));
     stage.deliver(0, &mut receiver);
-    assert_reliable_exposure(&mut receiver, first_inbound, &[b"full-4"]);
+    assert_reliable_exposure(&mut receiver, full_inbound, &[b"full-4"]);
     assert_eq!(
         client
             .apply_full(key, full_four, |_| Ok::<_, ()>(()))
@@ -580,7 +615,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         .establish_flow(
             replacement_outbound,
             DeliveryMode::ReliableOrdered,
-            policy,
+            full_policy,
             aggregate,
         )
         .unwrap();
@@ -588,7 +623,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         .establish_flow(
             replacement_inbound,
             DeliveryMode::ReliableOrdered,
-            policy,
+            full_policy,
             aggregate,
         )
         .unwrap();
