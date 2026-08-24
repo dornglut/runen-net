@@ -150,6 +150,23 @@ A CapabilityId MAY have a bounded diagnostic label. The label is not identity.
 
 Whether a protocol/schema/capability is **required** or **optional** in one compatibility offer is a negotiation property. It does not change the identity or meaning of that ProtocolRevision, SchemaContractId, CodecId, or CapabilityId.
 
+## Identity registration integrity
+
+Every local registry or configuration that assigns semantics to RunenNet protocol identities MUST preserve one meaning per exact identity.
+
+A conforming implementation MUST reject contradictory local registrations including:
+
+- the same `(ProtocolId, ProtocolRevision)` mapped to different logical protocol contracts;
+- the same `(SchemaId, SchemaContractId)` mapped to different semantic schema contracts;
+- the same CodecId mapped to different codec contracts;
+- the same CapabilityId mapped to different capability contracts.
+
+Such conflicts are configuration/registration defects. They MUST NOT be resolved by registration order, last-wins replacement, diagnostic-name preference, or peer-supplied metadata.
+
+Peer-provided labels or manifest metadata MUST NOT mutate the local semantic meaning assigned to an identity.
+
+This revision does not define a global registry or allocation authority for application/vendor extension identities. Extension authors are responsible for assigning stable identities that they do not knowingly reuse for different contracts. A future registry/namespace profile may strengthen collision-avoidance mechanisms.
+
 ## Identity comparison
 
 Identity equality in this specification means exact equality within the same identity domain.
