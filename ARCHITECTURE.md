@@ -19,7 +19,7 @@ Consumer integrations may depend on RunenNet plus their host frameworks outside 
 
 ## Dependency law
 
-Networking semantics are established before transport realization. Transport-independent semantic packages MUST NOT depend on a production transport, socket API, or executor-specific runtime API. Transport/runtime adapters may realize accepted contracts but MUST NOT silently alter any accepted RunenNet delivery, pressure, recovery, protocol, or replication semantics.
+Networking semantics are established before transport realization. Transport-independent semantic packages MUST NOT depend on a production transport, socket API, or executor-specific runtime API. Transport/runtime adapters may realize accepted contracts but MUST NOT silently alter any accepted RunenNet semantic contract.
 
 Terms or feature families that are not yet normatively defined — including currently deferred priority, keyed supersession, advanced reconnect/history, prediction, and interest semantics — are not implementation authority merely because a future adapter or consumer needs them.
 
