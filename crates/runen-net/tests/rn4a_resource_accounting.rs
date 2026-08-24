@@ -12,14 +12,8 @@ fn nz(value: usize) -> NonZeroUsize {
 }
 
 fn extreme_retention() -> ReplicationRetentionLimits {
-    ReplicationRetentionLimits::new(
-        nz(usize::MAX),
-        nz(2),
-        nz(usize::MAX),
-        nz(usize::MAX),
-        nz(2),
-    )
-    .unwrap()
+    ReplicationRetentionLimits::new(nz(usize::MAX), nz(2), nz(usize::MAX), nz(usize::MAX), nz(2))
+        .unwrap()
 }
 
 #[test]
@@ -29,18 +23,10 @@ fn authority_aggregate_overflow_rejects_second_candidate_without_mutation() {
     let first_bytes = usize::MAX - 8;
     let mut authority = AuthorityReplicationSession::<(), ()>::new(
         SessionId::new(1),
-        AuthorityAggregateLimits::new(
-            nz(2),
-            nz(usize::MAX),
-            nz(4),
-            nz(usize::MAX),
-            nz(4),
-        ),
+        AuthorityAggregateLimits::new(nz(2), nz(usize::MAX), nz(4), nz(usize::MAX), nz(4)),
     );
     authority.add_lineage(first, extreme_retention()).unwrap();
-    authority
-        .add_lineage(second, extreme_retention())
-        .unwrap();
+    authority.add_lineage(second, extreme_retention()).unwrap();
 
     authority
         .prepare_full(
@@ -89,11 +75,8 @@ fn client_projection_overflow_fails_before_host_commit_and_preserves_state() {
     let first = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
     let second = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(2));
     let first_bytes = usize::MAX - 32;
-    let mut client = ClientReplicationSet::new(ClientAggregateLimits::new(
-        nz(2),
-        nz(4),
-        nz(usize::MAX),
-    ));
+    let mut client =
+        ClientReplicationSet::new(ClientAggregateLimits::new(nz(2), nz(4), nz(usize::MAX)));
     client.add_lineage(first, extreme_retention()).unwrap();
     client.add_lineage(second, extreme_retention()).unwrap();
 
