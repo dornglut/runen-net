@@ -284,7 +284,10 @@ fn client_recovery_is_persistent_and_atomic() {
         client.lineage(key).unwrap().current_cursor(),
         Some(ReplicationCursor::new(3))
     );
-    assert_eq!(client.lineage(key).unwrap().current_state().unwrap(), &state(3));
+    assert_eq!(
+        client.lineage(key).unwrap().current_state().unwrap(),
+        &state(3)
+    );
 
     let recovered = client
         .apply_full(
