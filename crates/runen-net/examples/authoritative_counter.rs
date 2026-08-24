@@ -138,10 +138,7 @@ fn run() {
         Some(schema_binding())
     );
 
-    let mut session = Session::new(
-        session_id,
-        SessionLimits::new(nz(4), nz(2)).unwrap(),
-    );
+    let mut session = Session::new(session_id, SessionLimits::new(nz(4), nz(2)).unwrap());
     session.admit_new(participant, established).unwrap();
     assert!(session.is_authorized(participant, connection));
 
@@ -218,13 +215,7 @@ fn run() {
         .record_delivery_submission(participant, full_submission)
         .unwrap()
         .expect("accepted delivery records full-snapshot emission");
-    transfer_one(
-        &mut sender,
-        outbound,
-        &mut receiver,
-        inbound,
-        b"full:1",
-    );
+    transfer_one(&mut sender, outbound, &mut receiver, inbound, b"full:1");
     assert_eq!(
         client
             .apply_full(lineage, full, |state| {
@@ -237,12 +228,7 @@ fn run() {
     assert_eq!(client_state, server_state);
     assert_eq!(
         authority
-            .acknowledge_authorized(
-                &session,
-                connection,
-                participant,
-                ReplicationCursor::new(1),
-            )
+            .acknowledge_authorized(&session, connection, participant, ReplicationCursor::new(1),)
             .unwrap(),
         AuthorityAckOutcome::Confirmed
     );
@@ -264,10 +250,7 @@ fn run() {
             0,
         )
         .unwrap();
-    assert_eq!(
-        prepared_delta.base_cursor,
-        Some(ReplicationCursor::new(1))
-    );
+    assert_eq!(prepared_delta.base_cursor, Some(ReplicationCursor::new(1)));
     let delta_submission = sender.submit(outbound, b"delta:2".to_vec()).unwrap();
     assert!(matches!(
         delta_submission,
@@ -277,13 +260,7 @@ fn run() {
         .record_delivery_submission(participant, delta_submission)
         .unwrap()
         .expect("accepted delivery records delta emission");
-    transfer_one(
-        &mut sender,
-        outbound,
-        &mut receiver,
-        inbound,
-        b"delta:2",
-    );
+    transfer_one(&mut sender, outbound, &mut receiver, inbound, b"delta:2");
 
     // Reconstruction receives the exact declared retained baseline. The host
     // commit callback installs the complete candidate into separate client state.
@@ -323,12 +300,7 @@ fn run() {
     );
     assert_eq!(
         authority
-            .acknowledge_authorized(
-                &session,
-                connection,
-                participant,
-                ReplicationCursor::new(2),
-            )
+            .acknowledge_authorized(&session, connection, participant, ReplicationCursor::new(2),)
             .unwrap(),
         AuthorityAckOutcome::Confirmed
     );
