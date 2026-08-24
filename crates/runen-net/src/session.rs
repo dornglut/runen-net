@@ -49,10 +49,7 @@ pub enum SessionLimitError {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MembershipState {
     Bound(ConnectionHandle),
-    Unbound {
-        expires_at: u64,
-        previous_connection: ConnectionHandle,
-    },
+    Unbound { expires_at: u64 },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -83,6 +80,12 @@ pub enum SessionError {
     RecoveryExpiryOverflow,
 }
 
+#[derive(Debug, Copy, Clone)]
+struct MembershipRecord {
+    state: MembershipState,
+    previous_connection: Option<ConnectionHandle>,
+}
+
 #[derive(Debug)]
 pub struct Session {
     id: SessionId,
@@ -90,7 +93,7 @@ pub struct Session {
     limits: SessionLimits,
     recovery_clock: u64,
     used_participants: IncarnationRegistry<ParticipantId>,
-    memberships: HashMap<ParticipantId, MembershipState>,
+    memberships: HashMap<ParticipantId, MembershipRecord>,
     bindings: HashMap<ConnectionHandle, ParticipantId>,
 }
 
@@ -130,12 +133,12 @@ impl Session {
     pub fn retained_memberships(&self) -> usize {
         self.memberships
             .values()
-            .filter(|state| matches!(state, MembershipState::Unbound { .. }))
+            .filter(|record| matches!(record.state, MembershipState::Unbound { .. }))
             .count()
     }
 
     pub fn membership_state(&self, participant: ParticipantId) -> Option<MembershipState> {
-        self.memberships.get(&participant).copied()
+        self.memberships.get(&participant).map(|record| record.state)
     }
 
     pub fn participant_for_connection(
@@ -172,8 +175,13 @@ impl Session {
             .claim(participant)
             .map_err(map_participant_claim_error)?;
         self.bindings.insert(connection, participant);
-        self.memberships
-            .insert(participant, MembershipState::Bound(connection));
+        self.memberships.insert(
+            participant,
+            MembershipRecord {
+                state: MembershipState::Bound(connection),
+                previous_connection: None,
+            },
+        );
         Ok(())
     }
 
@@ -186,7 +194,7 @@ impl Session {
         let state = self
             .memberships
             .get(&participant)
-            .copied()
+            .map(|record| record.state)
             .ok_or(SessionError::ParticipantNotFound)?;
         if state != MembershipState::Bound(connection)
             || !self.is_authorized(participant, connection)
@@ -208,9 +216,9 @@ impl Session {
                 self.bindings.remove(&connection);
                 self.memberships.insert(
                     participant,
-                    MembershipState::Unbound {
-                        expires_at,
-                        previous_connection: connection,
+                    MembershipRecord {
+                        state: MembershipState::Unbound { expires_at },
+                        previous_connection: Some(connection),
                     },
                 );
                 Ok(ConnectionLossOutcome::Retained { expires_at })
@@ -230,16 +238,12 @@ impl Session {
             return Err(SessionError::ConnectionAlreadyBound);
         }
 
-        let state = self
+        let record = self
             .memberships
             .get(&participant)
             .copied()
             .ok_or(SessionError::ParticipantNotFound)?;
-        let MembershipState::Unbound {
-            expires_at,
-            previous_connection,
-        } = state
-        else {
+        let MembershipState::Unbound { expires_at } = record.state else {
             return Err(SessionError::MembershipNotUnbound);
         };
 
@@ -247,13 +251,18 @@ impl Session {
             self.memberships.remove(&participant);
             return Err(SessionError::MembershipExpired);
         }
-        if connection == previous_connection {
+        if record.previous_connection == Some(connection) {
             return Err(SessionError::PreviousConnectionCannotReplaceItself);
         }
 
         self.bindings.insert(connection, participant);
-        self.memberships
-            .insert(participant, MembershipState::Bound(connection));
+        self.memberships.insert(
+            participant,
+            MembershipRecord {
+                state: MembershipState::Bound(connection),
+                previous_connection: None,
+            },
+        );
         Ok(())
     }
 
@@ -262,14 +271,14 @@ impl Session {
         participant: ParticipantId,
     ) -> Result<MembershipState, SessionError> {
         self.require_open()?;
-        let state = self
+        let record = self
             .memberships
             .remove(&participant)
             .ok_or(SessionError::ParticipantNotFound)?;
-        if let MembershipState::Bound(connection) = state {
+        if let MembershipState::Bound(connection) = record.state {
             self.bindings.remove(&connection);
         }
-        Ok(state)
+        Ok(record.state)
     }
 
     /// Advances the host/runtime recovery clock used only for retained-membership expiry.
@@ -287,8 +296,8 @@ impl Session {
         let mut expired: Vec<_> = self
             .memberships
             .iter()
-            .filter_map(|(participant, state)| match state {
-                MembershipState::Unbound { expires_at, .. } if *expires_at <= new_value => {
+            .filter_map(|(participant, record)| match record.state {
+                MembershipState::Unbound { expires_at } if expires_at <= new_value => {
                     Some(*participant)
                 }
                 _ => None,
@@ -434,10 +443,7 @@ mod tests {
         assert!(!session.is_authorized(participant, connection));
         assert_eq!(
             session.membership_state(participant),
-            Some(MembershipState::Unbound {
-                expires_at: 5,
-                previous_connection: connection
-            })
+            Some(MembershipState::Unbound { expires_at: 5 })
         );
 
         assert!(session.advance_recovery_clock(4).unwrap().is_empty());
@@ -622,10 +628,7 @@ mod tests {
 
         assert_eq!(
             session.remove_participant(participant).unwrap(),
-            MembershipState::Unbound {
-                expires_at: 5,
-                previous_connection: connection
-            }
+            MembershipState::Unbound { expires_at: 5 }
         );
         assert_eq!(session.membership_state(participant), None);
     }
