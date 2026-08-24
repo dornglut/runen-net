@@ -163,21 +163,21 @@ impl Session {
     }
 
     pub fn negotiated_contract(&self, connection: ConnectionHandle) -> Option<&NegotiatedContract> {
-        self.bindings.get(&connection).map(|binding| &binding.contract)
+        self.bindings
+            .get(&connection)
+            .map(|binding| &binding.contract)
     }
 
     pub fn participant_for_connection(
         &self,
         connection: ConnectionHandle,
     ) -> Option<ParticipantId> {
-        self.bindings.get(&connection).map(|binding| binding.participant)
+        self.bindings
+            .get(&connection)
+            .map(|binding| binding.participant)
     }
 
-    pub fn is_authorized(
-        &self,
-        participant: ParticipantId,
-        connection: ConnectionHandle,
-    ) -> bool {
+    pub fn is_authorized(&self, participant: ParticipantId, connection: ConnectionHandle) -> bool {
         self.bindings
             .get(&connection)
             .is_some_and(|binding| binding.participant == participant)
@@ -236,7 +236,8 @@ impl Session {
             .get(&participant)
             .copied()
             .ok_or(SessionError::ParticipantNotFound)?;
-        if state != MembershipState::Bound(connection) || !self.is_authorized(participant, connection)
+        if state != MembershipState::Bound(connection)
+            || !self.is_authorized(participant, connection)
         {
             return Err(SessionError::BindingMismatch);
         }
@@ -386,11 +387,9 @@ mod tests {
     }
 
     fn established(connection: ConnectionHandle) -> EstablishedNegotiation {
-        let mut manager = NegotiationManager::new(
-            OfferLimits::default(),
-            NegotiationManagerLimits::default(),
-        )
-        .unwrap();
+        let mut manager =
+            NegotiationManager::new(OfferLimits::default(), NegotiationManagerLimits::default())
+                .unwrap();
         let offer = CompatibilityOffer::new(vec![protocol()], vec![], vec![], None);
         manager.start(connection, offer.clone(), offer).unwrap();
         let contract = NegotiatedContract::new(protocol());
@@ -453,7 +452,10 @@ mod tests {
         );
 
         assert!(session.advance_recovery_clock(4).unwrap().is_empty());
-        assert_eq!(session.advance_recovery_clock(5).unwrap(), vec![participant]);
+        assert_eq!(
+            session.advance_recovery_clock(5).unwrap(),
+            vec![participant]
+        );
         assert_eq!(session.membership_state(participant), None);
     }
 
@@ -487,7 +489,10 @@ mod tests {
 
         assert!(session.is_authorized(participant, replacement));
         assert!(!session.is_authorized(participant, first_connection));
-        assert_eq!(session.negotiated_contract(replacement).unwrap().protocol(), protocol());
+        assert_eq!(
+            session.negotiated_contract(replacement).unwrap().protocol(),
+            protocol()
+        );
     }
 
     #[test]
@@ -528,10 +533,7 @@ mod tests {
         assert_eq!(session.phase(), SessionPhase::Closed);
         assert!(!session.is_authorized(participant, connection));
         assert_eq!(
-            session.admit_new(
-                ParticipantId::new(6),
-                established(ConnectionHandle::new(2))
-            ),
+            session.admit_new(ParticipantId::new(6), established(ConnectionHandle::new(2))),
             Err(SessionError::Closed)
         );
     }
