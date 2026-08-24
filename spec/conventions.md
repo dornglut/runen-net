@@ -40,7 +40,3 @@ A normative artifact MAY reference another normative owner or state relationship
 If two normative artifacts appear to define the same semantic responsibility, that is a specification defect requiring explicit ownership correction. Implementation behavior and document order do not resolve such conflicts.
 
 Non-normative material never overrides normative text.
-
-## Host and transport independence
-
-Unless a normative profile explicitly says otherwise, RunenNet semantics MUST NOT be inferred from a particular engine, ECS, operating system, async executor, serialization crate, or transport realization.
