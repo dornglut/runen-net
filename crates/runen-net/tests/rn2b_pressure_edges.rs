@@ -148,7 +148,10 @@ fn connection_pending_pressure_never_evicts_another_flows_data() {
         endpoint.submit(second, b"reject".to_vec()).unwrap(),
         SubmissionOutcome::RejectedPressure
     );
-    assert_eq!(endpoint.peek_outbound(first).unwrap().unwrap().payload(), b"keep");
+    assert_eq!(
+        endpoint.peek_outbound(first).unwrap().unwrap().payload(),
+        b"keep"
+    );
     assert!(endpoint.peek_outbound(second).unwrap().is_none());
     assert_eq!(endpoint.diagnostics().outbound_unreliable_pressure_drops, 0);
 }
