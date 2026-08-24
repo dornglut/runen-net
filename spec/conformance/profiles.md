@@ -13,7 +13,7 @@ A **RunenNet conformance claim** states:
 - the exact RunenNet specification version being claimed; and
 - one or more claimable profile names defined by that specification version.
 
-An implementation MUST satisfy every implementation-applicable normative rule included by every profile it claims.
+An implementation MUST satisfy every normative requirement addressed to conforming implementations by every profile it claims.
 
 The current provisional revision does not define independently versioned profile contracts. A profile name identifies the profile contract defined by the claimed RunenNet specification version.
 
@@ -21,17 +21,27 @@ Future revisions MAY introduce independently versioned profiles only with an exp
 
 ## No partial profile claims
 
-An implementation that implements only part of a profile MUST NOT claim conformance to that profile.
+An implementation that implements only part of a profile's defined normative requirements MUST NOT claim conformance to that profile.
 
 Terms such as “mostly Core,” “Core-compatible,” or “AuthoritativeReplication except recovery” are not standardized RunenNet conformance claims.
 
 An implementation MAY describe partial or experimental support in ordinary documentation provided that it does not present that description as a standardized conformance claim.
 
+## Provisional and incomplete specification scope
+
+A conformance claim to this provisional specification covers only the normative requirements actually defined by the claimed specification revision and profiles.
+
+If an included normative artifact is marked **incomplete**, its already-defined rules remain binding, but semantic items explicitly left open remain undefined according to [Specification conventions](../conventions.md).
+
+A conforming implementation MUST NOT present its implementation choice for an open specification item as standardized RunenNet behavior merely because it satisfies the currently defined profile requirements.
+
+A provisional conformance claim therefore does not imply that the profile is feature-complete, wire-interoperable, or stable across future specification revisions.
+
 ## Core profile
 
 **Core** is the base RunenNet conformance profile.
 
-A Core claim includes the implementation-applicable normative rules owned by:
+A Core claim includes the normative requirements addressed to conforming implementations by:
 
 - [Core identity and time](../core/identity.md);
 - [Session and authority lifecycle](../session/lifecycle.md);
@@ -65,7 +75,7 @@ An in-memory or deterministic fault transport can therefore be sufficient to exe
 
 **AuthoritativeReplication** extends Core with the initial single-authority replication consistency and recovery contract.
 
-An AuthoritativeReplication claim includes all Core rules plus the implementation-applicable normative rules owned by:
+An AuthoritativeReplication claim includes all Core rules plus the normative requirements addressed to conforming implementations by:
 
 - [Authoritative replication consistency](../replication/consistency.md);
 - [Replication retention and full-snapshot recovery](../replication/recovery.md).
