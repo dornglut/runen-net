@@ -4,6 +4,7 @@
 //! Rust representations in this crate are implementation choices unless a
 //! specification revision explicitly standardizes them.
 
+pub mod delivery;
 pub mod identity;
 pub mod protocol;
 pub mod session;
