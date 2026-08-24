@@ -248,7 +248,8 @@ impl<S> ClientReplicationSet<S> {
         if self.lineages.len() >= self.limits.max_lineages() {
             return Err(ClientSetError::AggregateLineageLimitExceeded);
         }
-        self.lineages.insert(key, ClientLineage::new(key, retention));
+        self.lineages
+            .insert(key, ClientLineage::new(key, retention));
         Ok(())
     }
 
@@ -288,7 +289,10 @@ impl<S> ClientReplicationSet<S> {
         F: FnOnce(&S) -> Result<(), E>,
     {
         let (target, tick, image) = snapshot.into_parts();
-        let lineage = self.lineages.get(&key).ok_or(ClientSetError::UnknownLineage)?;
+        let lineage = self
+            .lineages
+            .get(&key)
+            .ok_or(ClientSetError::UnknownLineage)?;
 
         if let Some(classification) = lineage.classify_cursor(target) {
             return Ok(classification);
@@ -328,7 +332,10 @@ impl<S> ClientReplicationSet<S> {
         let (base_cursor, target, tick, delta) = snapshot.into_parts();
 
         {
-            let lineage = self.lineages.get(&key).ok_or(ClientSetError::UnknownLineage)?;
+            let lineage = self
+                .lineages
+                .get(&key)
+                .ok_or(ClientSetError::UnknownLineage)?;
             if let Some(classification) = lineage.classify_cursor(target) {
                 return Ok(classification);
             }
@@ -345,30 +352,43 @@ impl<S> ClientReplicationSet<S> {
             return Ok(ClientSnapshotOutcome::MalformedDelta);
         }
 
-        let candidate = {
-            let lineage = self.lineages.get(&key).expect("lineage checked above");
-            if lineage.tick_regresses_current(tick) {
-                None
-            } else {
-                let Some(base) = lineage.retained.get(&base_cursor) else {
-                    self.enter_recovery(key, ClientRecoveryReason::MissingBase)?;
-                    return Ok(ClientSnapshotOutcome::MissingBase);
-                };
-                if tick < base.tick {
-                    None
-                } else {
-                    Some(reconstruct(
-                        base.image.state(),
-                        &delta,
-                        lineage.limits.max_candidate_bytes_per_lineage(),
-                    ))
-                }
-            }
-        };
-
-        let Some(candidate) = candidate else {
+        let current_tick_regression = self
+            .lineages
+            .get(&key)
+            .expect("lineage checked above")
+            .tick_regresses_current(tick);
+        if current_tick_regression {
             self.enter_recovery(key, ClientRecoveryReason::DeltaTickRegression)?;
             return Ok(ClientSnapshotOutcome::TickRegression);
+        }
+
+        let base_tick = self
+            .lineages
+            .get(&key)
+            .expect("lineage checked above")
+            .retained
+            .get(&base_cursor)
+            .map(|base| base.tick);
+        let Some(base_tick) = base_tick else {
+            self.enter_recovery(key, ClientRecoveryReason::MissingBase)?;
+            return Ok(ClientSnapshotOutcome::MissingBase);
+        };
+        if tick < base_tick {
+            self.enter_recovery(key, ClientRecoveryReason::DeltaTickRegression)?;
+            return Ok(ClientSnapshotOutcome::TickRegression);
+        }
+
+        let candidate = {
+            let lineage = self.lineages.get(&key).expect("lineage checked above");
+            let base = lineage
+                .retained
+                .get(&base_cursor)
+                .expect("base checked immediately above");
+            reconstruct(
+                base.image.state(),
+                &delta,
+                lineage.limits.max_candidate_bytes_per_lineage(),
+            )
         };
         let candidate = match candidate {
             Ok(candidate) => candidate,
