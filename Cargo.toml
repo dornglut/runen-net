@@ -1,0 +1,11 @@
+[workspace]
+members = ["tools/xtask"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_lifetimes = "deny"
+unused_qualifications = "deny"
