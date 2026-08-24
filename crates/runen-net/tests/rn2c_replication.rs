@@ -15,8 +15,8 @@ use runen_net::replication::{
     AccountedState, AuthorityAckOutcome, AuthorityAggregateLimits, AuthorityRecoveryReason,
     AuthorityReplicationSession, AuthorityReplicationState, AuthoritySessionError,
     ClientAggregateLimits, ClientRecoveryReason, ClientReplicationSet, ClientReplicationState,
-    ClientSnapshotOutcome, DeltaSnapshot, FullSnapshot, RecoveryGeneration, ReplicationCursor,
-    ReplicationLineageKey, ReplicationRetentionLimits,
+    ClientSnapshotOutcome, DeltaSnapshot, FullSnapshot, ReplicationCursor, ReplicationLineageKey,
+    ReplicationRetentionLimits,
 };
 use runen_net::session::{RetentionPolicy, Session, SessionLimits};
 
@@ -74,10 +74,7 @@ fn authorized_session(
 ) -> Session {
     let mut manager = negotiation_manager();
     establish(&mut manager, connection);
-    let mut session = Session::new(
-        session_id,
-        SessionLimits::new(nz(8), nz(4)).unwrap(),
-    );
+    let mut session = Session::new(session_id, SessionLimits::new(nz(8), nz(4)).unwrap());
     session
         .admit_new(participant, manager.established(connection).unwrap())
         .unwrap();
@@ -140,7 +137,7 @@ fn emit_delta(
 }
 
 #[test]
-fn lineage_scope_and_historical_base_reconstruction_are_exact() {
+fn historical_delta_uses_exact_session_scoped_baseline() {
     let participant = ParticipantId::new(7);
     let first = ReplicationLineageKey::new(SessionId::new(1), participant);
     let second = ReplicationLineageKey::new(SessionId::new(2), participant);
@@ -196,18 +193,26 @@ fn lineage_scope_and_historical_base_reconstruction_are_exact() {
         )
         .unwrap();
 
-    assert_eq!(outcome, ClientSnapshotOutcome::Committed(ReplicationCursor::new(4)));
+    assert_eq!(
+        outcome,
+        ClientSnapshotOutcome::Committed(ReplicationCursor::new(4))
+    );
     let first_state = client.lineage(first).unwrap().current_state().unwrap();
     assert_eq!(first_state.get("value"), Some(&4));
     assert!(!first_state.contains_key("current_only"));
     assert_eq!(
-        client.lineage(second).unwrap().current_state().unwrap().get("value"),
+        client
+            .lineage(second)
+            .unwrap()
+            .current_state()
+            .unwrap()
+            .get("value"),
         Some(&20)
     );
 }
 
 #[test]
-fn client_failures_preserve_commit_and_recovery_barriers() {
+fn client_recovery_is_persistent_and_atomic() {
     let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
     let mut client = ClientReplicationSet::new(client_limits(8, 256));
     client.add_lineage(key, retention(8)).unwrap();
@@ -225,7 +230,9 @@ fn client_failures_preserve_commit_and_recovery_barriers() {
             |_| Ok::<_, ()>(()),
         )
         .unwrap();
-    client.evict_historical(key, ReplicationCursor::new(1)).unwrap();
+    client
+        .evict_historical(key, ReplicationCursor::new(1))
+        .unwrap();
 
     let missing = client
         .apply_delta(
@@ -241,11 +248,8 @@ fn client_failures_preserve_commit_and_recovery_barriers() {
         )
         .unwrap();
     assert_eq!(missing, ClientSnapshotOutcome::MissingBase);
-    let lineage = client.lineage(key).unwrap();
-    assert_eq!(lineage.current_cursor(), Some(ReplicationCursor::new(3)));
-    assert_eq!(lineage.current_state().unwrap().get("value"), Some(&3));
     assert_eq!(
-        lineage.replication_state(),
+        client.lineage(key).unwrap().replication_state(),
         ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::MissingBase)
     );
 
@@ -276,7 +280,11 @@ fn client_failures_preserve_commit_and_recovery_barriers() {
         )
         .unwrap();
     assert_eq!(invalid_full, ClientSnapshotOutcome::TickRegression);
-    assert_eq!(client.lineage(key).unwrap().current_cursor(), Some(ReplicationCursor::new(3)));
+    assert_eq!(
+        client.lineage(key).unwrap().current_cursor(),
+        Some(ReplicationCursor::new(3))
+    );
+    assert_eq!(client.lineage(key).unwrap().current_state().unwrap(), &state(3));
 
     let recovered = client
         .apply_full(
@@ -285,7 +293,10 @@ fn client_failures_preserve_commit_and_recovery_barriers() {
             |_| Ok::<_, ()>(()),
         )
         .unwrap();
-    assert_eq!(recovered, ClientSnapshotOutcome::Committed(ReplicationCursor::new(4)));
+    assert_eq!(
+        recovered,
+        ClientSnapshotOutcome::Committed(ReplicationCursor::new(4))
+    );
     assert_eq!(
         client.lineage(key).unwrap().replication_state(),
         ClientReplicationState::Synchronized
@@ -293,7 +304,7 @@ fn client_failures_preserve_commit_and_recovery_barriers() {
 }
 
 #[test]
-fn delta_commit_failure_enters_recovery_without_advancing_state() {
+fn delta_host_commit_failure_does_not_advance_protocol_state() {
     let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
     let mut client = ClientReplicationSet::new(client_limits(8, 256));
     client.add_lineage(key, retention(8)).unwrap();
@@ -321,7 +332,7 @@ fn delta_commit_failure_enters_recovery_without_advancing_state() {
     assert_eq!(failed, ClientSnapshotOutcome::HostCommitFailure);
     let lineage = client.lineage(key).unwrap();
     assert_eq!(lineage.current_cursor(), Some(ReplicationCursor::new(1)));
-    assert_eq!(lineage.current_state().unwrap().get("value"), Some(&1));
+    assert_eq!(lineage.current_state().unwrap(), &state(1));
     assert_eq!(
         lineage.replication_state(),
         ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::DeltaCommitFailure)
@@ -329,7 +340,7 @@ fn delta_commit_failure_enters_recovery_without_advancing_state() {
 }
 
 #[test]
-fn actual_delivery_acceptance_is_the_only_emission_boundary() {
+fn rn1b_acceptance_is_the_only_authority_emission_boundary() {
     let participant = ParticipantId::new(1);
     let mut authority = AuthorityReplicationSession::<BTreeMap<&'static str, i32>, ()>::new(
         SessionId::new(1),
@@ -370,8 +381,20 @@ fn actual_delivery_acceptance_is_the_only_emission_boundary() {
             .unwrap(),
         None
     );
-    assert_eq!(authority.lineage(participant).unwrap().greatest_emitted_cursor(), None);
-    assert!(authority.lineage(participant).unwrap().pending_snapshot().is_some());
+    assert_eq!(
+        authority
+            .lineage(participant)
+            .unwrap()
+            .greatest_emitted_cursor(),
+        None
+    );
+    assert!(
+        authority
+            .lineage(participant)
+            .unwrap()
+            .pending_snapshot()
+            .is_some()
+    );
 
     let accepted = delivery.submit(flow, vec![0; 4]).unwrap();
     assert!(matches!(accepted, SubmissionOutcome::Accepted { .. }));
@@ -380,13 +403,16 @@ fn actual_delivery_acceptance_is_the_only_emission_boundary() {
         .unwrap()
         .expect("accepted delivery records emission");
     assert_eq!(
-        authority.lineage(participant).unwrap().greatest_emitted_cursor(),
+        authority
+            .lineage(participant)
+            .unwrap()
+            .greatest_emitted_cursor(),
         Some(ReplicationCursor::new(1))
     );
 }
 
 #[test]
-fn ack_skipping_and_evidence_eviction_keep_future_distinct_from_unverifiable() {
+fn ack_evidence_eviction_stays_distinct_from_future_confirmation() {
     let participant = ParticipantId::new(1);
     let connection = ConnectionHandle::new(1);
     let session = authorized_session(SessionId::new(1), participant, connection);
@@ -425,13 +451,16 @@ fn ack_skipping_and_evidence_eviction_keep_future_distinct_from_unverifiable() {
         AuthorityAckOutcome::Confirmed
     );
     assert_eq!(
-        authority.lineage(participant).unwrap().latest_confirmed_cursor(),
+        authority
+            .lineage(participant)
+            .unwrap()
+            .latest_confirmed_cursor(),
         Some(ReplicationCursor::new(3))
     );
 }
 
 #[test]
-fn confirmed_ack_without_retained_baseline_enters_full_recovery() {
+fn truthful_ack_without_retained_baseline_requires_full_recovery() {
     let participant = ParticipantId::new(1);
     let connection = ConnectionHandle::new(1);
     let session = authorized_session(SessionId::new(1), participant, connection);
@@ -445,9 +474,11 @@ fn confirmed_ack_without_retained_baseline_enters_full_recovery() {
         .acknowledge_authorized(&session, connection, participant, ReplicationCursor::new(1))
         .unwrap();
     emit_delta(&mut authority, participant, 2, 2, 2);
-    assert!(authority
-        .evict_retained_state(participant, ReplicationCursor::new(2))
-        .unwrap());
+    assert!(
+        authority
+            .evict_retained_state(participant, ReplicationCursor::new(2))
+            .unwrap()
+    );
 
     assert_eq!(
         authority
@@ -456,7 +487,10 @@ fn confirmed_ack_without_retained_baseline_enters_full_recovery() {
         AuthorityAckOutcome::Confirmed
     );
     let lineage = authority.lineage(participant).unwrap();
-    assert_eq!(lineage.latest_confirmed_cursor(), Some(ReplicationCursor::new(2)));
+    assert_eq!(
+        lineage.latest_confirmed_cursor(),
+        Some(ReplicationCursor::new(2))
+    );
     assert!(matches!(
         lineage.replication_state(),
         AuthorityReplicationState::FullSnapshotRequired {
@@ -467,19 +501,19 @@ fn confirmed_ack_without_retained_baseline_enters_full_recovery() {
 }
 
 #[test]
-fn new_recovery_generation_cancels_pending_and_old_full_cannot_clear_replacement() {
+fn replacement_generation_rejects_old_recovery_completion() {
     let participant = ParticipantId::new(1);
     let first_connection = ConnectionHandle::new(1);
     let replacement = ConnectionHandle::new(2);
     let mut negotiation = negotiation_manager();
     establish(&mut negotiation, first_connection);
     establish(&mut negotiation, replacement);
-    let mut session = Session::new(
-        SessionId::new(1),
-        SessionLimits::new(nz(8), nz(4)).unwrap(),
-    );
+    let mut session = Session::new(SessionId::new(1), SessionLimits::new(nz(8), nz(4)).unwrap());
     session
-        .admit_new(participant, negotiation.established(first_connection).unwrap())
+        .admit_new(
+            participant,
+            negotiation.established(first_connection).unwrap(),
+        )
         .unwrap();
 
     let mut authority = AuthorityReplicationSession::<BTreeMap<&'static str, i32>, ()>::new(
@@ -507,11 +541,23 @@ fn new_recovery_generation_cancels_pending_and_old_full_cannot_clear_replacement
             0,
         )
         .unwrap();
-    assert!(authority.lineage(participant).unwrap().pending_snapshot().is_some());
+    assert!(
+        authority
+            .lineage(participant)
+            .unwrap()
+            .pending_snapshot()
+            .is_some()
+    );
     authority
         .require_full_recovery(participant, AuthorityRecoveryReason::RecoveryDemand)
         .unwrap();
-    assert!(authority.lineage(participant).unwrap().pending_snapshot().is_none());
+    assert!(
+        authority
+            .lineage(participant)
+            .unwrap()
+            .pending_snapshot()
+            .is_none()
+    );
 
     emit_full(&mut authority, participant, 2, 2, 2, true);
     session
@@ -530,11 +576,11 @@ fn new_recovery_generation_cancels_pending_and_old_full_cannot_clear_replacement
         .connection_replaced(&session, replacement, participant)
         .unwrap();
 
-    let current_generation = match authority.lineage(participant).unwrap().replication_state() {
+    let generation = match authority.lineage(participant).unwrap().replication_state() {
         AuthorityReplicationState::FullSnapshotRequired { generation, .. } => generation,
         other => panic!("expected recovery, got {other:?}"),
     };
-    assert_eq!(current_generation, RecoveryGeneration::new(2));
+    assert_eq!(generation.get(), 2);
 
     assert_eq!(
         authority
@@ -547,13 +593,12 @@ fn new_recovery_generation_cancels_pending_and_old_full_cannot_clear_replacement
             .unwrap(),
         AuthorityAckOutcome::Confirmed
     );
-    assert!(matches!(
-        authority.lineage(participant).unwrap().replication_state(),
-        AuthorityReplicationState::FullSnapshotRequired {
-            generation: RecoveryGeneration::new(2),
-            ..
-        }
-    ));
+    let generation_after_old_ack = match authority.lineage(participant).unwrap().replication_state()
+    {
+        AuthorityReplicationState::FullSnapshotRequired { generation, .. } => generation,
+        other => panic!("old recovery ACK cleared generation: {other:?}"),
+    };
+    assert_eq!(generation_after_old_ack.get(), 2);
 
     emit_full(&mut authority, participant, 3, 3, 3, true);
     assert!(matches!(
@@ -575,7 +620,7 @@ fn new_recovery_generation_cancels_pending_and_old_full_cannot_clear_replacement
 }
 
 #[test]
-fn unrelated_connection_cannot_advance_authority_confirmation() {
+fn unrelated_connection_cannot_advance_confirmation() {
     let participant = ParticipantId::new(1);
     let connection = ConnectionHandle::new(1);
     let session = authorized_session(SessionId::new(1), participant, connection);
@@ -595,11 +640,17 @@ fn unrelated_connection_cannot_advance_authority_confirmation() {
         ),
         Err(AuthoritySessionError::Operation(_))
     ));
-    assert_eq!(authority.lineage(participant).unwrap().latest_confirmed_cursor(), None);
+    assert_eq!(
+        authority
+            .lineage(participant)
+            .unwrap()
+            .latest_confirmed_cursor(),
+        None
+    );
 }
 
 #[test]
-fn aggregate_retention_limits_are_enforced_across_lineages() {
+fn aggregate_client_retention_is_enforced_across_lineages() {
     let participant = ParticipantId::new(1);
     let first = ReplicationLineageKey::new(SessionId::new(1), participant);
     let second = ReplicationLineageKey::new(SessionId::new(2), participant);
