@@ -92,7 +92,7 @@ Sources:
 - [Runenwerk authoritative server runtime](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/net/engine_net/src/runtime/server.rs)
 - [Runenwerk engine networking replication state](https://github.com/dornglut/runenwerk/blob/37a267e41e49317516d6513b02794f8fc480056a/engine/src/plugins/net/resources.rs)
 
-This supports one RunenNet-owned semantic replication state per participant lineage. Engine adapters may project/inspect that state but should not independently redefine ACK/baseline/recovery authority.
+This supports one RunenNet-owned semantic replication state per participant lineage. Engine adapters may project or inspect that state but should not independently redefine ACK, baseline, or recovery authority.
 
 ### Timeline retention is explicit but not governed by one bounded policy
 
@@ -140,6 +140,16 @@ Sources:
 
 This reinforces two useful separations: delta-baseline history is a replication concern, and prediction/interpolation history should not be conflated with it.
 
+## Additional recovery-state review
+
+The initial recovery draft also needed a stale-ack boundary that Runenwerk's boolean model does not provide. A full snapshot sent during one recovery attempt must not be able to clear a later recovery episode after connection replacement or another explicit recovery boundary.
+
+That leads to a local authority-side **recovery generation**: qualifying recovery full snapshots are created/designated after the generation begins, are newer than its start cursor watermark, and remain associated with that generation in emitted-snapshot evidence. An ACK for an older recovery full can still be a truthful replication confirmation, but it cannot satisfy a newer recovery generation.
+
+The same boundary must prevent not-yet-emitted delta work from crossing from `DeltaEligible` into `FullSnapshotRequired`. Already emitted deltas remain historical facts; queued candidates that have not yet reached RN1B acceptance must be invalidated.
+
+These requirements are state-machine correctness constraints derived from RN1A/RN1B and the replication model; they are not imported from an external framework.
+
 ## Resulting design pressure
 
 The evidence supports the following minimal direction for normative review:
@@ -148,23 +158,26 @@ The evidence supports the following minimal direction for normative review:
 2. `ReplicationCursor` is monotonic only inside one lineage and is not globally comparable with another lineage.
 3. A full snapshot is a baseline-independent complete authoritative state image for that lineage at one cursor/tick.
 4. A delta declares exactly one base cursor and one newer target cursor and denotes a deterministic transform from that exact complete base image to a complete target image.
-5. The authority uses its latest client-confirmed cursor as the preferred delta-compression baseline while that exact state remains available. Multiple newer snapshots may legitimately share that ACKed base until a newer confirmation arrives.
+5. The authority uses its latest client-confirmed cursor as the delta-compression baseline while that exact state remains available. Multiple newer snapshots may legitimately share that ACKed base until a newer confirmation arrives.
 6. For a delta whose target is newer than the client's current state, the client may reconstruct from any retained committed base named by the delta. The base need not equal current.
 7. Reconstruction and host commit are separate: after reconstructing the complete target from the exact historical base, the client atomically establishes/reconciles the complete target as current. Delta operations are never blindly applied against an unrelated current host state.
 8. If the declared baseline is no longer retained, the delta cannot be reconstructed and persistent full-snapshot recovery is required.
-9. ACK means the client committed that cursor as its current authoritative baseline. It is not transport receipt or decode acknowledgement.
-10. Duplicate ACK of the currently confirmed cursor is idempotent; lower ACK is stale; future/unverifiable ACK cannot advance confirmation.
+9. ACK means the client committed that cursor as its current authoritative state. It is not transport receipt or decode acknowledgement.
+10. Duplicate ACK of the currently confirmed cursor is idempotent; lower ACK is stale; future or unverifiable ACK cannot advance confirmation.
 11. A valid client confirmation and authority baseline availability are separate. If the confirmed state was evicted, confirmation remains true while delta eligibility becomes false.
-12. Client and authority live-baseline histories are finite by count/bytes. Eviction may increase full-snapshot recovery frequency but never weakens correctness.
-13. Full-snapshot-required recovery is persistent until a valid full snapshot is committed by the client and confirmed to the authority as a currently usable retained baseline.
-14. A replacement connection does not inherit RN1B flow state. The initial replication profile conservatively requires a new full snapshot after rebind even if the ParticipantId/lineage persists.
-15. Prediction, interest/view construction, schema identity, and archival replay remain separate future owners.
+12. Client and authority live-baseline histories are finite by count and bytes. Aggregate lineage counts and bytes are also finite. Eviction may increase full-snapshot recovery frequency but never weakens correctness.
+13. Client `FullSnapshotRequired` persists until the client successfully commits a valid newer full snapshot. Reading or reporting recovery state never clears it.
+14. Authority `FullSnapshotRequired` persists until a qualifying full snapshot from the current recovery generation is Confirmed and its exact state remains BaselineAvailable.
+15. Recovery generations prevent delayed ACKs, re-tagged older full snapshots, and connection-replacement races from falsely restoring delta eligibility.
+16. Crossing into authority recovery invalidates not-yet-emitted delta work for that lineage; already emitted delivery remains historical and is handled by client candidate/recovery rules.
+17. A replacement connection does not inherit RN1B flow state. The initial replication profile conservatively starts a fresh full-snapshot recovery generation after rebind even if the ParticipantId and replication lineage persist.
+18. Prediction, interest/view construction, schema identity, and archival replay remain separate future owners.
 
 ## Proposed normative ownership
 
 The evidence supports two one-way owners:
 
 - `spec/replication/consistency.md` — lineage/cursor, full/delta reconstruction, commit, and acknowledgement semantics;
-- `spec/replication/recovery.md` — live retention, baseline usability, connection-replacement recovery, and persistent full-snapshot-required state, depending on consistency semantics.
+- `spec/replication/recovery.md` — live retention, baseline usability, recovery generation, connection-replacement recovery, and persistent full-snapshot-required state, depending on consistency semantics.
 
 The intended dependency direction is acyclic: identity → session lifecycle → delivery → replication consistency → replication recovery.
