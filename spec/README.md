@@ -13,5 +13,8 @@ Implementation packages, Runenwerk behavior, roadmap items, and research records
 - [Delivery pressure and resource policy](delivery/pressure.md)
 - [Authoritative replication consistency](replication/consistency.md)
 - [Replication retention and full-snapshot recovery](replication/recovery.md)
+- [Protocol, schema, codec, and capability identity](protocol/identity.md)
+- [Protocol and schema negotiation](protocol/negotiation.md)
+- [Conformance profiles](conformance/profiles.md)
 
 Semantic areas not linked from this index are not defined by this revision.
