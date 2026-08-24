@@ -39,6 +39,9 @@ impl SimulationTick {
 /// Local implementation handle for one transport-connection lifetime.
 ///
 /// This is deliberately not RunenNet protocol identity and has no wire meaning.
+/// The transport/runtime integration must keep handles distinct while any
+/// RunenNet state may still refer to different transport-connection lifetimes;
+/// RunenNet does not provide a process-global connection-handle allocator.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct ConnectionHandle(u64);
 
@@ -130,5 +133,16 @@ mod tests {
         );
         assert!(registry.contains(first));
         assert_eq!(registry.len(), 2);
+    }
+
+    #[test]
+    fn session_identity_non_reuse_can_be_owned_without_global_state() {
+        let mut registry = IncarnationRegistry::new(NonZeroUsize::new(2).unwrap());
+        let session = SessionId::new(17);
+        assert_eq!(registry.claim(session), Ok(()));
+        assert_eq!(
+            registry.claim(session),
+            Err(IncarnationClaimError::AlreadyUsed)
+        );
     }
 }
