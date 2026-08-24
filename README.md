@@ -2,6 +2,12 @@
 
 RunenNet is a standalone, engine-independent Rust networking framework.
 
-The repository is being established under [RN0 — standalone authority, specification architecture, and extraction boundary](https://github.com/dornglut/runen-net/issues/1).
+Runenwerk is a downstream consumer of RunenNet, not its architectural host. Existing Runenwerk networking code is migration evidence only unless its semantics are deliberately specified and accepted here.
 
-No Runenwerk networking implementation is authoritative here unless and until its semantics are deliberately specified and accepted by RunenNet.
+## Repository authority
+
+- [Specification](spec/README.md) — normative RunenNet semantics.
+- [Repository architecture](ARCHITECTURE.md) — package and dependency boundaries.
+- [Roadmap](ROADMAP.md) — sequencing and acceptance gates.
+- [Repository testing](TESTING.md) — canonical mechanical validation.
+- [Documentation architecture](docs/documentation-architecture.md) — documentation ownership and dependency direction.

@@ -1,0 +1,2 @@
+[alias]
+validate = "run --locked --package xtask -- validate"
