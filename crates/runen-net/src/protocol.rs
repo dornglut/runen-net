@@ -874,9 +874,7 @@ impl NegotiationManager {
         connection: ConnectionHandle,
         contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationManagerError> {
-        let status = self
-            .attempt_mut(connection)?
-            .validate_authority(contract)?;
+        let status = self.attempt_mut(connection)?.validate_authority(contract)?;
         if status == NegotiationStatus::Established {
             self.promote_established(connection)?;
         }
@@ -986,9 +984,11 @@ impl NegotiationManager {
             .remove(&connection)
             .ok_or(NegotiationManagerError::UnknownConnection)?;
         debug_assert_eq!(attempt.status(), NegotiationStatus::Established);
-        let contract = attempt.proposal.ok_or(NegotiationManagerError::Negotiation(
-            NegotiationError::NoProposal,
-        ))?;
+        let contract = attempt
+            .proposal
+            .ok_or(NegotiationManagerError::Negotiation(
+                NegotiationError::NoProposal,
+            ))?;
 
         self.reserved_bytes -= self.per_attempt_reservation;
         self.reserved_bytes += contract_bytes;
@@ -1230,8 +1230,7 @@ mod tests {
             Some(schema(99, RequirementLevel::Optional, 100, 101)),
         );
         let peer = offer(protocol(1), None, None);
-        let mut attempt =
-            NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
+        let mut attempt = NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
         let contract = NegotiatedContract::new(protocol(1));
         attempt
             .propose(contract.clone(), &NegotiationRequirements::default())
@@ -1252,8 +1251,7 @@ mod tests {
     #[test]
     fn mutual_validation_must_reference_the_same_contract() {
         let (authority, peer) = common_offers();
-        let mut attempt =
-            NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
+        let mut attempt = NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
         let contract = common_contract();
         attempt
             .propose(contract.clone(), &NegotiationRequirements::default())
@@ -1278,8 +1276,7 @@ mod tests {
     #[test]
     fn imposed_requirements_cannot_be_negotiated_away() {
         let (authority, peer) = common_offers();
-        let mut attempt =
-            NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
+        let mut attempt = NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
         let mut requirements = NegotiationRequirements::default();
         requirements.require_capability(CapabilityId::new(7));
         requirements.require_schema(SchemaId::new(9));
@@ -1356,9 +1353,7 @@ mod tests {
             NegotiationManager::new(offer_limits, NegotiationManagerLimits::default()).unwrap();
         let (authority, peer) = common_offers();
         let attempt_connection = ConnectionHandle::new(1);
-        manager
-            .start(attempt_connection, authority, peer)
-            .unwrap();
+        manager.start(attempt_connection, authority, peer).unwrap();
         assert_eq!(manager.reserved_bytes(), reservation);
         assert_eq!(
             manager.terminate(attempt_connection).unwrap(),
