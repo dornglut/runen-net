@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 
 use runen_net::delivery::{
@@ -103,8 +105,8 @@ impl FaultStage {
         self.queue.swap(first, second);
     }
 
-    /// Removes one staged transfer without exposing it, deterministically
-    /// realizing transport/network loss below the selected delivery mode.
+    /// Drops one staged transfer without exposing it, realizing deterministic
+    /// network/transport loss below the selected delivery mode.
     pub(crate) fn drop_at(&mut self, index: usize) -> DeliveryTransfer {
         self.remove(index).transfer
     }
