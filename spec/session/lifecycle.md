@@ -8,13 +8,14 @@ This document owns the initial RunenNet session, participant-membership, admissi
 
 This revision defines a single-authority client/server session model.
 
-Each open session has exactly one **authority**. The authority owns:
+Each open session has exactly one **authority**. For the lifecycle owned by this document, the authority owns:
 
 - whether the session accepts admission;
-- creation or acceptance of session-scoped participant membership;
-- assignment of authority-owned network entity identity;
-- authoritative replicated state decisions defined by later replication specifications;
-- explicit removal of participant membership and closure of the session.
+- creation, retention, and explicit removal of participant membership;
+- authorization of current participant connection bindings and replacements;
+- closure of the session.
+
+Other specifications MAY assign additional authoritative decisions within the same session model. Those responsibilities remain owned by those specifications rather than by this lifecycle document.
 
 Authority is a semantic role. It MUST NOT be inferred from a socket address, transport connection identifier, thread, process, ECS resource, or ownership of a transport adapter.
 
@@ -59,7 +60,7 @@ On **admission rejection**, no new participant membership or authorized connecti
 
 Authentication, account identity, matchmaking, server discovery, connect-ticket issuance, lobby membership, roster policy, and game settings are outside this specification. A host MAY use such information to make the admission decision, but RunenNet does not standardize that policy here.
 
-Protocol/schema compatibility checks required before admission are owned by a later protocol specification.
+Any protocol or schema compatibility rules that constrain admission are owned by the applicable protocol specification.
 
 ## Participant membership
 
