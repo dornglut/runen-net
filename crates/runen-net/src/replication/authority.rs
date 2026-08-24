@@ -775,33 +775,19 @@ impl<S, D> AuthorityReplicationSession<S, D> {
     }
 
     pub fn retained_image_count(&self) -> usize {
-        self.lineages
-            .values()
-            .map(AuthorityLineage::retained_image_count)
-            .sum()
+        self.checked_retained_image_count().unwrap_or(usize::MAX)
     }
 
     pub fn retained_state_bytes(&self) -> usize {
-        self.lineages
-            .values()
-            .map(AuthorityLineage::retained_state_bytes)
-            .sum()
+        self.checked_retained_state_bytes().unwrap_or(usize::MAX)
     }
 
     pub fn emission_evidence_count(&self) -> usize {
-        self.lineages
-            .values()
-            .map(AuthorityLineage::emission_evidence_count)
-            .sum()
+        self.checked_emission_evidence_count().unwrap_or(usize::MAX)
     }
 
     pub fn accounted_state_bytes(&self) -> usize {
-        self.retained_state_bytes()
-            + self
-                .lineages
-                .values()
-                .map(AuthorityLineage::pending_candidate_bytes)
-                .sum::<usize>()
+        self.checked_accounted_state_bytes().unwrap_or(usize::MAX)
     }
 
     pub fn prepare_full(
@@ -929,22 +915,76 @@ impl<S, D> AuthorityReplicationSession<S, D> {
             .evict_retained_state(cursor)?)
     }
 
+    fn checked_retained_image_count(&self) -> Option<usize> {
+        self.lineages.values().try_fold(0usize, |total, lineage| {
+            total.checked_add(lineage.retained_image_count())
+        })
+    }
+
+    fn checked_retained_state_bytes(&self) -> Option<usize> {
+        self.lineages.values().try_fold(0usize, |total, lineage| {
+            total.checked_add(lineage.retained_state_bytes())
+        })
+    }
+
+    fn checked_emission_evidence_count(&self) -> Option<usize> {
+        self.lineages.values().try_fold(0usize, |total, lineage| {
+            total.checked_add(lineage.emission_evidence_count())
+        })
+    }
+
+    fn checked_pending_state_bytes(&self) -> Option<usize> {
+        self.lineages.values().try_fold(0usize, |total, lineage| {
+            total.checked_add(lineage.pending_state_bytes())
+        })
+    }
+
+    fn checked_pending_candidate_bytes(&self) -> Option<usize> {
+        self.lineages.values().try_fold(0usize, |total, lineage| {
+            total.checked_add(lineage.pending_candidate_bytes())
+        })
+    }
+
+    fn checked_accounted_state_bytes(&self) -> Option<usize> {
+        self.checked_retained_state_bytes()?.checked_add(self.checked_pending_candidate_bytes()?)
+    }
+
     fn aggregate_reservations_fit(&self) -> bool {
         let pending_count = self
             .lineages
             .values()
             .filter(|lineage| lineage.has_pending())
             .count();
-        let pending_target_state_bytes: usize = self
-            .lineages
-            .values()
-            .map(AuthorityLineage::pending_state_bytes)
-            .sum();
+        let Some(accounted_state_bytes) = self.checked_accounted_state_bytes() else {
+            return false;
+        };
+        let Some(retained_image_count) = self.checked_retained_image_count() else {
+            return false;
+        };
+        let Some(retained_state_bytes) = self.checked_retained_state_bytes() else {
+            return false;
+        };
+        let Some(pending_target_state_bytes) = self.checked_pending_state_bytes() else {
+            return false;
+        };
+        let Some(emission_evidence_count) = self.checked_emission_evidence_count() else {
+            return false;
+        };
+        let Some(projected_image_count) = retained_image_count.checked_add(pending_count) else {
+            return false;
+        };
+        let Some(projected_retained_state_bytes) =
+            retained_state_bytes.checked_add(pending_target_state_bytes)
+        else {
+            return false;
+        };
+        let Some(projected_evidence_count) = emission_evidence_count.checked_add(pending_count) else {
+            return false;
+        };
 
-        self.accounted_state_bytes() <= self.limits.max_state_bytes()
-            && self.retained_image_count() + pending_count <= self.limits.max_retained_images()
-            && self.retained_state_bytes() + pending_target_state_bytes
-                <= self.limits.max_retained_state_bytes()
-            && self.emission_evidence_count() + pending_count <= self.limits.max_emission_evidence()
+        accounted_state_bytes <= self.limits.max_state_bytes()
+            && projected_image_count <= self.limits.max_retained_images()
+            && projected_retained_state_bytes <= self.limits.max_retained_state_bytes()
+            && projected_evidence_count <= self.limits.max_emission_evidence()
     }
 }
