@@ -28,7 +28,10 @@ fn image(value: i32) -> AccountedState<BTreeMap<&'static str, i32>> {
     AccountedState::new(BTreeMap::from([("value", value)]), 8)
 }
 
-fn client() -> (ClientReplicationSet<BTreeMap<&'static str, i32>>, ReplicationLineageKey) {
+fn client() -> (
+    ClientReplicationSet<BTreeMap<&'static str, i32>>,
+    ReplicationLineageKey,
+) {
     let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
     let limits = ClientAggregateLimits::new(nz(4), nz(8), nz(128));
     let mut client = ClientReplicationSet::new(limits);
@@ -40,10 +43,7 @@ fn protocol() -> ProtocolContract {
     ProtocolContract::new(ProtocolId::new(1), ProtocolRevision::new(1))
 }
 
-fn authorized_session(
-    participant: ParticipantId,
-    connection: ConnectionHandle,
-) -> Session {
+fn authorized_session(participant: ParticipantId, connection: ConnectionHandle) -> Session {
     let mut manager =
         NegotiationManager::new(OfferLimits::default(), NegotiationManagerLimits::default())
             .unwrap();
@@ -60,10 +60,7 @@ fn authorized_session(
     manager.validate_authority(connection, &contract).unwrap();
     manager.validate_peer(connection, &contract).unwrap();
 
-    let mut session = Session::new(
-        SessionId::new(1),
-        SessionLimits::new(nz(4), nz(2)).unwrap(),
-    );
+    let mut session = Session::new(SessionId::new(1), SessionLimits::new(nz(4), nz(2)).unwrap());
     session
         .admit_new(participant, manager.established(connection).unwrap())
         .unwrap();
@@ -127,11 +124,7 @@ fn initial_states_require_full_and_cursor_tick_regression_is_rejected() {
         client
             .apply_full(
                 key,
-                FullSnapshot::new(
-                    ReplicationCursor::new(1),
-                    SimulationTick::new(3),
-                    image(1),
-                ),
+                FullSnapshot::new(ReplicationCursor::new(1), SimulationTick::new(3), image(1)),
                 |_| Ok::<_, ()>(()),
             )
             .unwrap(),
@@ -141,11 +134,7 @@ fn initial_states_require_full_and_cursor_tick_regression_is_rejected() {
         client
             .apply_full(
                 key,
-                FullSnapshot::new(
-                    ReplicationCursor::new(3),
-                    SimulationTick::new(1),
-                    image(3),
-                ),
+                FullSnapshot::new(ReplicationCursor::new(3), SimulationTick::new(1), image(3)),
                 |_| Ok::<_, ()>(()),
             )
             .unwrap(),
@@ -255,7 +244,10 @@ fn malformed_and_reconstruction_failures_are_atomic_recovery_transitions() {
         .unwrap();
     assert_eq!(malformed_outcome, ClientSnapshotOutcome::MalformedDelta);
     assert_eq!(
-        malformed.lineage(malformed_key).unwrap().replication_state(),
+        malformed
+            .lineage(malformed_key)
+            .unwrap()
+            .replication_state(),
         ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::MalformedDelta)
     );
     assert_eq!(
@@ -396,7 +388,13 @@ fn candidate_and_aggregate_resource_failures_do_not_partially_reserve() {
             AuthorityPrepareError::CandidateTooLarge
         ))
     );
-    assert!(authority.lineage(participant).unwrap().pending_snapshot().is_none());
+    assert!(
+        authority
+            .lineage(participant)
+            .unwrap()
+            .pending_snapshot()
+            .is_none()
+    );
 
     let limits = AuthorityAggregateLimits::new(nz(2), nz(8), nz(2), nz(16), nz(2));
     let mut aggregate = AuthorityReplicationSession::<BTreeMap<&'static str, i32>, ()>::new(
@@ -422,8 +420,20 @@ fn candidate_and_aggregate_resource_failures_do_not_partially_reserve() {
         ),
         Err(AuthoritySessionError::AggregateResourceLimitExceeded)
     );
-    assert!(aggregate.lineage(first).unwrap().pending_snapshot().is_some());
-    assert!(aggregate.lineage(second).unwrap().pending_snapshot().is_none());
+    assert!(
+        aggregate
+            .lineage(first)
+            .unwrap()
+            .pending_snapshot()
+            .is_some()
+    );
+    assert!(
+        aggregate
+            .lineage(second)
+            .unwrap()
+            .pending_snapshot()
+            .is_none()
+    );
 }
 
 #[test]
