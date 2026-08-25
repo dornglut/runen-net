@@ -6,7 +6,8 @@ use runen_net::delivery::{
 
 use crate::quinn_binding::{AcceptedFlowRegistry, RegisteredFlow};
 use crate::wire::{
-    decode_varint, encode_varint, FlowId, FlowIdError, VarIntDecodeError, VarIntEncodeError,
+    FlowId, FlowIdError, MAX_VARINT, VarIntDecodeError, VarIntEncodeError, decode_varint,
+    encode_varint,
 };
 
 const UNORDERED_INGRESS_INDEX: u64 = 0;
@@ -70,6 +71,7 @@ enum DatagramSubmissionError {
     Core(DeliveryOperationError),
     Wire(VarIntEncodeError),
     LengthOverflow,
+    SequenceExhausted,
     AcceptedIndexMismatch { expected: u64, accepted: u64 },
 }
 
@@ -102,6 +104,7 @@ enum DatagramSendError {
     Custody(CustodyCommitError),
     Wire(VarIntEncodeError),
     LengthOverflow,
+    SequenceExhausted,
     ModeMismatch,
     PayloadExceedsProfile,
     AllocationFailed,
@@ -238,7 +241,8 @@ impl<T: DatagramSendTransport> DatagramSender<T> {
             DeliveryMode::UnreliableSequenced => Some(transfer.accepted_index()),
             DeliveryMode::ReliableOrdered => return Err(DatagramSendError::ReliableFlow),
         };
-        let wire_len = datagram_len(flow_id, flow.mode(), sequence, transfer.payload_len())?;
+        let wire_len =
+            datagram_len_for_send(flow_id, flow.mode(), sequence, transfer.payload_len())?;
 
         let Some(max_datagram_size) = self.transport.max_datagram_size() else {
             return Err(DatagramSendError::ProfileUnavailable);
@@ -295,10 +299,8 @@ impl<T: DatagramSendTransport> DatagramSender<T> {
         accepted_index: u64,
     ) -> Result<DatagramSendProgress, DatagramSendError> {
         endpoint.commit_outbound_custody(key, accepted_index)?;
-        self.diagnostics.outbound_transport_drops = self
-            .diagnostics
-            .outbound_transport_drops
-            .saturating_add(1);
+        self.diagnostics.outbound_transport_drops =
+            self.diagnostics.outbound_transport_drops.saturating_add(1);
         Ok(DatagramSendProgress::DroppedTransport { accepted_index })
     }
 }
@@ -352,7 +354,11 @@ fn datagram_len(
     let sequence_len = match mode {
         DeliveryMode::UnreliableUnordered => 0,
         DeliveryMode::UnreliableSequenced => {
-            encode_varint(sequence.ok_or(DatagramSubmissionError::LengthOverflow)?)?.len()
+            let sequence = sequence.ok_or(DatagramSubmissionError::LengthOverflow)?;
+            if sequence > MAX_VARINT {
+                return Err(DatagramSubmissionError::SequenceExhausted);
+            }
+            encode_varint(sequence)?.len()
         }
         DeliveryMode::ReliableOrdered => return Err(DatagramSubmissionError::ReliableFlow),
     };
@@ -372,7 +378,11 @@ fn datagram_len_for_send(
     let sequence_len = match mode {
         DeliveryMode::UnreliableUnordered => 0,
         DeliveryMode::UnreliableSequenced => {
-            encode_varint(sequence.ok_or(DatagramSendError::LengthOverflow)?)?.len()
+            let sequence = sequence.ok_or(DatagramSendError::LengthOverflow)?;
+            if sequence > MAX_VARINT {
+                return Err(DatagramSendError::SequenceExhausted);
+            }
+            encode_varint(sequence)?.len()
         }
         DeliveryMode::ReliableOrdered => return Err(DatagramSendError::ReliableFlow),
     };
@@ -480,9 +490,7 @@ fn receive_datagram(
     Ok(DatagramReceiveOutcome::Core(outcome))
 }
 
-async fn read_quinn_datagram(
-    connection: &Connection,
-) -> Result<impl AsRef<[u8]>, ConnectionError> {
+async fn read_quinn_datagram(connection: &Connection) -> Result<impl AsRef<[u8]>, ConnectionError> {
     connection.read_datagram().await
 }
 
@@ -590,6 +598,37 @@ mod tests {
     }
 
     #[test]
+    fn envelopes_use_minimal_varints_and_sequence_exhaustion_is_explicit() {
+        let flow_id = FlowId::new(WireSide::Client, 32).unwrap();
+        assert_eq!(
+            encode_datagram(flow_id, DeliveryMode::UnreliableUnordered, None, b"x",).unwrap(),
+            vec![0x40, 0x40, b'x']
+        );
+        assert_eq!(
+            encode_datagram(flow_id, DeliveryMode::UnreliableSequenced, Some(64), b"x",).unwrap(),
+            vec![0x40, 0x40, 0x40, 0x40, b'x']
+        );
+        assert_eq!(
+            datagram_len(
+                flow_id,
+                DeliveryMode::UnreliableSequenced,
+                Some(MAX_VARINT + 1),
+                0,
+            ),
+            Err(DatagramSubmissionError::SequenceExhausted)
+        );
+        assert_eq!(
+            datagram_len_for_send(
+                flow_id,
+                DeliveryMode::UnreliableSequenced,
+                Some(MAX_VARINT + 1),
+                0,
+            ),
+            Err(DatagramSendError::SequenceExhausted)
+        );
+    }
+
+    #[test]
     fn sequenced_preflight_uses_exact_core_candidate_and_mtu_rejection_consumes_nothing() {
         let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
         let (mut endpoint, registry, key) = endpoint_with_registered_flow(
@@ -648,7 +687,10 @@ mod tests {
         let mut sender = DatagramSender::new(MockTransport::new(Some(64), 0));
         assert!(matches!(
             sender.submit(&mut endpoint, &registry, flow_id, b"abc".to_vec()),
-            Ok(DatagramSubmissionOutcome::Accepted { accepted_index: 0, .. })
+            Ok(DatagramSubmissionOutcome::Accepted {
+                accepted_index: 0,
+                ..
+            })
         ));
 
         assert_eq!(
@@ -692,12 +734,15 @@ mod tests {
         let mut sender = DatagramSender::new(MockTransport::new(Some(64), 0));
         assert!(matches!(
             sender.submit(&mut endpoint, &registry, flow_id, b"old".to_vec()),
-            Ok(DatagramSubmissionOutcome::Accepted { accepted_index: 0, .. })
+            Ok(DatagramSubmissionOutcome::Accepted {
+                accepted_index: 0,
+                ..
+            })
         ));
-        assert_eq!(
+        assert!(matches!(
             sender.drive_one(&mut endpoint, &registry, flow_id),
             Ok(DatagramSendProgress::BlockedNativeBuffer { .. })
-        );
+        ));
         assert_eq!(
             sender.submit(&mut endpoint, &registry, flow_id, b"new".to_vec()),
             Ok(DatagramSubmissionOutcome::Accepted {
@@ -803,9 +848,11 @@ mod tests {
         );
         assert_eq!(
             receive_datagram(&mut endpoint, &registry, &[1, b'b']),
-            Ok(DatagramReceiveOutcome::Core(ReceiveOutcome::DroppedByPressure {
-                local_pressure_drops: 1,
-            }))
+            Ok(DatagramReceiveOutcome::Core(
+                ReceiveOutcome::DroppedByPressure {
+                    local_pressure_drops: 1,
+                }
+            ))
         );
         let exposed = endpoint.poll_exposure(key).unwrap().unwrap();
         assert_eq!(exposed.accepted_index(), UNORDERED_INGRESS_INDEX);
@@ -845,6 +892,32 @@ mod tests {
             Ok(DatagramReceiveOutcome::Core(ReceiveOutcome::StaleSequenced))
         );
         assert_eq!(endpoint.diagnostics().stale_sequenced_drops, 1);
+    }
+
+    #[test]
+    fn inbound_rejects_non_minimal_sequence_metadata() {
+        let flow_id = FlowId::new(WireSide::Server, 5).unwrap();
+        let (mut endpoint, registry, _) = endpoint_with_registered_flow(
+            FlowDirection::Inbound,
+            DeliveryMode::UnreliableSequenced,
+            11,
+            flow_id,
+            policy(
+                8,
+                4,
+                32,
+                OutboundPressureBehavior::RejectNew,
+                ReceiverPressureBehavior::DropIncomingUnreliable,
+            ),
+            8,
+        );
+        let mut datagram = encode_varint(flow_id.value()).unwrap().as_slice().to_vec();
+        datagram.extend_from_slice(&[0x40, 0x01, b'x']);
+        assert_eq!(
+            receive_datagram(&mut endpoint, &registry, &datagram),
+            Err(DatagramReceiveError::VarInt(VarIntDecodeError::NonMinimal))
+        );
+        assert_eq!(endpoint.pending_messages(), 0);
     }
 
     #[test]
