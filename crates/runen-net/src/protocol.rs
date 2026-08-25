@@ -852,6 +852,10 @@ impl NegotiationManager {
         })
     }
 
+    pub const fn offer_limits(&self) -> OfferLimits {
+        self.offer_limits
+    }
+
     pub fn validate_offer(
         &self,
         offer: CompatibilityOffer,
