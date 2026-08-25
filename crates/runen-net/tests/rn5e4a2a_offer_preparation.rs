@@ -58,11 +58,9 @@ fn manager_scoped_offer_validation_uses_exact_manager_policy_without_reservation
 
 #[test]
 fn validated_offer_round_trip_preserves_owned_allocations_and_remains_admissible() {
-    let mut manager = NegotiationManager::new(
-        OfferLimits::default(),
-        NegotiationManagerLimits::default(),
-    )
-    .unwrap();
+    let mut manager =
+        NegotiationManager::new(OfferLimits::default(), NegotiationManagerLimits::default())
+            .unwrap();
     let local = compatible_offer("local");
     let expected = compatible_offer("local");
 
@@ -90,7 +88,10 @@ fn validated_offer_round_trip_preserves_owned_allocations_and_remains_admissible
     assert_eq!(recovered.capabilities.as_ptr(), capabilities_ptr);
     assert_eq!(recovered.schemas.as_ptr(), schemas_ptr);
     assert_eq!(recovered.schemas[0].contracts.as_ptr(), contracts_ptr);
-    assert_eq!(recovered.schemas[0].contracts[0].codecs.as_ptr(), codecs_ptr);
+    assert_eq!(
+        recovered.schemas[0].contracts[0].codecs.as_ptr(),
+        codecs_ptr
+    );
     assert_eq!(
         recovered.diagnostic_label.as_ref().unwrap().as_ptr(),
         label_ptr
