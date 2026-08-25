@@ -59,6 +59,28 @@ text = replace_once(
     "pub(super) async fn read_quinn_datagram(\n    connection: &Connection,\n) -> Result<impl AsRef<[u8]>, ConnectionError> {",
     "quinn read visibility",
 )
+text = replace_once(
+    text,
+    """                if let Some(expected) = candidate {
+                    if accepted_index != expected {
+                        return Err(DatagramSubmissionError::AcceptedIndexMismatch {
+                            expected,
+                            accepted: accepted_index,
+                        });
+                    }
+                }
+""",
+    """                if let Some(expected) = candidate
+                    && accepted_index != expected
+                {
+                    return Err(DatagramSubmissionError::AcceptedIndexMismatch {
+                        expected,
+                        accepted: accepted_index,
+                    });
+                }
+""",
+    "accepted-index consistency idiom",
+)
 text = text.replace(
     "sender.diagnostics().outbound_transport_drops",
     "sender.outbound_transport_drops()",
