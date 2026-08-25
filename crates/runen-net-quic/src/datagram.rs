@@ -13,19 +13,19 @@ use crate::wire::{
 const UNORDERED_INGRESS_INDEX: u64 = 0;
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
-struct DatagramSenderDiagnostics {
+pub(super) struct DatagramSenderDiagnostics {
     outbound_transport_drops: usize,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum DatagramTransportError {
+pub(super) enum DatagramTransportError {
     TooLarge,
     UnsupportedByPeer,
     Disabled,
     ConnectionLost,
 }
 
-trait DatagramSendTransport {
+pub(super) trait DatagramSendTransport {
     fn max_datagram_size(&self) -> Option<usize>;
     fn send_buffer_space(&self) -> usize;
     fn try_send(&mut self, datagram: Vec<u8>) -> Result<(), DatagramTransportError>;
@@ -51,7 +51,7 @@ impl DatagramSendTransport for Connection {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum DatagramSubmissionOutcome {
+pub(super) enum DatagramSubmissionOutcome {
     Accepted {
         accepted_index: u64,
         local_pressure_drops: usize,
@@ -64,7 +64,7 @@ enum DatagramSubmissionOutcome {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum DatagramSubmissionError {
+pub(super) enum DatagramSubmissionError {
     UnknownFlowId,
     WrongDirection,
     ReliableFlow,
@@ -88,7 +88,7 @@ impl From<VarIntEncodeError> for DatagramSubmissionError {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum DatagramSendProgress {
+pub(super) enum DatagramSendProgress {
     Idle,
     BlockedNativeBuffer { needed: usize, available: usize },
     Enqueued { accepted_index: u64 },
@@ -96,7 +96,7 @@ enum DatagramSendProgress {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DatagramSendError {
+pub(super) enum DatagramSendError {
     UnknownFlowId,
     WrongDirection,
     ReliableFlow,
@@ -131,7 +131,7 @@ impl From<VarIntEncodeError> for DatagramSendError {
 }
 
 #[derive(Debug)]
-struct DatagramSender<T> {
+pub(super) struct DatagramSender<T> {
     transport: T,
     diagnostics: DatagramSenderDiagnostics,
 }
@@ -142,7 +142,7 @@ impl DatagramSender<Connection> {
     /// RN5E must route every RunenNet `send_datagram` call for this connection
     /// through this object. The native free-space guarantee is only sufficient
     /// when a competing direct DATAGRAM writer cannot race the checked handoff.
-    fn new_quinn(connection: Connection) -> Self {
+    pub(super) fn new_quinn(connection: Connection) -> Self {
         Self::new(connection)
     }
 }
@@ -155,11 +155,11 @@ impl<T: DatagramSendTransport> DatagramSender<T> {
         }
     }
 
-    const fn diagnostics(&self) -> DatagramSenderDiagnostics {
-        self.diagnostics
+    pub(super) const fn outbound_transport_drops(&self) -> usize {
+        self.diagnostics.outbound_transport_drops
     }
 
-    fn submit(
+    pub(super) fn submit(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
         registry: &AcceptedFlowRegistry,
@@ -197,13 +197,13 @@ impl<T: DatagramSendTransport> DatagramSender<T> {
                 accepted_index,
                 local_pressure_drops,
             } => {
-                if let Some(expected) = candidate {
-                    if accepted_index != expected {
-                        return Err(DatagramSubmissionError::AcceptedIndexMismatch {
-                            expected,
-                            accepted: accepted_index,
-                        });
-                    }
+                if let Some(expected) = candidate
+                    && accepted_index != expected
+                {
+                    return Err(DatagramSubmissionError::AcceptedIndexMismatch {
+                        expected,
+                        accepted: accepted_index,
+                    });
                 }
                 Ok(DatagramSubmissionOutcome::Accepted {
                     accepted_index,
@@ -218,7 +218,7 @@ impl<T: DatagramSendTransport> DatagramSender<T> {
         }
     }
 
-    fn drive_one(
+    pub(super) fn drive_one(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
         registry: &AcceptedFlowRegistry,
@@ -417,13 +417,13 @@ fn encode_datagram(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DatagramReceiveOutcome {
+pub(super) enum DatagramReceiveOutcome {
     DiscardedUnknownFlow,
     Core(ReceiveOutcome),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DatagramReceiveError {
+pub(super) enum DatagramReceiveError {
     VarInt(VarIntDecodeError),
     FlowId(FlowIdError),
     WrongDirection,
@@ -451,7 +451,7 @@ impl From<DeliveryOperationError> for DatagramReceiveError {
     }
 }
 
-fn receive_datagram(
+pub(super) fn receive_datagram(
     endpoint: &mut DeliveryEndpoint,
     registry: &AcceptedFlowRegistry,
     datagram: &[u8],
@@ -490,7 +490,9 @@ fn receive_datagram(
     Ok(DatagramReceiveOutcome::Core(outcome))
 }
 
-async fn read_quinn_datagram(connection: &Connection) -> Result<impl AsRef<[u8]>, ConnectionError> {
+pub(super) async fn read_quinn_datagram(
+    connection: &Connection,
+) -> Result<impl AsRef<[u8]>, ConnectionError> {
     connection.read_datagram().await
 }
 
@@ -710,7 +712,7 @@ mod tests {
         );
         assert_eq!(endpoint.pending_messages(), 0);
         assert_eq!(sender.transport.sent, vec![vec![2, b'a', b'b', b'c']]);
-        assert_eq!(sender.diagnostics().outbound_transport_drops, 0);
+        assert_eq!(sender.outbound_transport_drops(), 0);
         assert_eq!(endpoint.flow_pending_usage(key), Some((0, 0)));
     }
 
@@ -787,7 +789,7 @@ mod tests {
             Ok(DatagramSendProgress::DroppedTransport { accepted_index: 0 })
         );
         assert_eq!(endpoint.pending_messages(), 0);
-        assert_eq!(sender.diagnostics().outbound_transport_drops, 1);
+        assert_eq!(sender.outbound_transport_drops(), 1);
         assert!(sender.transport.sent.is_empty());
     }
 
@@ -818,7 +820,7 @@ mod tests {
             sender.drive_one(&mut endpoint, &registry, flow_id),
             Ok(DatagramSendProgress::DroppedTransport { accepted_index: 0 })
         );
-        assert_eq!(sender.diagnostics().outbound_transport_drops, 1);
+        assert_eq!(sender.outbound_transport_drops(), 1);
         assert!(sender.transport.sent.is_empty());
     }
 
