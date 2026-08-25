@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use crate::identity::{ConnectionHandle, SessionId};
 use crate::session::{Session, SessionPhase};
@@ -268,7 +269,7 @@ impl ScopeState {
 pub struct DeliveryTransfer {
     mode: DeliveryMode,
     accepted_index: u64,
-    payload: Vec<u8>,
+    payload: Arc<Vec<u8>>,
 }
 
 impl DeliveryTransfer {
@@ -444,7 +445,7 @@ pub enum ReceiveOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExposedMessage {
     accepted_index: u64,
-    payload: Vec<u8>,
+    payload: Arc<Vec<u8>>,
 }
 
 impl ExposedMessage {
@@ -706,7 +707,7 @@ impl DeliveryEndpoint {
         let transfer = DeliveryTransfer {
             mode,
             accepted_index,
-            payload,
+            payload: Arc::new(payload),
         };
         let payload_len = transfer.payload_len();
 
@@ -816,7 +817,7 @@ impl DeliveryEndpoint {
             DeliveryTransfer {
                 mode,
                 accepted_index,
-                payload,
+                payload: Arc::new(payload),
             },
         )
     }

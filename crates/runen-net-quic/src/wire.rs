@@ -126,7 +126,7 @@ pub(crate) enum FlowIdError {
     WireValueOutOfRange,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct FlowId(u64);
 
 impl FlowId {
