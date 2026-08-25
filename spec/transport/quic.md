@@ -198,6 +198,8 @@ schemas[schema_count]:
 
 The body MUST NOT exceed either endpoint's applicable `max_negotiation_frame_bytes`. Counts MUST be checked against the receiver's finite negotiation policy before collection allocation. Structural duplicates and empty collections are classified by the semantic negotiation owner and MUST NOT be normalized by the wire decoder.
 
+If an endpoint's immutable valid offer, or an Authority's exact valid proposal, cannot be encoded as the single required wire-revision-1 negotiation frame within the peer-advertised `max_negotiation_frame_bytes`, negotiation fails as `ResourceLimitExceeded`. The endpoint MUST NOT truncate, split, omit required entries, or substitute a different offer or proposal merely to fit the peer ceiling. When the control stream remains usable, it SHOULD report `NEGOTIATION_FAILED(ResourceLimitExceeded)` before terminating the profile connection.
+
 The Authority endpoint selects the proposed contract only after both valid offers are available and after validating the proposal against its own immutable offer, the peer offer, and applicable profile requirements.
 
 `NEGOTIATION_PROPOSAL` is sent only by the Authority and contains:
