@@ -21,7 +21,9 @@ jobs:
       - name: Install maintained Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - name: Apply Core acknowledgement correction
-        run: python tools/rn5e4a0_patch.py
+        run: |
+          python tools/rn5e4a0_patch.py
+          python tools/rn5e4a0_session_patch.py
       - name: Format and validate focused Core
         run: |
           cargo +stable fmt --all
@@ -31,7 +33,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/runen-net/src/protocol.rs
+          git add crates/runen-net/src/protocol.rs crates/runen-net/src/session.rs
           if ! git diff --cached --quiet; then
             git commit -m 'RN5E4A0 work: acknowledge stored negotiation proposal'
             git push
