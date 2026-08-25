@@ -8,5 +8,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-quinn = { version = "=0.11.11", default-features = false }
+quinn = { version = "=0.11.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 runen-net = { path = "../runen-net" }
