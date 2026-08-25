@@ -21,17 +21,18 @@ const FLOW_PROTOCOL_ERROR: VarInt = VarInt::from_u32(5);
 const RELIABLE_DELIVERY_FAILED: VarInt = VarInt::from_u32(6);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum AssociationState {
+enum ReliableAssociationState {
     Unbound,
     Outbound,
     Inbound,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct RegisteredReliableFlow {
+struct RegisteredFlow {
     key: DeliveryFlowKey,
+    mode: DeliveryMode,
     max_message_bytes: usize,
-    association: AssociationState,
+    reliable_association: Option<ReliableAssociationState>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -50,13 +51,13 @@ enum RegistryError {
 }
 
 #[derive(Debug)]
-struct ReliableAssociationRegistry {
+struct AcceptedFlowRegistry {
     local_side: WireSide,
     max_active: usize,
-    flows: HashMap<u64, RegisteredReliableFlow>,
+    flows: HashMap<u64, RegisteredFlow>,
 }
 
-impl ReliableAssociationRegistry {
+impl AcceptedFlowRegistry {
     fn new(local_side: WireSide, max_active: NonZeroUsize) -> Self {
         Self {
             local_side,
@@ -67,8 +68,9 @@ impl ReliableAssociationRegistry {
 
     /// Register a FlowId already consumed and accepted by the C1/control authority.
     ///
-    /// This registry owns active stream association only. It does not allocate,
-    /// recycle, or retain retired FlowIds.
+    /// This registry owns the finite connection-scoped FlowId to Core-flow mapping.
+    /// Reliable flows additionally acquire one persistent stream association later.
+    /// It does not allocate, recycle, or retain retired FlowIds.
     fn register_consumed_accepted_flow(
         &mut self,
         endpoint: &DeliveryEndpoint,
@@ -85,9 +87,6 @@ impl ReliableAssociationRegistry {
         let (mode, policy) = endpoint
             .flow_contract(key)
             .ok_or(RegistryError::UnknownCoreFlow)?;
-        if mode != DeliveryMode::ReliableOrdered {
-            return Err(RegistryError::NotReliable);
-        }
         let stable_max_message_bytes = stable_max_message_bytes.get();
         match key.direction() {
             FlowDirection::Outbound if policy.max_message_bytes() > stable_max_message_bytes => {
@@ -110,47 +109,65 @@ impl ReliableAssociationRegistry {
             .map_err(|_| RegistryError::AllocationFailed)?;
         self.flows.insert(
             flow_id.value(),
-            RegisteredReliableFlow {
+            RegisteredFlow {
                 key,
+                mode,
                 max_message_bytes: stable_max_message_bytes,
-                association: AssociationState::Unbound,
+                reliable_association: match mode {
+                    DeliveryMode::ReliableOrdered => Some(ReliableAssociationState::Unbound),
+                    DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => None,
+                },
             },
         );
         Ok(())
     }
 
-    fn associate_outbound(
-        &mut self,
-        flow_id: FlowId,
-    ) -> Result<RegisteredReliableFlow, RegistryError> {
-        self.associate(flow_id, FlowDirection::Outbound, AssociationState::Outbound)
+    fn registered_flow(&self, flow_id: FlowId) -> Option<RegisteredFlow> {
+        self.flows.get(&flow_id.value()).copied()
     }
 
-    fn associate_inbound(
-        &mut self,
-        flow_id: FlowId,
-    ) -> Result<RegisteredReliableFlow, RegistryError> {
-        self.associate(flow_id, FlowDirection::Inbound, AssociationState::Inbound)
+    fn associate_outbound(&mut self, flow_id: FlowId) -> Result<RegisteredFlow, RegistryError> {
+        self.associate(
+            flow_id,
+            FlowDirection::Outbound,
+            ReliableAssociationState::Outbound,
+        )
+    }
+
+    fn associate_inbound(&mut self, flow_id: FlowId) -> Result<RegisteredFlow, RegistryError> {
+        self.associate(
+            flow_id,
+            FlowDirection::Inbound,
+            ReliableAssociationState::Inbound,
+        )
     }
 
     fn associate(
         &mut self,
         flow_id: FlowId,
         direction: FlowDirection,
-        target: AssociationState,
-    ) -> Result<RegisteredReliableFlow, RegistryError> {
+        target: ReliableAssociationState,
+    ) -> Result<RegisteredFlow, RegistryError> {
         let flow = self
             .flows
             .get_mut(&flow_id.value())
             .ok_or(RegistryError::UnknownFlowId)?;
+        if flow.mode != DeliveryMode::ReliableOrdered {
+            return Err(RegistryError::NotReliable);
+        }
         if flow.key.direction() != direction {
             return Err(RegistryError::WrongDirection);
         }
-        if flow.association != AssociationState::Unbound {
-            return Err(RegistryError::AlreadyAssociated);
+        match flow.reliable_association {
+            Some(ReliableAssociationState::Unbound) => {
+                flow.reliable_association = Some(target);
+                Ok(*flow)
+            }
+            Some(ReliableAssociationState::Outbound | ReliableAssociationState::Inbound) => {
+                Err(RegistryError::AlreadyAssociated)
+            }
+            None => Err(RegistryError::NotReliable),
         }
-        flow.association = target;
-        Ok(*flow)
     }
 
     fn release(&mut self, flow_id: FlowId) {
@@ -432,7 +449,7 @@ struct OutboundReliable<W> {
 
 impl OutboundReliable<SendStream> {
     fn bind_quinn(
-        registry: &mut ReliableAssociationRegistry,
+        registry: &mut AcceptedFlowRegistry,
         flow_id: FlowId,
         stream: SendStream,
     ) -> Result<Self, SendError> {
@@ -442,7 +459,7 @@ impl OutboundReliable<SendStream> {
 
 impl<W: PollWriteReliable> OutboundReliable<W> {
     fn bind(
-        registry: &mut ReliableAssociationRegistry,
+        registry: &mut AcceptedFlowRegistry,
         flow_id: FlowId,
         writer: W,
     ) -> Result<Self, SendError> {
@@ -463,7 +480,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         &mut self,
         cx: &mut Context<'_>,
         endpoint: &mut DeliveryEndpoint,
-        registry: &mut ReliableAssociationRegistry,
+        registry: &mut AcceptedFlowRegistry,
     ) -> Poll<Result<SendProgress, SendError>> {
         if self.terminal {
             return Poll::Ready(Err(SendError::Terminal));
@@ -572,7 +589,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
     fn fail(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
-        registry: &mut ReliableAssociationRegistry,
+        registry: &mut AcceptedFlowRegistry,
         code: VarInt,
         error: SendError,
     ) -> Poll<Result<SendProgress, SendError>> {
@@ -747,7 +764,7 @@ struct InboundReliable<R> {
     max_staging_bytes: usize,
     prefix: FlowIdPrefix,
     flow_id: Option<FlowId>,
-    flow: Option<RegisteredReliableFlow>,
+    flow: Option<RegisteredFlow>,
     frames: Option<InboundFrames>,
     draining: bool,
     terminal: bool,
@@ -795,7 +812,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
         &mut self,
         cx: &mut Context<'_>,
         endpoint: &mut DeliveryEndpoint,
-        registry: &mut ReliableAssociationRegistry,
+        registry: &mut AcceptedFlowRegistry,
     ) -> Poll<Result<ReceiveProgress, ReceiveError>> {
         if self.terminal {
             return Poll::Ready(Err(ReceiveError::Terminal));
@@ -900,7 +917,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
     fn drain(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
-        registry: &mut ReliableAssociationRegistry,
+        registry: &mut AcceptedFlowRegistry,
     ) -> Result<ReceiveProgress, ReceiveError> {
         let flow = self.flow.ok_or(ReceiveError::Terminal)?;
         match endpoint.flow_pending_usage(flow.key) {
@@ -926,7 +943,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
     fn fail(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
-        registry: &mut ReliableAssociationRegistry,
+        registry: &mut AcceptedFlowRegistry,
         code: VarInt,
         error: ReceiveError,
     ) -> Poll<Result<ReceiveProgress, ReceiveError>> {
@@ -1180,10 +1197,14 @@ mod tests {
     fn registry_is_finite_and_rejects_duplicate_active_association() {
         let (endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 1);
         let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(1));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(1));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
+        assert_eq!(
+            registry.register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64)),
+            Err(RegistryError::DuplicateFlowId)
+        );
         registry.associate_outbound(flow_id).unwrap();
         assert_eq!(
             registry.associate_outbound(flow_id),
@@ -1193,12 +1214,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_enforces_profile_limits_side_mode_capacity_and_direction() {
+    fn registry_enforces_profile_limits_side_capacity_and_direction() {
         let (outbound_endpoint, outbound_key) = endpoint_with_flow(FlowDirection::Outbound, 20);
         let client_flow = FlowId::new(WireSide::Client, 0).unwrap();
         let server_flow = FlowId::new(WireSide::Server, 0).unwrap();
 
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         assert_eq!(
             registry.register_consumed_accepted_flow(
                 &outbound_endpoint,
@@ -1250,15 +1271,25 @@ mod tests {
                 limits(16, 32, 1024),
             )
             .unwrap();
-        assert_eq!(
-            registry.register_consumed_accepted_flow(
+        registry
+            .register_consumed_accepted_flow(
                 &unreliable_endpoint,
                 client_flow,
                 unreliable_key,
                 nz(64),
-            ),
+            )
+            .unwrap();
+        let registered = registry.registered_flow(client_flow).unwrap();
+        assert_eq!(registered.key, unreliable_key);
+        assert_eq!(registered.mode, DeliveryMode::UnreliableUnordered);
+        assert_eq!(registered.max_message_bytes, 64);
+        assert_eq!(registered.reliable_association, None);
+        assert_eq!(
+            registry.associate_outbound(client_flow),
             Err(RegistryError::NotReliable)
         );
+        assert_eq!(registry.registered_flow(client_flow), Some(registered));
+        registry.release(client_flow);
 
         let mut capacity_endpoint = DeliveryEndpoint::new(limits(16, 32, 1024));
         let first_key = DeliveryFlowKey::new(
@@ -1289,7 +1320,7 @@ mod tests {
             .unwrap();
         let first_flow = FlowId::new(WireSide::Client, 0).unwrap();
         let second_flow = FlowId::new(WireSide::Client, 1).unwrap();
-        let mut capacity_registry = ReliableAssociationRegistry::new(WireSide::Client, nz(1));
+        let mut capacity_registry = AcceptedFlowRegistry::new(WireSide::Client, nz(1));
         capacity_registry
             .register_consumed_accepted_flow(&capacity_endpoint, first_flow, first_key, nz(64))
             .unwrap();
@@ -1313,6 +1344,66 @@ mod tests {
     }
 
     #[test]
+    fn registry_supports_sequenced_lookup_without_stream_association() {
+        let mut endpoint = DeliveryEndpoint::new(limits(16, 32, 1024));
+        let key = DeliveryFlowKey::new(
+            ConnectionHandle::new(1),
+            FlowDirection::Inbound,
+            DeliveryFlowHandle::new(25),
+        );
+        let unreliable_policy = FlowResourcePolicy::new(
+            nz(64),
+            nz(8),
+            nz(256),
+            OutboundPressureBehavior::RejectNew,
+            ReceiverPressureBehavior::DropIncomingUnreliable,
+        );
+        endpoint
+            .establish_flow(
+                key,
+                DeliveryMode::UnreliableSequenced,
+                unreliable_policy,
+                limits(16, 32, 1024),
+            )
+            .unwrap();
+
+        let flow_id = FlowId::new(WireSide::Server, 2).unwrap();
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(2));
+        registry
+            .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
+            .unwrap();
+
+        let registered = registry.registered_flow(flow_id).unwrap();
+        assert_eq!(registered.key, key);
+        assert_eq!(registered.mode, DeliveryMode::UnreliableSequenced);
+        assert_eq!(registered.max_message_bytes, 64);
+        assert_eq!(registered.reliable_association, None);
+        assert_eq!(registry.active_len(), 1);
+        assert_eq!(
+            registry.associate_inbound(flow_id),
+            Err(RegistryError::NotReliable)
+        );
+        assert_eq!(registry.registered_flow(flow_id), Some(registered));
+        assert_eq!(registry.active_len(), 1);
+
+        registry.release(flow_id);
+        assert_eq!(registry.registered_flow(flow_id), None);
+        assert_eq!(registry.active_len(), 0);
+
+        let unknown_key = DeliveryFlowKey::new(
+            ConnectionHandle::new(1),
+            FlowDirection::Inbound,
+            DeliveryFlowHandle::new(404),
+        );
+        let unknown_flow = FlowId::new(WireSide::Server, 3).unwrap();
+        assert_eq!(
+            registry.register_consumed_accepted_flow(&endpoint, unknown_flow, unknown_key, nz(64)),
+            Err(RegistryError::UnknownCoreFlow)
+        );
+        assert_eq!(registry.registered_flow(unknown_flow), None);
+    }
+
+    #[test]
     fn outbound_partial_progress_preserves_order_and_custody() {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 2);
         assert!(matches!(
@@ -1330,7 +1421,7 @@ mod tests {
             }
         ));
         let flow_id = FlowId::new(WireSide::Client, 1 << 20).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1377,7 +1468,7 @@ mod tests {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 3);
         endpoint.submit(key, b"abc".to_vec()).unwrap();
         let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1410,7 +1501,7 @@ mod tests {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 29);
         endpoint.submit(key, b"x".to_vec()).unwrap();
         let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1435,7 +1526,7 @@ mod tests {
     fn outbound_normal_finish_waits_for_ack_before_core_termination() {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 30);
         let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1473,7 +1564,7 @@ mod tests {
         for (handle, action) in [(31, FinishAckAction::Stopped), (32, FinishAckAction::Error)] {
             let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, handle);
             let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
-            let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+            let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
             registry
                 .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
                 .unwrap();
@@ -1503,7 +1594,7 @@ mod tests {
     fn outbound_submission_after_fin_and_external_termination_fail_closed() {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 33);
         let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1530,7 +1621,7 @@ mod tests {
 
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 34);
         endpoint.submit(key, b"abc".to_vec()).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1601,7 +1692,7 @@ mod tests {
         );
         let mut binding = InboundReliable::new(reader, nz(8), nz(64)).unwrap();
         let mut endpoint = DeliveryEndpoint::new(limits(16, 32, 1024));
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         assert!(matches!(
             binding.poll_step(&mut cx, &mut endpoint, &mut registry),
             Poll::Ready(Ok(ReceiveProgress::Progressed { .. }))
@@ -1627,7 +1718,7 @@ mod tests {
 
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Inbound, 40);
         let flow_id = FlowId::new(WireSide::Server, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1656,7 +1747,7 @@ mod tests {
     fn inbound_buffers_multiple_frames_and_drains_clean_fin() {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Inbound, 4);
         let flow_id = FlowId::new(WireSide::Server, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1699,7 +1790,7 @@ mod tests {
     fn inbound_malformed_frame_and_read_error_are_terminal() {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Inbound, 5);
         let flow_id = FlowId::new(WireSide::Server, 0).unwrap();
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
@@ -1716,7 +1807,7 @@ mod tests {
         assert_eq!(binding.reader.stops, vec![5]);
 
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Inbound, 6);
-        let mut registry = ReliableAssociationRegistry::new(WireSide::Client, nz(4));
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
         registry
             .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
             .unwrap();
