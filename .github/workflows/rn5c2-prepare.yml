@@ -24,6 +24,7 @@ jobs:
       - name: Apply mechanical RN5C2 preparation
         shell: python
         run: |
+          import re
           from pathlib import Path
 
           delivery = Path("crates/runen-net/src/delivery.rs")
@@ -58,31 +59,11 @@ jobs:
           assert text.count(old) == 1
           text = text.replace(old, new, 1)
 
-          old = """        let transfer = DeliveryTransfer {
-              mode,
-              accepted_index,
-              payload,
-          };"""
-          new = """        let transfer = DeliveryTransfer {
-              mode,
-              accepted_index,
-              payload: Arc::new(payload),
-          };"""
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
-
-          old = """            DeliveryTransfer {
-                  mode,
-                  accepted_index,
-                  payload,
-              },"""
-          new = """            DeliveryTransfer {
-                  mode,
-                  accepted_index,
-                  payload: Arc::new(payload),
-              },"""
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
+          pattern = re.compile(
+              r"(DeliveryTransfer \{\n\s+mode,\n\s+accepted_index,\n\s+)payload,(\n\s+\})"
+          )
+          text, replaced = pattern.subn(r"\1payload: Arc::new(payload),\2", text)
+          assert replaced == 2, replaced
 
           delivery.write_text(text)
 
