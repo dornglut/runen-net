@@ -561,59 +561,43 @@ impl BootstrapState {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum ControlIoState {
+enum DirectionIoState {
     Clean,
-    SendInFlightOrPoisoned,
-    ReceiveInFlightOrPoisoned,
+    InFlightOrPoisoned,
 }
 
-impl ControlIoState {
+impl DirectionIoState {
     const fn new() -> Self {
         Self::Clean
     }
 
-    fn begin_send(&mut self) -> Result<(), ProfileBootstrapError> {
+    fn begin(&mut self) -> Result<(), ProfileBootstrapError> {
         if *self != Self::Clean {
             return Err(ProfileBootstrapError::ControlChannelPoisoned);
         }
-        *self = Self::SendInFlightOrPoisoned;
+        *self = Self::InFlightOrPoisoned;
         Ok(())
     }
 
-    fn complete_send(&mut self) {
-        debug_assert_eq!(*self, Self::SendInFlightOrPoisoned);
-        *self = Self::Clean;
-    }
-
-    fn begin_receive(&mut self) -> Result<(), ProfileBootstrapError> {
-        if *self != Self::Clean {
-            return Err(ProfileBootstrapError::ControlChannelPoisoned);
-        }
-        *self = Self::ReceiveInFlightOrPoisoned;
-        Ok(())
-    }
-
-    fn complete_receive(&mut self) {
-        debug_assert_eq!(*self, Self::ReceiveInFlightOrPoisoned);
+    fn complete(&mut self) {
+        debug_assert_eq!(*self, Self::InFlightOrPoisoned);
         *self = Self::Clean;
     }
 }
 
 #[derive(Debug)]
-pub(super) struct ControlChannel {
+struct BootstrapControl {
     send: SendStream,
     recv: RecvStream,
     state: BootstrapState,
-    io_state: ControlIoState,
 }
 
-impl ControlChannel {
+impl BootstrapControl {
     fn new(send: SendStream, recv: RecvStream, local_settings: Settings) -> Self {
         Self {
             send,
             recv,
             state: BootstrapState::new(local_settings),
-            io_state: ControlIoState::new(),
         }
     }
 
@@ -621,18 +605,15 @@ impl ControlChannel {
         self.state
             .validate_outbound_type(ControlFrameType::Settings)?;
         let body = self.state.local_settings.encode();
-        // Mark dirty before the first transport await. Cancellation or any
-        // transport/protocol failure leaves the connection-control channel
-        // poisoned instead of allowing a resume from an unknown wire offset.
-        self.io_state.begin_send()?;
+        // Bootstrap owns both streams and is never returned before readiness.
+        // Cancellation or any error drops this bootstrap boundary rather than
+        // exposing a partially progressed control stream for reuse.
         send_frame_raw(&mut self.send, ControlFrameType::Settings, body.as_slice()).await?;
         self.state.mark_local_settings_sent()?;
-        self.io_state.complete_send();
         Ok(())
     }
 
     async fn receive_peer_settings(&mut self) -> Result<(), ProfileBootstrapError> {
-        self.io_state.begin_receive()?;
         let frame_type = receive_frame_type(&mut self.recv).await?;
         // Bootstrap state is checked before reading body_length or allocating a
         // body, so a non-SETTINGS frame cannot consume the local body budget.
@@ -645,11 +626,39 @@ impl ControlChannel {
         )
         .await?;
         let settings = Settings::decode(&frame.body)?;
-        self.state.receive_settings(settings)?;
-        self.io_state.complete_receive();
-        Ok(())
+        self.state.receive_settings(settings)
     }
 
+    fn into_ready_parts(self) -> (Settings, ControlSender, ControlReceiver) {
+        debug_assert!(self.state.is_ready());
+        let peer_settings = self.state.peer_settings();
+        let local_settings = self.state.local_settings;
+        (
+            peer_settings,
+            ControlSender {
+                send: self.send,
+                local_settings,
+                peer_settings,
+                io_state: DirectionIoState::new(),
+            },
+            ControlReceiver {
+                recv: self.recv,
+                local_settings,
+                io_state: DirectionIoState::new(),
+            },
+        )
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ControlSender {
+    send: SendStream,
+    local_settings: Settings,
+    peer_settings: Settings,
+    io_state: DirectionIoState,
+}
+
+impl ControlSender {
     pub(super) async fn send_frame(
         &mut self,
         frame_type: ControlFrameType,
@@ -658,32 +667,46 @@ impl ControlChannel {
         if frame_type == ControlFrameType::Settings {
             return Err(ProfileBootstrapError::SettingsOwnedByBootstrap);
         }
-        self.state.validate_outbound_type(frame_type)?;
-        let peer = self.state.peer_settings();
-        validate_outbound_body(self.state.local_settings, peer, frame_type, body.len())?;
-        self.io_state.begin_send()?;
+        validate_outbound_body(
+            self.local_settings,
+            self.peer_settings,
+            frame_type,
+            body.len(),
+        )?;
+        // Mark only the send direction dirty before its first transport await.
+        // A cancelled/failed write poisons this sender without preventing the
+        // independent receiver from observing the terminal peer/connection state.
+        self.io_state.begin()?;
         send_frame_raw(&mut self.send, frame_type, body).await?;
-        self.io_state.complete_send();
+        self.io_state.complete();
         Ok(())
     }
+}
 
+#[derive(Debug)]
+pub(super) struct ControlReceiver {
+    recv: RecvStream,
+    local_settings: Settings,
+    io_state: DirectionIoState,
+}
+
+impl ControlReceiver {
     pub(super) async fn receive_frame(&mut self) -> Result<ControlFrame, ProfileBootstrapError> {
-        self.io_state.begin_receive()?;
+        // Mark only the receive direction dirty before its first transport await.
+        self.io_state.begin()?;
         let frame_type = receive_frame_type(&mut self.recv).await?;
-        self.state.validate_inbound_type(frame_type)?;
+        if frame_type == ControlFrameType::Settings {
+            return Err(ProfileBootstrapError::SettingsAfterReady);
+        }
         let frame = receive_frame_body(
             &mut self.recv,
             frame_type,
-            self.state.local_settings.max_control_frame_bytes,
-            self.state.local_settings.max_negotiation_frame_bytes,
+            self.local_settings.max_control_frame_bytes,
+            self.local_settings.max_negotiation_frame_bytes,
         )
         .await?;
-        self.io_state.complete_receive();
+        self.io_state.complete();
         Ok(frame)
-    }
-
-    pub(super) fn peer_settings(&self) -> Settings {
-        self.state.peer_settings()
     }
 }
 
@@ -722,7 +745,19 @@ pub(super) struct ProfileReadyConnection {
     connection: Connection,
     side: WireSide,
     profile: ValidatedControlProfile,
-    control: ControlChannel,
+    peer_settings: Settings,
+    sender: ControlSender,
+    receiver: ControlReceiver,
+}
+
+#[derive(Debug)]
+pub(super) struct ProfileReadyParts {
+    pub(super) connection: Connection,
+    pub(super) side: WireSide,
+    pub(super) profile: ValidatedControlProfile,
+    pub(super) peer_settings: Settings,
+    pub(super) sender: ControlSender,
+    pub(super) receiver: ControlReceiver,
 }
 
 impl ProfileReadyConnection {
@@ -738,12 +773,23 @@ impl ProfileReadyConnection {
         self.profile
     }
 
-    pub(super) fn peer_settings(&self) -> Settings {
-        self.control.peer_settings()
+    pub(super) const fn peer_settings(&self) -> Settings {
+        self.peer_settings
     }
 
-    pub(super) fn control_mut(&mut self) -> &mut ControlChannel {
-        &mut self.control
+    /// Consume the readiness gate and hand RN5E4/RN5E5 independently owned
+    /// control directions. This permits a production loop to receive and send
+    /// concurrently without cancellation of one direction being required to
+    /// make progress on the other.
+    pub(super) fn into_parts(self) -> ProfileReadyParts {
+        ProfileReadyParts {
+            connection: self.connection,
+            side: self.side,
+            profile: self.profile,
+            peer_settings: self.peer_settings,
+            sender: self.sender,
+            receiver: self.receiver,
+        }
     }
 }
 
@@ -756,15 +802,17 @@ pub(super) async fn bootstrap_client_control(
     if recv.is_0rtt() {
         return Err(ProfileBootstrapError::ZeroRttControlStream);
     }
-    let mut control = ControlChannel::new(send, recv, profile.local_settings);
+    let mut control = BootstrapControl::new(send, recv, profile.local_settings);
     control.send_local_settings().await?;
     control.receive_peer_settings().await?;
-    debug_assert!(control.state.is_ready());
+    let (peer_settings, sender, receiver) = control.into_ready_parts();
     Ok(ProfileReadyConnection {
         connection: transport.connection,
         side: transport.side,
         profile,
-        control,
+        peer_settings,
+        sender,
+        receiver,
     })
 }
 
@@ -777,15 +825,17 @@ pub(super) async fn bootstrap_server_control(
     if recv.is_0rtt() {
         return Err(ProfileBootstrapError::ZeroRttControlStream);
     }
-    let mut control = ControlChannel::new(send, recv, profile.local_settings);
+    let mut control = BootstrapControl::new(send, recv, profile.local_settings);
     control.send_local_settings().await?;
     control.receive_peer_settings().await?;
-    debug_assert!(control.state.is_ready());
+    let (peer_settings, sender, receiver) = control.into_ready_parts();
     Ok(ProfileReadyConnection {
         connection: transport.connection,
         side: transport.side,
         profile,
-        control,
+        peer_settings,
+        sender,
+        receiver,
     })
 }
 
@@ -1215,39 +1265,34 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_control_operation_poison_is_fail_closed() {
-        let mut send = ControlIoState::new();
-        send.begin_send().unwrap();
+    fn cancelled_direction_is_poisoned_without_poisoning_the_other_direction() {
+        let mut sender = DirectionIoState::new();
+        let mut receiver = DirectionIoState::new();
+
+        sender.begin().unwrap();
         assert!(matches!(
-            send.begin_receive(),
-            Err(ProfileBootstrapError::ControlChannelPoisoned)
-        ));
-        assert!(matches!(
-            send.begin_send(),
+            sender.begin(),
             Err(ProfileBootstrapError::ControlChannelPoisoned)
         ));
 
-        let mut receive = ControlIoState::new();
-        receive.begin_receive().unwrap();
+        // Independent ownership is the RN5E4 composability guarantee: a
+        // poisoned/cancelled sender does not prevent the receiver from running.
+        receiver.begin().unwrap();
+        receiver.complete();
+        assert_eq!(receiver, DirectionIoState::Clean);
         assert!(matches!(
-            receive.begin_send(),
-            Err(ProfileBootstrapError::ControlChannelPoisoned)
-        ));
-        assert!(matches!(
-            receive.begin_receive(),
+            sender.begin(),
             Err(ProfileBootstrapError::ControlChannelPoisoned)
         ));
     }
 
     #[test]
-    fn completed_control_operations_restore_clean_state() {
-        let mut io = ControlIoState::new();
-        io.begin_send().unwrap();
-        io.complete_send();
-        io.begin_receive().unwrap();
-        io.complete_receive();
-        assert_eq!(io, ControlIoState::Clean);
-        assert!(io.begin_send().is_ok());
+    fn completed_direction_operation_restores_clean_state() {
+        let mut io = DirectionIoState::new();
+        io.begin().unwrap();
+        io.complete();
+        assert_eq!(io, DirectionIoState::Clean);
+        assert!(io.begin().is_ok());
     }
 
     #[test]
