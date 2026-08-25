@@ -20,6 +20,11 @@ mod datagram;
     reason = "RN5E2 lands crate-private endpoint configuration before later RN5E control/lifecycle wiring"
 )]
 mod endpoint;
+#[allow(
+    dead_code,
+    reason = "RN5E4A2B lands crate-private compatibility negotiation control before RN5E4B/RN5E5 wiring"
+)]
+mod negotiation;
 // RN5C2B wires the accepted RN5C1 primitives to Quinn while the connection
 // bootstrap/control owner remains deferred to RN5E. Keep the realization
 // crate-private until RN6 justifies a public standalone facade.
