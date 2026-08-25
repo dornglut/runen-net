@@ -83,7 +83,7 @@ Requirement levels use one octet:
 
 Any other requirement-level value is malformed bootstrap data.
 
-Diagnostic labels from `CompatibilityOffer` are not transmitted by wire revision 1. They remain local diagnostic metadata and do not affect identity or selection. A received wire offer is therefore the peer's semantic offer projected onto the identity/requirement fields defined below, with no peer diagnostic label.
+Wire revision 1 does not encode `CompatibilityOffer` diagnostic labels. The CompatibilityOffer submitted for negotiation under this profile MUST therefore omit its optional diagnostic label. An implementation MAY retain separate bounded local diagnostic metadata outside the submitted offer; that metadata is not peer-controlled negotiation state and does not affect identity or selection.
 
 ## Connection control stream
 
@@ -142,6 +142,8 @@ max_incoming_message_bytes: varint
 
 - `0` — NonAuthority;
 - `1` — Authority.
+
+Any other `semantic_role` value is a profile protocol error.
 
 Every maximum MUST be non-zero and finite. `max_control_frame_bytes` MUST be large enough to parse the largest valid wire-revision-1 `SETTINGS` body, and `max_negotiation_frame_bytes` MUST be large enough to encode at least one protocol alternative with zero capabilities and zero schemas. `max_negotiation_frame_bytes` MUST NOT exceed `max_control_frame_bytes`.
 
@@ -317,6 +319,8 @@ Initial rejection reasons are:
 | 0 | ResourceLimit |
 | 1 | MessageLimit |
 
+Any other `FLOW_REJECT` reason value is a profile protocol error.
+
 The sender MUST NOT report the flow established or accept a message on it before receiving `FLOW_ACCEPT`. Once a syntactically valid `OPEN_FLOW` with the exact next FlowId is processed, that FlowId is consumed whether the receiver accepts or rejects the flow; both endpoints advance the corresponding next-flow sequence and MUST NOT retry by reusing the identifier.
 
 A peer MUST NOT create receive-flow state from an unknown DATAGRAM or an unexpected QUIC stream. Flow state is created only by a valid `OPEN_FLOW` processed under local bounds.
@@ -421,6 +425,8 @@ Initial termination reasons are:
 | 1 | ResourceFailure |
 | 2 | ProtocolFailure |
 | 3 | ReliableDeliveryFailure |
+
+Any other `FLOW_TERMINATE` reason value is a profile protocol error.
 
 For an unreliable flow, processing `FLOW_TERMINATE` ends the flow immediately; later DATAGRAMs for that FlowId are stale and discarded without state creation.
 
