@@ -1,0 +1,38 @@
+name: RN5E3 Split Work
+
+on:
+  push:
+    branches:
+      - rn5e3-control-split-work
+
+permissions:
+  contents: write
+
+jobs:
+  candidate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out work branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: rn5e3-control-split-work
+          fetch-depth: 0
+      - name: Install maintained Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Apply full-duplex correction
+        run: python tools/rn5e3_split_patch.py
+      - name: Format and validate focused adapter
+        run: |
+          cargo +stable fmt --all
+          cargo +stable test --locked -p runen-net-quic --all-targets
+          cargo +stable clippy --locked -p runen-net-quic --all-targets -- -D warnings
+      - name: Commit reviewed production work
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/runen-net-quic/src/control.rs crates/runen-net-quic/src/lib.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'RN5E3 work: split ready control directions'
+            git push
+          fi
