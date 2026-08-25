@@ -561,9 +561,8 @@ fn manager_failure_outcome(
             | NegotiationError::NoProposal
             | NegotiationError::AlreadyEstablished => Err(error.into()),
         },
-        NegotiationManagerError::ConnectionAlreadyKnown | NegotiationManagerError::UnknownConnection => {
-            Err(error)
-        }
+        NegotiationManagerError::ConnectionAlreadyKnown
+        | NegotiationManagerError::UnknownConnection => Err(error),
     }
 }
 
@@ -708,7 +707,10 @@ fn encode_proposal(
     Ok(writer.finish())
 }
 
-fn decode_proposal(input: &[u8], limits: OfferLimits) -> Result<NegotiatedContract, BodyDecodeError> {
+fn decode_proposal(
+    input: &[u8],
+    limits: OfferLimits,
+) -> Result<NegotiatedContract, BodyDecodeError> {
     let mut reader = BodyReader::new(input);
     let mut budget = DecodeBudget::new(
         limits.max_offer_accounted_bytes,
@@ -908,7 +910,8 @@ impl BodyWriter {
 
     fn push_count(&mut self, count: usize) -> Result<(), NegotiationOutcome> {
         let value = u64::try_from(count).map_err(|_| NegotiationOutcome::ResourceLimitExceeded)?;
-        let encoded = encode_varint(value).map_err(|_| NegotiationOutcome::ResourceLimitExceeded)?;
+        let encoded =
+            encode_varint(value).map_err(|_| NegotiationOutcome::ResourceLimitExceeded)?;
         self.body.extend_from_slice(encoded.as_slice());
         Ok(())
     }
@@ -1041,11 +1044,8 @@ mod tests {
     }
 
     fn manager() -> NegotiationManager {
-        NegotiationManager::new(
-            OfferLimits::default(),
-            NegotiationManagerLimits::default(),
-        )
-        .unwrap()
+        NegotiationManager::new(OfferLimits::default(), NegotiationManagerLimits::default())
+            .unwrap()
     }
 
     fn exchange(role: SemanticRole, connection: ConnectionHandle) -> NegotiationExchange {
@@ -1062,10 +1062,7 @@ mod tests {
         let body = encode_offer(&original, MAX_FRAME).unwrap();
         assert_eq!(body[0], 2);
         assert_eq!(&body[1..17], &ProtocolId::new(1).get().to_be_bytes());
-        assert_eq!(
-            &body[17..33],
-            &ProtocolRevision::new(1).get().to_be_bytes()
-        );
+        assert_eq!(&body[17..33], &ProtocolRevision::new(1).get().to_be_bytes());
         assert_eq!(
             decode_offer(&body, OfferLimits::default()).unwrap(),
             original
@@ -1255,12 +1252,8 @@ mod tests {
             .prepare_offer(&mut manager, compact_offer())
             .unwrap();
 
-        let malformed = CompatibilityOffer::new(
-            vec![protocol(1), protocol(1)],
-            vec![],
-            vec![],
-            None,
-        );
+        let malformed =
+            CompatibilityOffer::new(vec![protocol(1), protocol(1)], vec![], vec![], None);
         let body = encode_offer(&malformed, MAX_FRAME).unwrap();
         assert!(matches!(
             exchange.receive(
@@ -1289,11 +1282,7 @@ mod tests {
         )
         .unwrap();
         manager
-            .start(
-                ConnectionHandle::new(99),
-                compact_offer(),
-                compact_offer(),
-            )
+            .start(ConnectionHandle::new(99), compact_offer(), compact_offer())
             .unwrap();
         let before = manager.reserved_bytes();
 
@@ -1372,11 +1361,17 @@ mod tests {
         );
         assert_eq!(peer.state(), NegotiationState::Established);
         assert_eq!(
-            authority_manager.established(connection).unwrap().contract(),
+            authority_manager
+                .established(connection)
+                .unwrap()
+                .contract(),
             peer_manager.established(connection).unwrap().contract()
         );
         assert_eq!(
-            authority_manager.established(connection).unwrap().contract(),
+            authority_manager
+                .established(connection)
+                .unwrap()
+                .contract(),
             &contract()
         );
     }
