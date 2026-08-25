@@ -26,6 +26,7 @@ jobs:
           python tools/rn5e4a0_session_patch.py
           python tools/rn5e4a0_edges_patch.py
           python tools/rn5e4a0_replication_patch.py
+          python tools/rn5e4a0_remaining_tests_patch.py
           python tools/rn5e4a0_verify_calls.py
       - name: Format and validate workspace callers
         run: |
@@ -36,7 +37,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/runen-net/src/protocol.rs crates/runen-net/src/session.rs crates/runen-net/tests/rn2c_edges.rs crates/runen-net/tests/rn2c_replication.rs
+          git add crates/runen-net/src/protocol.rs crates/runen-net/src/session.rs crates/runen-net/tests/rn2c_edges.rs crates/runen-net/tests/rn2c_replication.rs crates/runen-net/tests/rn2d_profiles.rs crates/runen-net/tests/rn4c_recovery_pressure.rs
           if ! git diff --cached --quiet; then
             git commit -m 'RN5E4A0 work: acknowledge stored negotiation proposal'
             git push
