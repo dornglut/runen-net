@@ -57,11 +57,9 @@ fn contract() -> NegotiatedContract {
 
 #[test]
 fn manager_borrows_attempt_offers_and_proposal_without_changing_owned_state() {
-    let mut manager = NegotiationManager::new(
-        OfferLimits::default(),
-        NegotiationManagerLimits::default(),
-    )
-    .unwrap();
+    let mut manager =
+        NegotiationManager::new(OfferLimits::default(), NegotiationManagerLimits::default())
+            .unwrap();
     let connection = ConnectionHandle::new(41);
     let authority = offer("authority");
     let peer = offer("peer");
@@ -75,13 +73,19 @@ fn manager_borrows_attempt_offers_and_proposal_without_changing_owned_state() {
 
     manager.start(connection, authority, peer).unwrap();
     let reservation = manager.reserved_bytes();
-    assert_eq!(manager.status(connection).unwrap(), NegotiationStatus::AwaitingProposal);
+    assert_eq!(
+        manager.status(connection).unwrap(),
+        NegotiationStatus::AwaitingProposal
+    );
 
     let offers = manager.attempt_offers(connection).unwrap();
     assert_eq!(offers.authority().offer(), &expected_authority);
     assert_eq!(offers.peer().offer(), &expected_peer);
     assert_eq!(manager.reserved_bytes(), reservation);
-    assert_eq!(manager.status(connection).unwrap(), NegotiationStatus::AwaitingProposal);
+    assert_eq!(
+        manager.status(connection).unwrap(),
+        NegotiationStatus::AwaitingProposal
+    );
     assert!(matches!(
         manager.attempt_proposal(connection),
         Err(NegotiationManagerError::Negotiation(
@@ -97,7 +101,10 @@ fn manager_borrows_attempt_offers_and_proposal_without_changing_owned_state() {
             &NegotiationRequirements::default(),
         )
         .unwrap();
-    assert_eq!(manager.attempt_proposal(connection).unwrap(), &expected_contract);
+    assert_eq!(
+        manager.attempt_proposal(connection).unwrap(),
+        &expected_contract
+    );
     assert_eq!(manager.reserved_bytes(), reservation);
 
     assert_eq!(
@@ -107,7 +114,10 @@ fn manager_borrows_attempt_offers_and_proposal_without_changing_owned_state() {
             peer_validated: false,
         }
     );
-    assert_eq!(manager.attempt_proposal(connection).unwrap(), &expected_contract);
+    assert_eq!(
+        manager.attempt_proposal(connection).unwrap(),
+        &expected_contract
+    );
 
     assert_eq!(
         manager.validate_peer(connection).unwrap(),
