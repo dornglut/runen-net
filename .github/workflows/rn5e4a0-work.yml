@@ -1,0 +1,38 @@
+name: RN5E4A0 Work
+
+on:
+  push:
+    branches:
+      - rn5e4a0-stored-proposal-ack-work
+
+permissions:
+  contents: write
+
+jobs:
+  candidate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out work branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: rn5e4a0-stored-proposal-ack-work
+          fetch-depth: 0
+      - name: Install maintained Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Apply Core acknowledgement correction
+        run: python tools/rn5e4a0_patch.py
+      - name: Format and validate focused Core
+        run: |
+          cargo +stable fmt --all
+          cargo +stable test --locked -p runen-net --all-targets
+          cargo +stable clippy --locked -p runen-net --all-targets -- -D warnings
+      - name: Commit reviewed production work
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/runen-net/src/protocol.rs
+          if ! git diff --cached --quiet; then
+            git commit -m 'RN5E4A0 work: acknowledge stored negotiation proposal'
+            git push
+          fi
