@@ -106,7 +106,9 @@ A QUIC claim includes all Core rules plus the normative requirements addressed t
 
 An implementation MUST NOT claim QUIC without satisfying Core.
 
-A QUIC claim states that the implementation can establish and operate the QUIC wire profile defined by the claimed RunenNet specification revision, including its ALPN/bootstrap, compatibility-negotiation representation, delivery-flow realization, framing, resource, and failure rules.
+Requirements addressed specifically to the QUIC client or QUIC server apply to an implementation when it provides that endpoint role. A QUIC claim does not require one implementation unit to provide both roles; every role it does provide MUST satisfy all profile requirements addressed to that role.
+
+A QUIC claim states that the implementation can establish and operate the QUIC wire profile defined by the claimed RunenNet specification revision for its implemented endpoint role(s), including its ALPN/bootstrap, compatibility-negotiation representation, delivery-flow realization, framing, resource, and failure rules.
 
 A QUIC claim does not by itself claim AuthoritativeReplication. An implementation that satisfies both profiles MAY claim both `QUIC` and `AuthoritativeReplication`; neither profile includes the other beyond their common Core dependency.
 
@@ -154,7 +156,7 @@ A Core or AuthoritativeReplication conformance claim establishes semantic confor
 
 A QUIC claim adds the concrete bootstrap/control and delivery transport interoperability defined by the QUIC transport profile. It does not make arbitrary application payload bytes interoperable without the exact common application protocol/schema/codec contract required by negotiation.
 
-Two peers claiming QUIC can therefore establish the standardized RunenNet QUIC profile and perform the standardized compatibility bootstrap. They may interpret schema-dependent application payloads only after establishing the exact mutually supported negotiated contract required by Core.
+A conforming QUIC client and conforming QUIC server can therefore establish the standardized RunenNet QUIC profile and perform the standardized compatibility bootstrap when their deployment/TLS policy permits the connection. They may interpret schema-dependent application payloads only after establishing the exact mutually supported negotiated contract required by Core.
 
 Another future wire/transport profile may add a different production realization without redefining Core, AuthoritativeReplication, or the existing QUIC claim.
 
@@ -199,6 +201,8 @@ For this revision, examples of structurally valid claim descriptions are:
 - `RunenNet 0.1-provisional — QUIC + AuthoritativeReplication`.
 
 Listing Core in addition to a profile that includes Core is permitted but redundant.
+
+A QUIC implementation SHOULD document whether it provides the client role, server role, or both. Endpoint-role support does not create a separate conformance-profile identity.
 
 These examples define claim shape only; they are not evidence that any implementation has passed conformance.
 
