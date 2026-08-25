@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/runen-net", "tools/xtask"]
+members = ["crates/runen-net", "crates/runen-net-quic", "tools/xtask"]
 resolver = "2"
 
 [workspace.package]
