@@ -28,15 +28,29 @@ enum ReliableAssociationState {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct RegisteredFlow {
+pub(super) struct RegisteredFlow {
     key: DeliveryFlowKey,
     mode: DeliveryMode,
     max_message_bytes: usize,
     reliable_association: Option<ReliableAssociationState>,
 }
 
+impl RegisteredFlow {
+    pub(super) const fn key(self) -> DeliveryFlowKey {
+        self.key
+    }
+
+    pub(super) const fn mode(self) -> DeliveryMode {
+        self.mode
+    }
+
+    pub(super) const fn max_message_bytes(self) -> usize {
+        self.max_message_bytes
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum RegistryError {
+pub(super) enum RegistryError {
     CapacityExceeded,
     AllocationFailed,
     DuplicateFlowId,
@@ -51,14 +65,14 @@ enum RegistryError {
 }
 
 #[derive(Debug)]
-struct AcceptedFlowRegistry {
+pub(super) struct AcceptedFlowRegistry {
     local_side: WireSide,
     max_active: usize,
     flows: HashMap<u64, RegisteredFlow>,
 }
 
 impl AcceptedFlowRegistry {
-    fn new(local_side: WireSide, max_active: NonZeroUsize) -> Self {
+    pub(super) fn new(local_side: WireSide, max_active: NonZeroUsize) -> Self {
         Self {
             local_side,
             max_active: max_active.get(),
@@ -71,7 +85,7 @@ impl AcceptedFlowRegistry {
     /// This registry owns the finite connection-scoped FlowId to Core-flow mapping.
     /// Reliable flows additionally acquire one persistent stream association later.
     /// It does not allocate, recycle, or retain retired FlowIds.
-    fn register_consumed_accepted_flow(
+    pub(super) fn register_consumed_accepted_flow(
         &mut self,
         endpoint: &DeliveryEndpoint,
         flow_id: FlowId,
@@ -122,7 +136,7 @@ impl AcceptedFlowRegistry {
         Ok(())
     }
 
-    fn registered_flow(&self, flow_id: FlowId) -> Option<RegisteredFlow> {
+    pub(super) fn registered_flow(&self, flow_id: FlowId) -> Option<RegisteredFlow> {
         self.flows.get(&flow_id.value()).copied()
     }
 
