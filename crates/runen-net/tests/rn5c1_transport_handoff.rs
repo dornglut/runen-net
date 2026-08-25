@@ -81,6 +81,75 @@ fn outbound_metadata_observes_front_without_transferring_custody() {
 }
 
 #[test]
+fn outbound_snapshots_share_submitted_allocation_and_preserve_accounting() {
+    let aggregate = limits(8, 8, 128);
+    let connection = limits(4, 8, 128);
+    let mut endpoint = DeliveryEndpoint::new(aggregate);
+    let key = DeliveryFlowKey::new(
+        ConnectionHandle::new(5),
+        FlowDirection::Outbound,
+        DeliveryFlowHandle::new(50),
+    );
+
+    endpoint
+        .establish_flow(
+            key,
+            DeliveryMode::ReliableOrdered,
+            reliable_policy(32, 4, 64),
+            connection,
+        )
+        .unwrap();
+
+    let payload = vec![9, 8, 7, 6, 5, 4];
+    let submitted_allocation = payload.as_ptr();
+    assert_eq!(
+        endpoint.submit(key, payload).unwrap(),
+        SubmissionOutcome::Accepted {
+            accepted_index: 0,
+            local_pressure_drops: 0,
+        }
+    );
+
+    let usage_before = (
+        endpoint.pending_messages(),
+        endpoint.pending_payload_bytes(),
+        endpoint.flow_pending_usage(key),
+    );
+    let first = endpoint.peek_outbound(key).unwrap().unwrap();
+    let second = endpoint.peek_outbound(key).unwrap().unwrap();
+
+    assert_eq!(first.payload().as_ptr(), submitted_allocation);
+    assert_eq!(second.payload().as_ptr(), submitted_allocation);
+    assert_eq!(first.payload().as_ptr(), second.payload().as_ptr());
+    assert_eq!(
+        (
+            endpoint.pending_messages(),
+            endpoint.pending_payload_bytes(),
+            endpoint.flow_pending_usage(key),
+        ),
+        usage_before
+    );
+
+    drop(first);
+    drop(second);
+    assert_eq!(
+        (
+            endpoint.pending_messages(),
+            endpoint.pending_payload_bytes(),
+            endpoint.flow_pending_usage(key),
+        ),
+        usage_before
+    );
+
+    let committed = endpoint.commit_outbound_custody(key, 0).unwrap();
+    assert_eq!(committed.payload().as_ptr(), submitted_allocation);
+    assert_eq!(committed.payload(), &[9, 8, 7, 6, 5, 4]);
+    assert_eq!(endpoint.pending_messages(), 0);
+    assert_eq!(endpoint.pending_payload_bytes(), 0);
+    assert_eq!(endpoint.flow_pending_usage(key), Some((0, 0)));
+}
+
+#[test]
 fn inbound_transport_ingress_derives_established_mode_and_preserves_exposure() {
     let aggregate = limits(8, 8, 128);
     let connection = limits(4, 8, 128);
