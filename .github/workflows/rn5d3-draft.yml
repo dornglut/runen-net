@@ -21,7 +21,9 @@ jobs:
       - name: Install maintained Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
       - name: Apply critical-review corrections
-        run: python tools/rn5d3_patch.py
+        run: |
+          python tools/rn5d3_patch.py
+          python tools/rn5d3_test_fix.py
       - name: Format and test focused adapter
         run: |
           cargo +stable fmt --all
