@@ -294,6 +294,27 @@ impl DeliveryTransfer {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct OutboundTransferMetadata {
+    mode: DeliveryMode,
+    accepted_index: u64,
+    payload_len: usize,
+}
+
+impl OutboundTransferMetadata {
+    pub const fn mode(self) -> DeliveryMode {
+        self.mode
+    }
+
+    pub const fn accepted_index(self) -> u64 {
+        self.accepted_index
+    }
+
+    pub const fn payload_len(self) -> usize {
+        self.payload_len
+    }
+}
+
 #[derive(Debug)]
 enum ReceiverBuffer {
     Reliable {
@@ -726,6 +747,27 @@ impl DeliveryEndpoint {
         Ok(flow.outbound.front().cloned())
     }
 
+    pub fn peek_outbound_metadata(
+        &self,
+        key: DeliveryFlowKey,
+    ) -> Result<Option<OutboundTransferMetadata>, DeliveryOperationError> {
+        let flow = self
+            .flows
+            .get(&key)
+            .ok_or(DeliveryOperationError::UnknownFlow)?;
+        if key.direction != FlowDirection::Outbound {
+            return Err(DeliveryOperationError::WrongDirection);
+        }
+        Ok(flow
+            .outbound
+            .front()
+            .map(|transfer| OutboundTransferMetadata {
+                mode: transfer.mode,
+                accepted_index: transfer.accepted_index,
+                payload_len: transfer.payload_len(),
+            }))
+    }
+
     pub fn commit_outbound_custody(
         &mut self,
         key: DeliveryFlowKey,
@@ -753,6 +795,30 @@ impl DeliveryEndpoint {
         };
         self.remove_pending(key, 1, transfer.payload_len());
         Ok(transfer)
+    }
+
+    pub fn receive_transport_payload(
+        &mut self,
+        key: DeliveryFlowKey,
+        accepted_index: u64,
+        payload: Vec<u8>,
+    ) -> Result<ReceiveOutcome, DeliveryOperationError> {
+        if key.direction != FlowDirection::Inbound {
+            return Err(DeliveryOperationError::WrongDirection);
+        }
+        let mode = self
+            .flows
+            .get(&key)
+            .map(|flow| flow.mode)
+            .ok_or(DeliveryOperationError::UnknownFlow)?;
+        self.receive(
+            key,
+            DeliveryTransfer {
+                mode,
+                accepted_index,
+                payload,
+            },
+        )
     }
 
     pub fn receive(
