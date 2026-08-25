@@ -42,6 +42,11 @@ fn manager_scoped_offer_validation_uses_exact_manager_policy_without_reservation
     };
     let manager = NegotiationManager::new(offer_limits, manager_limits).unwrap();
 
+    assert_eq!(manager.offer_limits(), offer_limits);
+    let mut projected_limits = manager.offer_limits();
+    projected_limits.max_protocols = 2;
+    assert_eq!(manager.offer_limits(), offer_limits);
+
     assert!(
         offer("permissive", vec![protocol(1), protocol(2)])
             .validate(&OfferLimits::default())
