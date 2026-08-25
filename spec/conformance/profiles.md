@@ -35,7 +35,7 @@ If an included normative artifact is marked **incomplete**, its already-defined 
 
 A conforming implementation MUST NOT present its implementation choice for an open specification item as standardized RunenNet behavior merely because it satisfies the currently defined profile requirements.
 
-A provisional conformance claim therefore does not imply that the profile is feature-complete, wire-interoperable, or stable across future specification revisions.
+A provisional conformance claim therefore does not imply that the profile is feature-complete or stable across future specification revisions. Wire interoperability is claimed only where an explicitly claimed wire/transport profile defines it.
 
 ## Core profile
 
@@ -96,25 +96,47 @@ AuthoritativeReplication does not require:
 
 Those concerns are outside the current profile unless a later normative profile explicitly adds them.
 
+## QUIC profile
+
+**QUIC** extends Core with the standardized RunenNet QUIC wire/transport realization.
+
+A QUIC claim includes all Core rules plus the normative requirements addressed to conforming implementations by:
+
+- [QUIC transport profile](../transport/quic.md).
+
+An implementation MUST NOT claim QUIC without satisfying Core.
+
+A QUIC claim states that the implementation can establish and operate the QUIC wire profile defined by the claimed RunenNet specification revision, including its ALPN/bootstrap, compatibility-negotiation representation, delivery-flow realization, framing, resource, and failure rules.
+
+A QUIC claim does not by itself claim AuthoritativeReplication. An implementation that satisfies both profiles MAY claim both `QUIC` and `AuthoritativeReplication`; neither profile includes the other beyond their common Core dependency.
+
+The QUIC profile standardizes transport/bootstrap interoperability. Schema-dependent application payload interoperability still requires the exact mutually supported protocol/schema/codec contract required by the Core negotiation rules.
+
+A QUIC claim does not require Quinn, Tokio, rustls, or another particular implementation library/runtime.
+
 ## Profile composition
 
 Profiles compose only according to explicit normative inclusion or interaction rules.
 
 AuthoritativeReplication includes Core by definition.
 
+QUIC includes Core by definition.
+
+QUIC and AuthoritativeReplication are orthogonal extensions of Core and MAY be claimed together. Neither claim weakens or replaces requirements of the other.
+
 The absence of a profile for another feature does not authorize an implementation to infer standardized semantics for that feature from analogy, implementation behavior, or external frameworks.
 
-No claimable Prediction, Interest, RecoveryHistory, QUIC, WebTransport, Hosted, Realtime, or similar profile is defined by this revision.
+No claimable Prediction, Interest, RecoveryHistory, WebTransport, Hosted, Realtime, or similar profile is defined by this revision.
 
 ## Profile requirements cannot be negotiated away
 
 Runtime compatibility negotiation selects mutually supported contracts for one connection. It MUST NOT weaken a conformance profile's normative requirements.
 
-If a future standardized protocol/capability/schema identity is required to realize a claimed profile over an interoperating connection, the normative owner introducing that identity must define the requirement explicitly, and negotiation must satisfy it according to the protocol negotiation specification.
+If a standardized protocol/capability/schema identity is required to realize a claimed profile over an interoperating connection, the normative owner introducing that identity must define the requirement explicitly, and negotiation must satisfy it according to the protocol negotiation specification.
 
 Marking such an identity Optional in a local offer does not change the profile requirement.
 
-The current Core and AuthoritativeReplication profiles define semantic behavior but do not standardize one required production CodecId, transport, or wire-format identity.
+Core and AuthoritativeReplication do not standardize one required production CodecId or transport realization. QUIC standardizes its transport/bootstrap realization but does not thereby assign an application CodecId or replace application protocol/schema negotiation.
 
 ## Conformance is not runtime capability negotiation
 
@@ -126,21 +148,15 @@ Likewise, an implementation's public conformance claim does not require every po
 
 A standardized capability that later depends on a particular conformance profile MUST define that dependency explicitly.
 
-## Conformance is not wire interoperability
+## Wire interoperability
 
-A Core or AuthoritativeReplication conformance claim establishes semantic conformance to the claimed specification/profile. It does not by itself claim byte-level interoperability over a production transport.
+A Core or AuthoritativeReplication conformance claim establishes semantic conformance to the claimed specification/profile. Neither claim by itself asserts byte-level interoperability over a production transport.
 
-This revision does not standardize:
+A QUIC claim adds the concrete bootstrap/control and delivery transport interoperability defined by the QUIC transport profile. It does not make arbitrary application payload bytes interoperable without the exact common application protocol/schema/codec contract required by negotiation.
 
-- one production bootstrap wire encoding;
-- one envelope framing format;
-- one required CodecId;
-- QUIC/TLS/ALPN realization;
-- another concrete transport profile.
+Two peers claiming QUIC can therefore establish the standardized RunenNet QUIC profile and perform the standardized compatibility bootstrap. They may interpret schema-dependent application payloads only after establishing the exact mutually supported negotiated contract required by Core.
 
-Two conforming implementations require an exact mutually supported protocol/schema/codec contract under the negotiation rules before they may interpret each other's schema-dependent payloads.
-
-A future wire/transport profile may add a stronger interoperability claim without redefining Core or AuthoritativeReplication semantics.
+Another future wire/transport profile may add a different production realization without redefining Core, AuthoritativeReplication, or the existing QUIC claim.
 
 ## Extensions
 
@@ -169,7 +185,7 @@ An implementation may be:
 
 provided every rule of the claimed profile is preserved.
 
-No Runenwerk, RunenECS, Quinn, Tokio, Serde, or postcard dependency is implied by a conformance claim.
+No Runenwerk, RunenECS, Quinn, Tokio, Serde, or postcard dependency is implied by a Core or AuthoritativeReplication claim. A QUIC claim requires QUIC behavior as specified by the QUIC profile but still does not require a particular QUIC library or executor.
 
 ## Claim documentation
 
@@ -178,9 +194,11 @@ A published standardized conformance claim MUST identify the claimed RunenNet sp
 For this revision, examples of structurally valid claim descriptions are:
 
 - `RunenNet 0.1-provisional — Core`;
-- `RunenNet 0.1-provisional — AuthoritativeReplication` (which includes Core).
+- `RunenNet 0.1-provisional — AuthoritativeReplication` (which includes Core);
+- `RunenNet 0.1-provisional — QUIC` (which includes Core);
+- `RunenNet 0.1-provisional — QUIC + AuthoritativeReplication`.
 
-Listing both `Core + AuthoritativeReplication` is permitted but redundant because AuthoritativeReplication includes Core.
+Listing Core in addition to a profile that includes Core is permitted but redundant.
 
 These examples define claim shape only; they are not evidence that any implementation has passed conformance.
 
