@@ -27,16 +27,29 @@ World/game policy such as spatial relevancy, ownership facts, and application si
 
 ## Implementation packages
 
-RN0 intentionally does not ratify a multi-crate product topology. Creating `runen-net-core`, protocol, runtime, transport, macro, or adapter crates before their independent ownership is demonstrated would make package shape precede semantic evidence.
+RN0 intentionally did not ratify a multi-crate product topology. Creating core, protocol, runtime, transport, macro, or adapter crates before their independent ownership was demonstrated would have made package shape precede semantic evidence.
 
-RN1 established the initial semantic ownership boundaries without requiring those boundaries to map one-to-one to crates. RN2 may introduce only the minimum product package decomposition justified by accepted RN1 semantics and conformance needs.
+RN1 established the initial semantic ownership boundaries, and RN2 introduced the minimum transport-independent implementation package required to realize them.
+
+The currently ratified production package topology is:
+
+- `crates/runen-net` — transport-independent RunenNet semantic/core implementation;
+- `crates/runen-net-quic` — production QUIC transport adapter that realizes the accepted QUIC profile downstream of `runen-net`.
+
+The permitted dependency direction is `runen-net-quic -> runen-net`. `runen-net` MUST NOT depend on `runen-net-quic`.
+
+Production QUIC, TLS, socket, and executor-specific dependencies belong to `runen-net-quic` when an accepted RN5 implementation slice actually requires them. They MUST NOT enter `runen-net` merely because the adapter uses them.
+
+The adapter package is implementation structure, not specification authority. QUIC wire and transport semantics remain owned by the normative specification; package modules and types MUST NOT create competing semantic contracts.
+
+Additional package splits require separate architectural justification. Control, reliable-flow, DATAGRAM, TLS, and endpoint concerns are not separate crates merely because they are distinct implementation responsibilities.
 
 ## Top-level artifact areas
 
 - `spec/` — normative specification artifacts;
 - `docs/` — non-normative architecture, verification, decisions, research, and guides;
 - `tools/` — repository tooling only;
-- future `crates/` — product implementation packages only after package ownership is accepted;
+- `crates/` — accepted product implementation packages;
 - future `examples/` — consumer-facing examples and standalone proofs;
 - future `conformance/` — executable conformance assets when required by the accepted verification design.
 

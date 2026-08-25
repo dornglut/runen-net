@@ -7,5 +7,12 @@ name = "runen-net"
 version = "0.1.0"
 
 [[package]]
+name = "runen-net-quic"
+version = "0.1.0"
+dependencies = [
+ "runen-net",
+]
+
+[[package]]
 name = "xtask"
 version = "0.0.0"

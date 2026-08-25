@@ -1,0 +1,11 @@
+[package]
+name = "runen-net-quic"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+runen-net = { path = "../runen-net" }
