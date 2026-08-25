@@ -74,11 +74,9 @@ pub(super) struct ValidatedEndpointResources {
 }
 
 impl EndpointResourceLimits {
-    pub(super) fn validate(
-        self,
-    ) -> Result<ValidatedEndpointResources, EndpointResourceError> {
-        let max_connections =
-            NonZeroUsize::new(self.max_connections).ok_or(EndpointResourceError::ZeroConnections)?;
+    pub(super) fn validate(self) -> Result<ValidatedEndpointResources, EndpointResourceError> {
+        let max_connections = NonZeroUsize::new(self.max_connections)
+            .ok_or(EndpointResourceError::ZeroConnections)?;
         if self.max_active_incoming_flows == 0 {
             return Err(EndpointResourceError::ZeroIncomingFlows);
         }
@@ -184,8 +182,8 @@ pub(super) fn build_client_config(
     roots: Arc<RootCertStore>,
 ) -> Result<ClientConfig, EndpointBuildError> {
     let tls = build_client_tls(roots)?;
-    let crypto = QuicClientConfig::try_from(tls)
-        .map_err(EndpointBuildError::MissingInitialCipherSuite)?;
+    let crypto =
+        QuicClientConfig::try_from(tls).map_err(EndpointBuildError::MissingInitialCipherSuite)?;
     let mut config = ClientConfig::new(Arc::new(crypto));
     config.version(QUIC_V1);
     config.transport_config(Arc::new(build_transport_config(
@@ -201,8 +199,8 @@ pub(super) fn build_server_config(
     private_key: PrivateKeyDer<'static>,
 ) -> Result<ServerConfig, EndpointBuildError> {
     let tls = build_server_tls(certificate_chain, private_key)?;
-    let crypto = QuicServerConfig::try_from(tls)
-        .map_err(EndpointBuildError::MissingInitialCipherSuite)?;
+    let crypto =
+        QuicServerConfig::try_from(tls).map_err(EndpointBuildError::MissingInitialCipherSuite)?;
     let mut config = ServerConfig::with_crypto(Arc::new(crypto));
     config.transport_config(Arc::new(build_transport_config(
         WireSide::Server,
@@ -280,9 +278,7 @@ fn build_transport_config(
     config
 }
 
-fn build_client_tls(
-    roots: Arc<RootCertStore>,
-) -> Result<rustls::ClientConfig, EndpointBuildError> {
+fn build_client_tls(roots: Arc<RootCertStore>) -> Result<rustls::ClientConfig, EndpointBuildError> {
     if roots.is_empty() {
         return Err(EndpointBuildError::EmptyTrustRoots);
     }
@@ -329,8 +325,8 @@ fn apply_server_profile(config: &mut rustls::ServerConfig) {
 #[cfg(test)]
 mod tests {
     use quinn::rustls::{
-        server::ResolvesServerCertUsingSni,
         pki_types::{Der, TrustAnchor},
+        server::ResolvesServerCertUsingSni,
     };
 
     use super::*;
@@ -384,11 +380,17 @@ mod tests {
     fn resource_policy_rejects_zero_and_out_of_range_values() {
         let mut input = limits();
         input.max_connections = 0;
-        assert_eq!(input.validate(), Err(EndpointResourceError::ZeroConnections));
+        assert_eq!(
+            input.validate(),
+            Err(EndpointResourceError::ZeroConnections)
+        );
 
         let mut input = limits();
         input.max_active_incoming_flows = 0;
-        assert_eq!(input.validate(), Err(EndpointResourceError::ZeroIncomingFlows));
+        assert_eq!(
+            input.validate(),
+            Err(EndpointResourceError::ZeroIncomingFlows)
+        );
 
         let mut input = limits();
         input.max_active_incoming_flows = (1u64 << 62) + 1;
@@ -434,7 +436,10 @@ mod tests {
 
         let mut input = limits();
         input.crypto_buffer_bytes = 0;
-        assert_eq!(input.validate(), Err(EndpointResourceError::ZeroCryptoBuffer));
+        assert_eq!(
+            input.validate(),
+            Err(EndpointResourceError::ZeroCryptoBuffer)
+        );
 
         let mut input = limits();
         input.datagram_receive_buffer_bytes = usize::from(input.udp_payload_ceiling) - 1;
@@ -452,7 +457,10 @@ mod tests {
 
         let mut input = limits();
         input.max_idle_timeout = Duration::ZERO;
-        assert_eq!(input.validate(), Err(EndpointResourceError::ZeroIdleTimeout));
+        assert_eq!(
+            input.validate(),
+            Err(EndpointResourceError::ZeroIdleTimeout)
+        );
     }
 
     #[test]
@@ -482,7 +490,7 @@ mod tests {
     #[test]
     fn server_profile_rejects_empty_chain_and_fixes_alpn_and_early_data() {
         let invalid_key: PrivateKeyDer<'static> =
-            quinn::rustls::pki_types::PrivatePkcs8KeyDer::from(vec![0u8]).into();
+            rustls::pki_types::PrivatePkcs8KeyDer::from(vec![0u8]).into();
         assert!(matches!(
             build_server_tls(Vec::new(), invalid_key),
             Err(EndpointBuildError::EmptyCertificateChain)
@@ -497,7 +505,7 @@ mod tests {
     fn invalid_server_identity_fails_construction() {
         let certificate = CertificateDer::from(vec![0u8]);
         let private_key: PrivateKeyDer<'static> =
-            quinn::rustls::pki_types::PrivatePkcs8KeyDer::from(vec![0u8]).into();
+            rustls::pki_types::PrivatePkcs8KeyDer::from(vec![0u8]).into();
         assert!(matches!(
             build_server_tls(vec![certificate], private_key),
             Err(EndpointBuildError::Rustls(_))
