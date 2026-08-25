@@ -84,11 +84,11 @@ fn establish_negotiation(
         )
         .unwrap();
     assert_ne!(
-        manager.validate_authority(connection, &contract).unwrap(),
+        manager.validate_authority(connection).unwrap(),
         NegotiationStatus::Established
     );
     assert_eq!(
-        manager.validate_peer(connection, &contract).unwrap(),
+        manager.validate_peer(connection).unwrap(),
         NegotiationStatus::Established
     );
     contract

@@ -107,11 +107,11 @@ fn establish_negotiation(
         )
         .unwrap();
     assert_ne!(
-        manager.validate_authority(connection, &contract).unwrap(),
+        manager.validate_authority(connection).unwrap(),
         NegotiationStatus::Established
     );
     assert_eq!(
-        manager.validate_peer(connection, &contract).unwrap(),
+        manager.validate_peer(connection).unwrap(),
         NegotiationStatus::Established
     );
     contract
@@ -208,14 +208,10 @@ fn core_profile_composes_negotiation_session_delivery_and_replacement() {
             &NegotiationRequirements::default(),
         )
         .unwrap();
-    negotiation
-        .validate_authority(first_connection, &contract)
-        .unwrap();
+    negotiation.validate_authority(first_connection).unwrap();
     assert!(negotiation.established(first_connection).is_err());
     assert_eq!(
-        negotiation
-            .validate_peer(first_connection, &contract)
-            .unwrap(),
+        negotiation.validate_peer(first_connection).unwrap(),
         NegotiationStatus::Established
     );
 

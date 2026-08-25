@@ -376,20 +376,19 @@ mod tests {
     fn establish(manager: &mut NegotiationManager, connection: ConnectionHandle) {
         let offer = CompatibilityOffer::new(vec![protocol()], vec![], vec![], None);
         manager.start(connection, offer.clone(), offer).unwrap();
-        let contract = NegotiatedContract::new(protocol());
         manager
             .propose(
                 connection,
-                contract.clone(),
+                NegotiatedContract::new(protocol()),
                 &NegotiationRequirements::default(),
             )
             .unwrap();
         assert_ne!(
-            manager.validate_authority(connection, &contract).unwrap(),
+            manager.validate_authority(connection).unwrap(),
             NegotiationStatus::Established
         );
         assert_eq!(
-            manager.validate_peer(connection, &contract).unwrap(),
+            manager.validate_peer(connection).unwrap(),
             NegotiationStatus::Established
         );
     }

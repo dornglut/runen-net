@@ -445,7 +445,6 @@ pub enum NegotiationError {
     SelectionTooLarge,
     AlreadyProposed,
     NoProposal,
-    ValidationMismatch,
     AlreadyEstablished,
 }
 
@@ -540,29 +539,16 @@ impl NegotiationAttempt {
         Ok(())
     }
 
-    fn validate_authority(
-        &mut self,
-        contract: &NegotiatedContract,
-    ) -> Result<NegotiationStatus, NegotiationError> {
-        self.validate_party(contract, true)
+    fn validate_authority(&mut self) -> Result<NegotiationStatus, NegotiationError> {
+        self.validate_party(true)
     }
 
-    fn validate_peer(
-        &mut self,
-        contract: &NegotiatedContract,
-    ) -> Result<NegotiationStatus, NegotiationError> {
-        self.validate_party(contract, false)
+    fn validate_peer(&mut self) -> Result<NegotiationStatus, NegotiationError> {
+        self.validate_party(false)
     }
 
-    fn validate_party(
-        &mut self,
-        contract: &NegotiatedContract,
-        authority: bool,
-    ) -> Result<NegotiationStatus, NegotiationError> {
-        let proposal = self.proposal.as_ref().ok_or(NegotiationError::NoProposal)?;
-        if proposal != contract {
-            return Err(NegotiationError::ValidationMismatch);
-        }
+    fn validate_party(&mut self, authority: bool) -> Result<NegotiationStatus, NegotiationError> {
+        self.proposal.as_ref().ok_or(NegotiationError::NoProposal)?;
 
         if authority {
             self.authority_validated = true;
@@ -872,9 +858,8 @@ impl NegotiationManager {
     pub fn validate_authority(
         &mut self,
         connection: ConnectionHandle,
-        contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationManagerError> {
-        let status = self.attempt_mut(connection)?.validate_authority(contract)?;
+        let status = self.attempt_mut(connection)?.validate_authority()?;
         if status == NegotiationStatus::Established {
             self.promote_established(connection)?;
         }
@@ -884,9 +869,8 @@ impl NegotiationManager {
     pub fn validate_peer(
         &mut self,
         connection: ConnectionHandle,
-        contract: &NegotiatedContract,
     ) -> Result<NegotiationStatus, NegotiationManagerError> {
-        let status = self.attempt_mut(connection)?.validate_peer(contract)?;
+        let status = self.attempt_mut(connection)?.validate_peer()?;
         if status == NegotiationStatus::Established {
             self.promote_established(connection)?;
         }
@@ -1131,20 +1115,19 @@ mod tests {
     fn establish(manager: &mut NegotiationManager, connection: ConnectionHandle) {
         let (authority, peer) = common_offers();
         manager.start(connection, authority, peer).unwrap();
-        let contract = common_contract();
         manager
             .propose(
                 connection,
-                contract.clone(),
+                common_contract(),
                 &NegotiationRequirements::default(),
             )
             .unwrap();
         assert_ne!(
-            manager.validate_authority(connection, &contract).unwrap(),
+            manager.validate_authority(connection).unwrap(),
             NegotiationStatus::Established
         );
         assert_eq!(
-            manager.validate_peer(connection, &contract).unwrap(),
+            manager.validate_peer(connection).unwrap(),
             NegotiationStatus::Established
         );
     }
@@ -1231,44 +1214,46 @@ mod tests {
         );
         let peer = offer(protocol(1), None, None);
         let mut attempt = NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
-        let contract = NegotiatedContract::new(protocol(1));
         attempt
-            .propose(contract.clone(), &NegotiationRequirements::default())
+            .propose(
+                NegotiatedContract::new(protocol(1)),
+                &NegotiationRequirements::default(),
+            )
             .unwrap();
         assert_eq!(
-            attempt.validate_authority(&contract).unwrap(),
+            attempt.validate_authority().unwrap(),
             NegotiationStatus::AwaitingValidation {
                 authority_validated: true,
                 peer_validated: false
             }
         );
         assert_eq!(
-            attempt.validate_peer(&contract).unwrap(),
+            attempt.validate_peer().unwrap(),
             NegotiationStatus::Established
         );
     }
 
     #[test]
-    fn mutual_validation_must_reference_the_same_contract() {
+    fn validation_acknowledges_only_the_stored_proposal() {
         let (authority, peer) = common_offers();
         let mut attempt = NegotiationAttempt::new(authority, peer, OfferLimits::default()).unwrap();
-        let contract = common_contract();
-        attempt
-            .propose(contract.clone(), &NegotiationRequirements::default())
-            .unwrap();
-        assert_ne!(
-            attempt.validate_authority(&contract).unwrap(),
-            NegotiationStatus::Established
-        );
 
-        let different = NegotiatedContract::new(protocol(1));
         assert_eq!(
-            attempt.validate_peer(&different),
-            Err(NegotiationError::ValidationMismatch)
+            attempt.validate_authority(),
+            Err(NegotiationError::NoProposal)
         );
-        assert_ne!(attempt.status(), NegotiationStatus::Established);
+        attempt
+            .propose(common_contract(), &NegotiationRequirements::default())
+            .unwrap();
         assert_eq!(
-            attempt.validate_peer(&contract).unwrap(),
+            attempt.validate_authority().unwrap(),
+            NegotiationStatus::AwaitingValidation {
+                authority_validated: true,
+                peer_validated: false
+            }
+        );
+        assert_eq!(
+            attempt.validate_peer().unwrap(),
             NegotiationStatus::Established
         );
     }
