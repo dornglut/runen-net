@@ -24,10 +24,12 @@ jobs:
         run: |
           python tools/rn5d3_patch.py
           python tools/rn5d3_test_fix.py
+          python tools/rn5d3_visibility_patch.py
       - name: Format and test focused adapter
         run: |
           cargo +stable fmt --all
           cargo +stable test --locked -p runen-net-quic --all-targets
+          cargo +stable clippy --locked -p runen-net-quic --all-targets -- -D warnings
       - name: Commit tested candidate
         run: |
           git config user.name 'github-actions[bot]'
