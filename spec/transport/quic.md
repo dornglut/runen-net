@@ -378,7 +378,7 @@ The receiver determines the mode from the already-established FlowId. An unknown
 
 The first accepted message on an `UnreliableSequenced` flow has sequence value zero. Each later accepted message consumes exactly the next integer. Rejected submissions do not consume a value.
 
-Sequence values MUST NOT wrap. After the largest representable QUIC variable-length integer has been consumed, the flow cannot accept another message and MUST be terminated before another sequenced flow is used.
+Sequence values MUST NOT wrap. After the largest representable QUIC variable-length integer has been consumed, that flow MUST terminate before accepting another message. Sequence state and exhaustion in one delivery flow do not constrain another delivery flow.
 
 The receiver applies the stale/duplicate exposure rule owned by the delivery-flow specification to the decoded sequence value.
 
