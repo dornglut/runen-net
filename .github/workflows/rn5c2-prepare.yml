@@ -1,0 +1,126 @@
+name: RN5C2 Prepare Candidate
+
+on:
+  push:
+    branches:
+      - rn5c2-quinn-reliable-binding
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: rn5c2-quinn-reliable-binding
+          fetch-depth: 0
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+
+      - name: Apply mechanical RN5C2 preparation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          delivery = Path("crates/runen-net/src/delivery.rs")
+          text = delivery.read_text()
+
+          old = "use std::num::NonZeroUsize;\n"
+          new = "use std::num::NonZeroUsize;\nuse std::sync::Arc;\n"
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = """pub struct DeliveryTransfer {
+              mode: DeliveryMode,
+              accepted_index: u64,
+              payload: Vec<u8>,
+          }"""
+          new = """pub struct DeliveryTransfer {
+              mode: DeliveryMode,
+              accepted_index: u64,
+              payload: Arc<Vec<u8>>,
+          }"""
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = """pub struct ExposedMessage {
+              accepted_index: u64,
+              payload: Vec<u8>,
+          }"""
+          new = """pub struct ExposedMessage {
+              accepted_index: u64,
+              payload: Arc<Vec<u8>>,
+          }"""
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = """        let transfer = DeliveryTransfer {
+              mode,
+              accepted_index,
+              payload,
+          };"""
+          new = """        let transfer = DeliveryTransfer {
+              mode,
+              accepted_index,
+              payload: Arc::new(payload),
+          };"""
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = """            DeliveryTransfer {
+                  mode,
+                  accepted_index,
+                  payload,
+              },"""
+          new = """            DeliveryTransfer {
+                  mode,
+                  accepted_index,
+                  payload: Arc::new(payload),
+              },"""
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          delivery.write_text(text)
+
+          wire = Path("crates/runen-net-quic/src/wire.rs")
+          text = wire.read_text()
+          old = "#[derive(Debug, Copy, Clone, PartialEq, Eq)]\npub(crate) struct FlowId(u64);"
+          new = "#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]\npub(crate) struct FlowId(u64);"
+          assert text.count(old) == 1
+          wire.write_text(text.replace(old, new, 1))
+
+          manifest = Path("crates/runen-net-quic/Cargo.toml")
+          text = manifest.read_text()
+          old = "[dependencies]\nrunen-net = { path = \"../runen-net\" }\n"
+          new = "[dependencies]\nquinn = { version = \"=0.11.11\", default-features = false }\nrunen-net = { path = \"../runen-net\" }\n"
+          assert text.count(old) == 1
+          manifest.write_text(text.replace(old, new, 1))
+
+      - name: Generate reviewed lock resolution
+        run: |
+          cargo +stable generate-lockfile
+          cargo +stable fmt --all
+          cargo +stable check --workspace --all-targets
+          cargo +stable test --workspace --all-targets
+          cargo +stable clippy --workspace --all-targets -- -D warnings
+          awk '
+            /^name = "quinn"$/ { q=1 }
+            /^name = "quinn-proto"$/ { p=1 }
+            q && /^version = / { print "resolved quinn " $0; q=0 }
+            p && /^version = / { print "resolved quinn-proto " $0; p=0 }
+          ' Cargo.lock
+          grep -A2 '^name = "quinn"$' Cargo.lock | grep 'version = "0.11.11"'
+          grep -A2 '^name = "quinn-proto"$' Cargo.lock | grep 'version = "0.11.17"'
+
+      - name: Remove preparation workflow and publish generated draft
+        run: |
+          rm .github/workflows/rn5c2-prepare.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "RN5C2 draft: share payload custody and lock Quinn"
+          git push origin HEAD:rn5c2-quinn-reliable-binding
