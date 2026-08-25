@@ -20,6 +20,9 @@ jobs:
           fetch-depth: 0
       - name: Install maintained Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Apply compile-review correction
+        run: |
+          sed -i 's/quinn::rustls::pki_types::PrivatePkcs8KeyDer/rustls::pki_types::PrivatePkcs8KeyDer/g' crates/runen-net-quic/src/endpoint.rs
       - name: Format and validate focused adapter
         run: |
           cargo +stable fmt --all
