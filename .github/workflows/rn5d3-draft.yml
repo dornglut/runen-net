@@ -20,11 +20,8 @@ jobs:
           fetch-depth: 0
       - name: Install maintained Rust toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
-      - name: Apply critical-review corrections
-        run: |
-          python tools/rn5d3_patch.py
-          python tools/rn5d3_test_fix.py
-          python tools/rn5d3_visibility_patch.py
+      - name: Apply remaining critical-review correction
+        run: python tools/rn5d3_visibility_patch.py
       - name: Format and test focused adapter
         run: |
           cargo +stable fmt --all
@@ -34,6 +31,6 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add crates/runen-net-quic/src/datagram.rs crates/runen-net-quic/src/quinn_binding.rs crates/runen-net-quic/src/lib.rs
-          git commit -m 'RN5D3 draft: wire bounded DATAGRAM realization'
+          git add crates/runen-net-quic/src/datagram.rs
+          git commit -m 'RN5D3 draft: expose crate-internal DATAGRAM wiring'
           git push
