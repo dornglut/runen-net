@@ -1,0 +1,35 @@
+name: RN5D3 Draft
+
+on:
+  push:
+    branches:
+      - rn5d3-quinn-datagram
+
+permissions:
+  contents: write
+
+jobs:
+  candidate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out draft branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: rn5d3-quinn-datagram
+          fetch-depth: 0
+      - name: Install maintained Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy
+      - name: Apply critical-review corrections
+        run: python tools/rn5d3_patch.py
+      - name: Format and test focused adapter
+        run: |
+          cargo +stable fmt --all
+          cargo +stable test --locked -p runen-net-quic --all-targets
+      - name: Commit tested candidate
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/runen-net-quic/src/datagram.rs crates/runen-net-quic/src/quinn_binding.rs crates/runen-net-quic/src/lib.rs
+          git commit -m 'RN5D3 draft: wire bounded DATAGRAM realization'
+          git push
