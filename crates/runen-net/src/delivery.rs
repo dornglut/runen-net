@@ -547,6 +547,25 @@ impl DeliveryEndpoint {
             .map(|flow| (flow.pending_messages, flow.pending_payload_bytes))
     }
 
+    /// Inspect the acceptance index that the next successful outbound submission would consume.
+    ///
+    /// This is a read-only transport handoff. It does not reserve the index, admit a message,
+    /// mutate pressure/accounting state, or change submission semantics. `submit` remains the
+    /// sole authority that accepts a message and advances the index.
+    pub fn next_outbound_accepted_index(
+        &self,
+        key: DeliveryFlowKey,
+    ) -> Result<Option<u64>, DeliveryOperationError> {
+        let flow = self
+            .flows
+            .get(&key)
+            .ok_or(DeliveryOperationError::UnknownFlow)?;
+        if key.direction != FlowDirection::Outbound {
+            return Err(DeliveryOperationError::WrongDirection);
+        }
+        Ok(flow.next_accepted_index)
+    }
+
     pub fn establish_flow(
         &mut self,
         key: DeliveryFlowKey,
@@ -1438,5 +1457,49 @@ impl DeliveryEndpoint {
                 .usage
                 .remove(0, messages, payload_bytes);
         }
+    }
+}
+
+#[cfg(test)]
+mod rn5d1_tests {
+    use super::*;
+
+    fn nz(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn next_outbound_accepted_index_reports_exhaustion_without_consuming_it() {
+        let limits = DeliveryScopeLimits::new(nz(2), nz(2), nz(16));
+        let mut endpoint = DeliveryEndpoint::new(limits);
+        let key = DeliveryFlowKey::new(
+            ConnectionHandle::new(99),
+            FlowDirection::Outbound,
+            DeliveryFlowHandle::new(99),
+        );
+        let policy = FlowResourcePolicy::new(
+            nz(8),
+            nz(2),
+            nz(16),
+            OutboundPressureBehavior::RejectNew,
+            ReceiverPressureBehavior::DropIncomingUnreliable,
+        );
+        endpoint
+            .establish_flow(key, DeliveryMode::UnreliableSequenced, policy, limits)
+            .unwrap();
+
+        endpoint
+            .flows
+            .get_mut(&key)
+            .expect("flow established above")
+            .next_accepted_index = None;
+
+        assert_eq!(endpoint.next_outbound_accepted_index(key), Ok(None));
+        assert_eq!(
+            endpoint.submit(key, vec![1]).unwrap(),
+            SubmissionOutcome::RejectedCounterExhausted
+        );
+        assert_eq!(endpoint.next_outbound_accepted_index(key), Ok(None));
+        assert_eq!(endpoint.flow_pending_usage(key), Some((0, 0)));
     }
 }
