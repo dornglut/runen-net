@@ -7,6 +7,11 @@
 
 #[allow(
     dead_code,
+    reason = "RN5E3 lands crate-private profile control before RN5E4/RN5E5 wiring"
+)]
+mod control;
+#[allow(
+    dead_code,
     reason = "RN5D3 lands crate-private DATAGRAM realization before RN5E/RN6 wiring"
 )]
 mod datagram;
