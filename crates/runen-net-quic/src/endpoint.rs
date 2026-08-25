@@ -22,6 +22,7 @@ const RUNENNET_ALPN: &[u8] = b"runennet/1";
 const QUIC_V1: u32 = 0x0000_0001;
 const QUIC_MIN_UDP_PAYLOAD: u16 = 1_200;
 const QUIC_MAX_UDP_PAYLOAD: u16 = 65_527;
+const QUIC_MAX_STREAM_COUNT: u64 = 1 << 60;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) struct EndpointResourceLimits {
@@ -41,7 +42,7 @@ pub(super) struct EndpointResourceLimits {
 pub(super) enum EndpointResourceError {
     ZeroConnections,
     ZeroIncomingFlows,
-    IncomingFlowsOutOfRange,
+    IncomingFlowsExceedQuicStreamLimit,
     UdpPayloadBelowMinimum,
     UdpPayloadAboveMaximum,
     ZeroStreamReceiveWindow,
@@ -115,8 +116,11 @@ impl EndpointResourceLimits {
         if self.max_active_incoming_flows == 0 {
             return Err(EndpointResourceError::ZeroIncomingFlows);
         }
+        if self.max_active_incoming_flows > QUIC_MAX_STREAM_COUNT {
+            return Err(EndpointResourceError::IncomingFlowsExceedQuicStreamLimit);
+        }
         let max_active_incoming_flows = VarInt::from_u64(self.max_active_incoming_flows)
-            .map_err(|_| EndpointResourceError::IncomingFlowsOutOfRange)?;
+            .map_err(|_| EndpointResourceError::IncomingFlowsExceedQuicStreamLimit)?;
 
         if self.udp_payload_ceiling < QUIC_MIN_UDP_PAYLOAD {
             return Err(EndpointResourceError::UdpPayloadBelowMinimum);
@@ -255,7 +259,7 @@ pub(super) fn bind_client_endpoint(
     roots: Arc<RootCertStore>,
 ) -> Result<ConfiguredEndpoint, EndpointBuildError> {
     let client_config = build_client_config(resources, roots)?;
-    let socket = UdpSocket::bind(bind_addr)?;
+    let socket = bind_udp_socket(bind_addr)?;
     let mut endpoint = Endpoint::new(
         build_endpoint_config(resources)?,
         None,
@@ -282,7 +286,7 @@ pub(super) fn bind_server_endpoint(
     private_key: PrivateKeyDer<'static>,
 ) -> Result<ConfiguredEndpoint, EndpointBuildError> {
     let server_config = build_server_config(resources, certificate_chain, private_key)?;
-    let socket = UdpSocket::bind(bind_addr)?;
+    let socket = bind_udp_socket(bind_addr)?;
     let endpoint = Endpoint::new(
         build_endpoint_config(resources)?,
         Some(server_config),
@@ -294,6 +298,12 @@ pub(super) fn bind_server_endpoint(
         resources,
         side: WireSide::Server,
     })
+}
+
+fn bind_udp_socket(bind_addr: SocketAddr) -> io::Result<UdpSocket> {
+    let socket = UdpSocket::bind(bind_addr)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
 }
 
 fn build_endpoint_config(
@@ -465,10 +475,13 @@ mod tests {
         );
 
         let mut input = limits();
-        input.max_active_incoming_flows = (1u64 << 62) + 1;
+        input.max_active_incoming_flows = QUIC_MAX_STREAM_COUNT;
+        assert!(input.validate().is_ok());
+
+        input.max_active_incoming_flows = QUIC_MAX_STREAM_COUNT + 1;
         assert_eq!(
             input.validate(),
-            Err(EndpointResourceError::IncomingFlowsOutOfRange)
+            Err(EndpointResourceError::IncomingFlowsExceedQuicStreamLimit)
         );
 
         let mut input = limits();
@@ -533,6 +546,14 @@ mod tests {
             input.validate(),
             Err(EndpointResourceError::ZeroIdleTimeout)
         );
+    }
+
+    #[test]
+    fn udp_socket_binding_is_nonblocking_before_tokio_wrapping() {
+        let socket = bind_udp_socket("127.0.0.1:0".parse().unwrap()).unwrap();
+        let mut byte = [0u8; 1];
+        let error = socket.recv_from(&mut byte).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]
