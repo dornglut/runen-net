@@ -281,6 +281,10 @@ impl ValidatedOffer {
         &self.offer
     }
 
+    pub fn into_offer(self) -> CompatibilityOffer {
+        self.offer
+    }
+
     fn supports_protocol(&self, protocol: ProtocolContract) -> bool {
         self.offer.protocols.contains(&protocol)
     }
@@ -846,6 +850,17 @@ impl NegotiationManager {
             attempts: HashMap::new(),
             established: HashMap::new(),
         })
+    }
+
+    pub const fn offer_limits(&self) -> OfferLimits {
+        self.offer_limits
+    }
+
+    pub fn validate_offer(
+        &self,
+        offer: CompatibilityOffer,
+    ) -> Result<ValidatedOffer, OfferValidationError> {
+        offer.validate(&self.offer_limits)
     }
 
     pub fn start(
