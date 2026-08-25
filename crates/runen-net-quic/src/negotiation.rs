@@ -1043,7 +1043,7 @@ mod tests {
         contract
     }
 
-    fn manager() -> NegotiationManager {
+    fn new_manager() -> NegotiationManager {
         NegotiationManager::new(OfferLimits::default(), NegotiationManagerLimits::default())
             .unwrap()
     }
@@ -1196,6 +1196,23 @@ mod tests {
                 NegotiationOutcome::InvalidSelection
             ))
         );
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u128.to_be_bytes());
+        body.extend_from_slice(&1u128.to_be_bytes());
+        body.push(0);
+        body.push(2);
+        for contract_id in [10u128, 12u128] {
+            body.extend_from_slice(&9u128.to_be_bytes());
+            body.extend_from_slice(&contract_id.to_be_bytes());
+            body.extend_from_slice(&(contract_id + 1).to_be_bytes());
+        }
+        assert_eq!(
+            decode_proposal(&body, OfferLimits::default()),
+            Err(BodyDecodeError::Failure(
+                NegotiationOutcome::InvalidSelection
+            ))
+        );
     }
 
     #[test]
@@ -1221,7 +1238,7 @@ mod tests {
     #[test]
     fn local_diagnostic_label_and_frame_ceiling_fail_before_manager_reservation() {
         let connection = ConnectionHandle::new(1);
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut exchange = exchange(SemanticRole::Authority, connection);
         assert!(matches!(
             exchange.prepare_offer(&mut manager, offer(Some("local-only"))),
@@ -1246,7 +1263,7 @@ mod tests {
     #[test]
     fn malformed_peer_offer_reaches_core_and_is_not_normalized() {
         let connection = ConnectionHandle::new(2);
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut exchange = exchange(SemanticRole::Authority, connection);
         exchange
             .prepare_offer(&mut manager, compact_offer())
@@ -1267,6 +1284,55 @@ mod tests {
             })
         ));
         assert_eq!(manager.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn empty_peer_offer_structures_reach_core_and_are_not_normalized() {
+        let malformed_offers = [
+            CompatibilityOffer::new(vec![], vec![], vec![], None),
+            CompatibilityOffer::new(
+                vec![protocol(1)],
+                vec![],
+                vec![SchemaOffer::new(
+                    SchemaId::new(9),
+                    RequirementLevel::Optional,
+                    vec![],
+                )],
+                None,
+            ),
+            CompatibilityOffer::new(
+                vec![protocol(1)],
+                vec![],
+                vec![SchemaOffer::new(
+                    SchemaId::new(9),
+                    RequirementLevel::Optional,
+                    vec![SchemaContractOffer::new(SchemaContractId::new(10), vec![])],
+                )],
+                None,
+            ),
+        ];
+
+        for (index, malformed) in malformed_offers.into_iter().enumerate() {
+            let connection = ConnectionHandle::new(20 + index as u64);
+            let mut manager = new_manager();
+            let mut exchange = exchange(SemanticRole::Authority, connection);
+            exchange
+                .prepare_offer(&mut manager, compact_offer())
+                .unwrap();
+            let body = encode_offer(&malformed, MAX_FRAME).unwrap();
+            assert!(matches!(
+                exchange.receive(
+                    &mut manager,
+                    &NegotiationRequirements::default(),
+                    frame(ControlFrameType::NegotiationOffer, body)
+                ),
+                Err(NegotiationControlError::LocalFailure {
+                    outcome: NegotiationOutcome::MalformedOffer,
+                    ..
+                })
+            ));
+            assert_eq!(manager.reserved_bytes(), 0);
+        }
     }
 
     #[test]
@@ -1309,8 +1375,8 @@ mod tests {
     #[test]
     fn authority_and_non_authority_reach_the_same_established_contract() {
         let connection = ConnectionHandle::new(4);
-        let mut authority_manager = manager();
-        let mut peer_manager = manager();
+        let mut authority_manager = new_manager();
+        let mut peer_manager = new_manager();
         let mut authority = exchange(SemanticRole::Authority, connection);
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
         let requirements = NegotiationRequirements::default();
@@ -1379,7 +1445,7 @@ mod tests {
     #[test]
     fn invalid_proposal_maps_to_invalid_selection_and_releases_attempt() {
         let connection = ConnectionHandle::new(5);
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
         let requirements = NegotiationRequirements::default();
         peer.prepare_offer(&mut manager, offer(None)).unwrap();
@@ -1414,7 +1480,7 @@ mod tests {
     #[test]
     fn wrong_order_and_nonempty_acknowledgement_fail_closed() {
         let connection = ConnectionHandle::new(6);
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
         let requirements = NegotiationRequirements::default();
         peer.prepare_offer(&mut manager, offer(None)).unwrap();
@@ -1439,8 +1505,8 @@ mod tests {
         ));
         assert_eq!(manager.reserved_bytes(), 0);
 
-        let mut authority_manager = manager();
-        let mut peer_manager = manager();
+        let mut authority_manager = new_manager();
+        let mut peer_manager = new_manager();
         let mut authority = exchange(SemanticRole::Authority, connection);
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
         let authority_offer = authority
@@ -1472,8 +1538,8 @@ mod tests {
         ));
         assert_eq!(authority_manager.reserved_bytes(), 0);
 
-        let mut authority_manager = manager();
-        let mut peer_manager = manager();
+        let mut authority_manager = new_manager();
+        let mut peer_manager = new_manager();
         let mut authority = exchange(SemanticRole::Authority, connection);
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
         let authority_offer = authority
@@ -1518,7 +1584,7 @@ mod tests {
         let connection = ConnectionHandle::new(61);
         let requirements = NegotiationRequirements::default();
 
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
         peer.prepare_offer(&mut manager, offer(None)).unwrap();
         let authority_offer = encode_offer(&offer(None), MAX_FRAME).unwrap();
@@ -1541,7 +1607,7 @@ mod tests {
         ));
         assert_eq!(manager.reserved_bytes(), 0);
 
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
         peer.prepare_offer(&mut manager, offer(None)).unwrap();
         let authority_offer = encode_offer(&offer(None), MAX_FRAME).unwrap();
@@ -1575,7 +1641,7 @@ mod tests {
     #[test]
     fn remote_failure_releases_active_attempt_without_reply_loop() {
         let connection = ConnectionHandle::new(7);
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut exchange = exchange(SemanticRole::Authority, connection);
         let requirements = NegotiationRequirements::default();
         exchange
@@ -1608,7 +1674,7 @@ mod tests {
     #[test]
     fn abort_releases_attempt_or_established_contract() {
         let connection = ConnectionHandle::new(8);
-        let mut manager = manager();
+        let mut manager = new_manager();
         let mut exchange = exchange(SemanticRole::Authority, connection);
         exchange
             .prepare_offer(&mut manager, compact_offer())
@@ -1631,8 +1697,8 @@ mod tests {
     fn abort_releases_an_established_contract() {
         let connection = ConnectionHandle::new(81);
         let requirements = NegotiationRequirements::default();
-        let mut authority_manager = manager();
-        let mut peer_manager = manager();
+        let mut authority_manager = new_manager();
+        let mut peer_manager = new_manager();
         let mut authority = exchange(SemanticRole::Authority, connection);
         let mut peer = exchange(SemanticRole::NonAuthority, connection);
 
