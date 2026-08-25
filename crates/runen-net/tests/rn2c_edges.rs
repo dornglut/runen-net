@@ -49,16 +49,15 @@ fn authorized_session(participant: ParticipantId, connection: ConnectionHandle) 
             .unwrap();
     let offer = CompatibilityOffer::new(vec![protocol()], vec![], vec![], None);
     manager.start(connection, offer.clone(), offer).unwrap();
-    let contract = NegotiatedContract::new(protocol());
     manager
         .propose(
             connection,
-            contract.clone(),
+            NegotiatedContract::new(protocol()),
             &NegotiationRequirements::default(),
         )
         .unwrap();
-    manager.validate_authority(connection, &contract).unwrap();
-    manager.validate_peer(connection, &contract).unwrap();
+    manager.validate_authority(connection).unwrap();
+    manager.validate_peer(connection).unwrap();
 
     let mut session = Session::new(SessionId::new(1), SessionLimits::new(nz(4), nz(2)).unwrap());
     session
