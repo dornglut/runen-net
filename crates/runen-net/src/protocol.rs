@@ -277,6 +277,10 @@ impl ValidatedOffer {
         self.accounted_bytes
     }
 
+    pub const fn offer(&self) -> &CompatibilityOffer {
+        &self.offer
+    }
+
     fn supports_protocol(&self, protocol: ProtocolContract) -> bool {
         self.offer.protocols.contains(&protocol)
     }
@@ -380,6 +384,16 @@ impl NegotiatedContract {
         self.schemas.len()
     }
 
+    pub fn enabled_capabilities(&self) -> impl Iterator<Item = CapabilityId> + '_ {
+        self.capabilities.iter().copied()
+    }
+
+    pub fn selected_schemas(&self) -> impl Iterator<Item = (SchemaId, SelectedSchema)> + '_ {
+        self.schemas
+            .iter()
+            .map(|(schema_id, binding)| (*schema_id, *binding))
+    }
+
     fn accounted_bytes(&self) -> Result<usize, OfferValidationError> {
         const ID_BYTES: usize = 16;
         const PROTOCOL_BYTES: usize = ID_BYTES * 2;
@@ -446,6 +460,22 @@ pub enum NegotiationError {
     AlreadyProposed,
     NoProposal,
     AlreadyEstablished,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct NegotiationOffers<'a> {
+    authority: &'a ValidatedOffer,
+    peer: &'a ValidatedOffer,
+}
+
+impl<'a> NegotiationOffers<'a> {
+    pub const fn authority(self) -> &'a ValidatedOffer {
+        self.authority
+    }
+
+    pub const fn peer(self) -> &'a ValidatedOffer {
+        self.peer
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -844,6 +874,27 @@ impl NegotiationManager {
         Ok(())
     }
 
+    pub fn attempt_offers(
+        &self,
+        connection: ConnectionHandle,
+    ) -> Result<NegotiationOffers<'_>, NegotiationManagerError> {
+        let attempt = self.attempt(connection)?;
+        Ok(NegotiationOffers {
+            authority: &attempt.authority_offer,
+            peer: &attempt.peer_offer,
+        })
+    }
+
+    pub fn attempt_proposal(
+        &self,
+        connection: ConnectionHandle,
+    ) -> Result<&NegotiatedContract, NegotiationManagerError> {
+        self.attempt(connection)?
+            .proposal
+            .as_ref()
+            .ok_or_else(|| NegotiationError::NoProposal.into())
+    }
+
     pub fn propose(
         &mut self,
         connection: ConnectionHandle,
@@ -931,6 +982,20 @@ impl NegotiationManager {
 
     pub fn established_connections(&self) -> usize {
         self.established.len()
+    }
+
+    fn attempt(
+        &self,
+        connection: ConnectionHandle,
+    ) -> Result<&NegotiationAttempt, NegotiationManagerError> {
+        if self.established.contains_key(&connection) {
+            return Err(NegotiationManagerError::Negotiation(
+                NegotiationError::AlreadyEstablished,
+            ));
+        }
+        self.attempts
+            .get(&connection)
+            .ok_or(NegotiationManagerError::UnknownConnection)
     }
 
     fn attempt_mut(
