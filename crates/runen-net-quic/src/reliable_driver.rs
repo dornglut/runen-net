@@ -136,9 +136,7 @@ impl ReliableConnectionIo {
             return Err(ReliableIoError::State(ReliableIoStateError::NotReliable));
         }
         if flow.key().direction() != FlowDirection::Outbound {
-            return Err(ReliableIoError::State(
-                ReliableIoStateError::WrongDirection,
-            ));
+            return Err(ReliableIoError::State(ReliableIoStateError::WrongDirection));
         }
 
         let registered = flow_control
@@ -217,13 +215,11 @@ impl ReliableConnectionIo {
                     let _ = self.pending_outbound.swap_remove(index);
                     self.outbound_open_cursor =
                         cursor_after_remove(index, self.pending_outbound.len());
-                    let binding = OutboundReliable::bind_quinn(
-                        flow_control.registry_mut(),
-                        flow_id,
-                        stream,
-                    )
-                    .map_err(|error| ReliableIoError::OutboundBinding { flow_id, error })?;
-                    self.active_outbound.push(ActiveOutbound { flow_id, binding });
+                    let binding =
+                        OutboundReliable::bind_quinn(flow_control.registry_mut(), flow_id, stream)
+                            .map_err(|error| ReliableIoError::OutboundBinding { flow_id, error })?;
+                    self.active_outbound
+                        .push(ActiveOutbound { flow_id, binding });
                     return Poll::Ready(Ok(OutboundAcquisitionProgress::Bound { flow_id }));
                 }
             }
@@ -289,25 +285,16 @@ impl ReliableConnectionIo {
                 Poll::Ready(Ok(progress @ SendProgress::Closed)) => {
                     let _ = self.active_outbound.swap_remove(index);
                     self.outbound_cursor = cursor_after_remove(index, self.active_outbound.len());
-                    return Poll::Ready(Ok(ActiveReliableProgress::Outbound {
-                        flow_id,
-                        progress,
-                    }));
+                    return Poll::Ready(Ok(ActiveReliableProgress::Outbound { flow_id, progress }));
                 }
                 Poll::Ready(Ok(progress)) => {
                     self.outbound_cursor = (index + 1) % len;
-                    return Poll::Ready(Ok(ActiveReliableProgress::Outbound {
-                        flow_id,
-                        progress,
-                    }));
+                    return Poll::Ready(Ok(ActiveReliableProgress::Outbound { flow_id, progress }));
                 }
                 Poll::Ready(Err(error)) => {
                     let _ = self.active_outbound.swap_remove(index);
                     self.outbound_cursor = cursor_after_remove(index, self.active_outbound.len());
-                    return Poll::Ready(Err(ReliableIoError::OutboundBinding {
-                        flow_id,
-                        error,
-                    }));
+                    return Poll::Ready(Err(ReliableIoError::OutboundBinding { flow_id, error }));
                 }
             }
         }
@@ -328,11 +315,7 @@ impl ReliableConnectionIo {
         let start = self.inbound_cursor % len;
         for offset in 0..len {
             let index = (start + offset) % len;
-            match self.active_inbound[index].poll_step(
-                cx,
-                endpoint,
-                flow_control.registry_mut(),
-            ) {
+            match self.active_inbound[index].poll_step(cx, endpoint, flow_control.registry_mut()) {
                 Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining)) => {}
                 Poll::Ready(Ok(progress @ ReceiveProgress::Closed)) => {
                     let _ = self.active_inbound.swap_remove(index);
@@ -401,11 +384,9 @@ impl ReliableFlowControlledConnection {
     ) -> ConnectionTeardown {
         let Self {
             flow_controlled,
-            reliable,
+            reliable: _reliable,
         } = self;
-        let teardown = flow_controlled.teardown(manager, delivery);
-        drop(reliable);
-        teardown
+        flow_controlled.teardown(manager, delivery)
     }
 }
 
@@ -432,7 +413,10 @@ fn contains_flow_id(
     pending: impl IntoIterator<Item = FlowId>,
     active: impl IntoIterator<Item = FlowId>,
 ) -> bool {
-    pending.into_iter().chain(active).any(|item| item == flow_id)
+    pending
+        .into_iter()
+        .chain(active)
+        .any(|item| item == flow_id)
 }
 
 const fn cursor_after_remove(index: usize, new_len: usize) -> usize {
