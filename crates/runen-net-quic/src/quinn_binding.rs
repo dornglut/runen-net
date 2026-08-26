@@ -205,7 +205,7 @@ const fn opposite_side(side: WireSide) -> WireSide {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum IoFailure {
+pub(super) enum IoFailure {
     Read,
     Write,
 }
@@ -279,7 +279,7 @@ impl PollReadReliable for RecvStream {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum SendError {
+pub(super) enum SendError {
     Registry(RegistryError),
     Core(DeliveryOperationError),
     Custody(CustodyCommitError),
@@ -313,7 +313,7 @@ impl From<ReliableFrameError> for SendError {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum SendProgress {
+pub(super) enum SendProgress {
     Progressed { bytes: usize },
     Committed { accepted_index: u64 },
     Idle,
@@ -455,7 +455,7 @@ impl OutboundState {
     }
 }
 
-struct OutboundReliable<W> {
+pub(super) struct OutboundReliable<W> {
     flow_id: FlowId,
     key: DeliveryFlowKey,
     writer: W,
@@ -465,7 +465,7 @@ struct OutboundReliable<W> {
 }
 
 impl OutboundReliable<SendStream> {
-    fn bind_quinn(
+    pub(super) fn bind_quinn(
         registry: &mut AcceptedFlowRegistry,
         flow_id: FlowId,
         stream: SendStream,
@@ -493,7 +493,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         })
     }
 
-    fn poll_step(
+    pub(super) fn poll_step(
         &mut self,
         cx: &mut Context<'_>,
         endpoint: &mut DeliveryEndpoint,
@@ -597,7 +597,10 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         }
     }
 
-    fn request_finish_normal(&mut self, endpoint: &DeliveryEndpoint) -> Result<(), SendError> {
+    pub(super) fn request_finish_normal(
+        &mut self,
+        endpoint: &DeliveryEndpoint,
+    ) -> Result<(), SendError> {
         if self.terminal {
             return Err(SendError::Terminal);
         }
@@ -633,7 +636,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum PrefixError {
+pub(super) enum PrefixError {
     VarInt(VarIntDecodeError),
     FlowId(FlowIdError),
 }
@@ -690,7 +693,7 @@ impl FlowIdPrefix {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum ReceiveError {
+pub(super) enum ReceiveError {
     Registry(RegistryError),
     Prefix(PrefixError),
     Framing(ReliableFrameError),
@@ -778,7 +781,7 @@ impl InboundFrames {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum ReceiveProgress {
+pub(super) enum ReceiveProgress {
     Progressed { bytes: usize },
     Associated { flow_id: FlowId },
     MessagesBuffered { count: usize },
@@ -787,7 +790,7 @@ enum ReceiveProgress {
 }
 
 #[derive(Debug)]
-struct InboundReliable<R> {
+pub(super) struct InboundReliable<R> {
     reader: R,
     scratch: Vec<u8>,
     max_staging_bytes: usize,
@@ -800,7 +803,7 @@ struct InboundReliable<R> {
 }
 
 impl InboundReliable<RecvStream> {
-    fn bind_quinn(
+    pub(super) fn bind_quinn(
         stream: RecvStream,
         scratch_bytes: NonZeroUsize,
         max_staging_bytes: NonZeroUsize,
@@ -837,7 +840,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
         })
     }
 
-    fn poll_step(
+    pub(super) fn poll_step(
         &mut self,
         cx: &mut Context<'_>,
         endpoint: &mut DeliveryEndpoint,
