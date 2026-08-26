@@ -11,7 +11,7 @@ use runen_net::{
 };
 
 use crate::{
-    control::{ControlFrame, ControlFrameType, ProfileReadyConnection, Settings},
+    control::{ControlFrame, ControlFrameType, ProfileReadyParts, Settings},
     datagram::{DatagramSubmissionError, datagram_len},
     quinn_binding::{AcceptedFlowRegistry, RegisteredFlow, RegistryError},
     wire::{
@@ -267,15 +267,15 @@ pub(super) struct FlowControl {
 }
 
 impl FlowControl {
-    pub(super) fn from_profile(
+    pub(super) fn from_profile_parts(
         connection: ConnectionHandle,
-        profile: &ProfileReadyConnection,
+        profile: &ProfileReadyParts,
     ) -> Result<Self, FlowControlConfigError> {
         Self::new(
             connection,
-            profile.side(),
-            profile.local_profile().local_settings(),
-            profile.peer_settings(),
+            profile.side,
+            profile.profile.local_settings(),
+            profile.peer_settings,
         )
     }
 
