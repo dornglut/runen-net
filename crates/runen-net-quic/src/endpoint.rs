@@ -640,9 +640,7 @@ mod tests {
         const CAPACITY: usize = 4;
         const CALLERS: usize = 16;
 
-        let slots = Arc::new(ConnectionSlots::new(
-            NonZeroUsize::new(CAPACITY).unwrap(),
-        ));
+        let slots = Arc::new(ConnectionSlots::new(NonZeroUsize::new(CAPACITY).unwrap()));
         let release = Arc::new((Mutex::new(false), Condvar::new()));
         let (tx, rx) = mpsc::channel();
         let mut threads = Vec::new();
