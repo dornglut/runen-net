@@ -213,7 +213,7 @@ pub(super) enum IoFailure {
 type FinishAckFuture =
     Pin<Box<dyn Future<Output = Result<Option<VarInt>, IoFailure>> + Send + Sync + 'static>>;
 
-trait PollWriteReliable {
+pub(super) trait PollWriteReliable {
     fn poll_write_step(
         &mut self,
         cx: &mut Context<'_>,
@@ -249,7 +249,7 @@ impl PollWriteReliable for SendStream {
     }
 }
 
-trait PollReadReliable {
+pub(super) trait PollReadReliable {
     fn is_zero_rtt(&self) -> bool;
     fn poll_read_step(
         &mut self,
