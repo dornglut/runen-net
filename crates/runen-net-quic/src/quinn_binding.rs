@@ -648,6 +648,14 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
                 if self.pending_core_effect.is_some() {
                     return Err(SendError::CoreEffectMismatch);
                 }
+                if endpoint.flow_contract(self.key).is_none() {
+                    return Err(self.fail_sync(
+                        endpoint,
+                        registry,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                        SendError::Core(DeliveryOperationError::UnknownFlow),
+                    ));
+                }
                 Ok(SendProgress::Progressed { bytes })
             }
             OutboundTransportOutcome::CustodyReady { accepted_index } => {
@@ -726,6 +734,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         }
     }
 
+    #[cfg(test)]
     fn poll_step(
         &mut self,
         cx: &mut Context<'_>,
@@ -1684,7 +1693,7 @@ mod tests {
                 Poll::Ready(Err(error)) => panic!("unexpected transport state error: {error:?}"),
             };
             assert_eq!(endpoint.pending_messages(), 1);
-            if matches!(outcome, OutboundTransportOutcome::CustodyReady { .. }) {
+            if matches!(&outcome, OutboundTransportOutcome::CustodyReady { .. }) {
                 assert_eq!(
                     binding.prepare_transport(&mut endpoint, &mut registry),
                     Err(SendError::CoreEffectPending)
