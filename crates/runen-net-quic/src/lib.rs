@@ -50,6 +50,11 @@ mod negotiation;
 mod quinn_binding;
 #[allow(
     dead_code,
+    reason = "RN5E5A5C lands crate-private reliable stream acquisition/binding ownership before the unified RN5E5 connection poll loop"
+)]
+mod reliable_driver;
+#[allow(
+    dead_code,
     reason = "RN5C1 primitives remain internal implementation authority for RN5C2B"
 )]
 mod reliable;
