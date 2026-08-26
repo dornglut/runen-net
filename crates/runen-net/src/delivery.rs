@@ -123,7 +123,7 @@ impl FlowResourcePolicy {
         self.receiver_pressure
     }
 
-    fn validate_for_mode(self, mode: DeliveryMode) -> Result<(), DeliveryPolicyError> {
+    pub fn validate_for_mode(self, mode: DeliveryMode) -> Result<(), DeliveryPolicyError> {
         match mode {
             DeliveryMode::ReliableOrdered => {
                 if self.outbound_pressure != OutboundPressureBehavior::RejectNew {
