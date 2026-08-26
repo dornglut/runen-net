@@ -5,6 +5,8 @@ pub(crate) const MAX_VARINT: u64 = (1u64 << 62) - 1;
 const MAX_FLOW_SEQUENCE: u64 = MAX_VARINT >> 1;
 const MAX_CONTROL_BODY_BYTES: usize = 24;
 
+/// Revision-1 QUIC application/reset codes defined by `spec/transport/quic.md`.
+/// The specification remains normative; this is the adapter representation only.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum ApplicationErrorCode {
     NoError,
