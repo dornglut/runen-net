@@ -87,7 +87,10 @@ fn read_only_validation_does_not_establish_or_reserve_a_flow() {
     );
 
     assert_eq!(endpoint.active_flows(), 0);
-    assert_eq!(valid.validate_for_mode(DeliveryMode::ReliableOrdered), Ok(()));
+    assert_eq!(
+        valid.validate_for_mode(DeliveryMode::ReliableOrdered),
+        Ok(())
+    );
     assert_eq!(endpoint.active_flows(), 0);
     assert_eq!(endpoint.flow_contract(valid_key), None);
 
@@ -107,12 +110,7 @@ fn read_only_validation_does_not_establish_or_reserve_a_flow() {
     assert_eq!(endpoint.active_flows(), 1);
     assert_eq!(endpoint.flow_contract(invalid_key), None);
     assert_eq!(
-        endpoint.establish_flow(
-            invalid_key,
-            DeliveryMode::ReliableOrdered,
-            invalid,
-            limits,
-        ),
+        endpoint.establish_flow(invalid_key, DeliveryMode::ReliableOrdered, invalid, limits,),
         Err(FlowEstablishmentError::InvalidPolicy(
             DeliveryPolicyError::ReliableOutboundMustRejectNew
         ))
