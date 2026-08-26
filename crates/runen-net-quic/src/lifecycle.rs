@@ -464,16 +464,16 @@ impl EstablishedNegotiatedConnection {
     pub(super) fn into_flow_control(
         self,
     ) -> Result<FlowControlledConnection, FlowControlActivationError> {
-        let flow_control = match FlowControl::from_profile_parts(self.core.connection, &self.core.profile)
-        {
-            Ok(flow_control) => flow_control,
-            Err(error) => {
-                return Err(FlowControlActivationError {
-                    error,
-                    established: Box::new(self),
-                });
-            }
-        };
+        let flow_control =
+            match FlowControl::from_profile_parts(self.core.connection, &self.core.profile) {
+                Ok(flow_control) => flow_control,
+                Err(error) => {
+                    return Err(FlowControlActivationError {
+                        error,
+                        established: Box::new(self),
+                    });
+                }
+            };
         Ok(FlowControlledConnection {
             core: self.core,
             flow_control,
