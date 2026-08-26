@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use quinn::{ConnectError, Connection, ConnectionError, ReadError, ReadExactError, WriteError};
 use runen_net::{
+    delivery::{DeliveryEndpoint, FlowTermination},
     identity::ConnectionHandle,
     protocol::{
         CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerError,
@@ -94,6 +95,14 @@ pub(super) struct PendingNegotiationSend {
 #[derive(Debug)]
 pub(super) struct EstablishedNegotiatedConnection {
     core: NegotiationCore,
+}
+
+#[must_use = "connection teardown result contains host identity and Core cleanup evidence"]
+#[derive(Debug)]
+pub(super) struct ConnectionTeardown {
+    pub(super) connection: ConnectionHandle,
+    pub(super) flow_terminations: Vec<FlowTermination>,
+    pub(super) negotiation_cleanup_error: Option<NegotiationControlError>,
 }
 
 #[derive(Debug)]
@@ -417,6 +426,23 @@ impl PendingNegotiationSend {
             };
         }
         abort_negotiation(self.core, manager, None)
+    }
+}
+
+impl EstablishedNegotiatedConnection {
+    pub(super) fn teardown(
+        mut self,
+        manager: &mut NegotiationManager,
+        delivery: &mut DeliveryEndpoint,
+    ) -> ConnectionTeardown {
+        let connection = self.core.connection;
+        let flow_terminations = delivery.terminate_connection(connection);
+        let negotiation_cleanup_error = self.core.exchange.abort(manager).err();
+        ConnectionTeardown {
+            connection,
+            flow_terminations,
+            negotiation_cleanup_error,
+        }
     }
 }
 
