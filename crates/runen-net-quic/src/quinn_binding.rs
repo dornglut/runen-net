@@ -559,12 +559,14 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         let segment = match self.state.next_segment(endpoint, self.key) {
             Ok(Some(segment)) => segment,
             Ok(None) => return Poll::Ready(Ok(SendProgress::Idle)),
-            Err(error) => self.fail(
-                endpoint,
-                registry,
-                ApplicationErrorCode::FlowProtocolError.quinn(),
-                error,
-            ),
+            Err(error) => {
+                return self.fail(
+                    endpoint,
+                    registry,
+                    ApplicationErrorCode::FlowProtocolError.quinn(),
+                    error,
+                );
+            }
         };
         match self.writer.poll_write_step(cx, segment) {
             Poll::Pending => Poll::Pending,
