@@ -12,13 +12,9 @@ use runen_net::delivery::{
 
 use super::reliable::{ReliableFrameDecoder, ReliableFrameError, encode_payload_length};
 use super::wire::{
-    EncodedVarInt, FlowId, FlowIdError, VarIntDecodeError, WireSide, decode_varint, encode_varint,
+    ApplicationErrorCode, EncodedVarInt, FlowId, FlowIdError, VarIntDecodeError, WireSide,
+    decode_varint, encode_varint,
 };
-
-const PROFILE_PROTOCOL_ERROR: VarInt = VarInt::from_u32(1);
-const RESOURCE_LIMIT_ERROR: VarInt = VarInt::from_u32(3);
-const FLOW_PROTOCOL_ERROR: VarInt = VarInt::from_u32(5);
-const RELIABLE_DELIVERY_FAILED: VarInt = VarInt::from_u32(6);
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum ReliableAssociationState {
@@ -510,7 +506,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
             return self.fail(
                 endpoint,
                 registry,
-                RELIABLE_DELIVERY_FAILED,
+                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                 SendError::Core(DeliveryOperationError::UnknownFlow),
             );
         }
@@ -520,7 +516,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
                     return self.fail(
                         endpoint,
                         registry,
-                        RELIABLE_DELIVERY_FAILED,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                         SendError::PendingData,
                     );
                 }
@@ -529,7 +525,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
                     return self.fail(
                         endpoint,
                         registry,
-                        RELIABLE_DELIVERY_FAILED,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                         SendError::Core(error),
                     );
                 }
@@ -543,7 +539,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
                         return self.fail(
                             endpoint,
                             registry,
-                            RELIABLE_DELIVERY_FAILED,
+                            ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                             SendError::Core(error),
                         );
                     }
@@ -555,7 +551,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
                 Poll::Ready(Ok(Some(_))) | Poll::Ready(Err(_)) => self.fail(
                     endpoint,
                     registry,
-                    RELIABLE_DELIVERY_FAILED,
+                    ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                     SendError::Io(IoFailure::Write),
                 ),
             };
@@ -563,20 +559,27 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         let segment = match self.state.next_segment(endpoint, self.key) {
             Ok(Some(segment)) => segment,
             Ok(None) => return Poll::Ready(Ok(SendProgress::Idle)),
-            Err(error) => return self.fail(endpoint, registry, FLOW_PROTOCOL_ERROR, error),
+            Err(error) => {
+                return self.fail(
+                    endpoint,
+                    registry,
+                    ApplicationErrorCode::FlowProtocolError.quinn(),
+                    error,
+                );
+            }
         };
         match self.writer.poll_write_step(cx, segment) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => self.fail(
                 endpoint,
                 registry,
-                RELIABLE_DELIVERY_FAILED,
+                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                 SendError::Io(error),
             ),
             Poll::Ready(Ok(0)) => self.fail(
                 endpoint,
                 registry,
-                RELIABLE_DELIVERY_FAILED,
+                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                 SendError::WriteZero,
             ),
             Poll::Ready(Ok(bytes)) => match self.state.advance(bytes, endpoint, self.key) {
@@ -584,7 +587,12 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
                     Poll::Ready(Ok(SendProgress::Committed { accepted_index }))
                 }
                 Ok(None) => Poll::Ready(Ok(SendProgress::Progressed { bytes })),
-                Err(error) => self.fail(endpoint, registry, RELIABLE_DELIVERY_FAILED, error),
+                Err(error) => self.fail(
+                    endpoint,
+                    registry,
+                    ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                    error,
+                ),
             },
         }
     }
@@ -808,7 +816,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
         max_staging_bytes: NonZeroUsize,
     ) -> Result<Self, ReceiveError> {
         if reader.is_zero_rtt() {
-            reader.stop_reliable(PROFILE_PROTOCOL_ERROR);
+            reader.stop_reliable(ApplicationErrorCode::ProfileProtocolError.quinn());
             return Err(ReceiveError::ZeroRtt);
         }
         let mut scratch = Vec::new();
@@ -847,7 +855,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
                 return self.fail(
                     endpoint,
                     registry,
-                    RELIABLE_DELIVERY_FAILED,
+                    ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                     ReceiveError::Io(error),
                 );
             }
@@ -855,7 +863,8 @@ impl<R: PollReadReliable> InboundReliable<R> {
         };
         if read == 0 {
             if self.flow.is_none() {
-                self.reader.stop_reliable(FLOW_PROTOCOL_ERROR);
+                self.reader
+                    .stop_reliable(ApplicationErrorCode::FlowProtocolError.quinn());
                 self.terminal = true;
                 return Poll::Ready(Err(ReceiveError::TruncatedAssociation));
             }
@@ -876,7 +885,8 @@ impl<R: PollReadReliable> InboundReliable<R> {
             let prefix = match self.prefix.consume(&self.scratch[..read]) {
                 Ok(prefix) => prefix,
                 Err(error) => {
-                    self.reader.stop_reliable(FLOW_PROTOCOL_ERROR);
+                    self.reader
+                        .stop_reliable(ApplicationErrorCode::FlowProtocolError.quinn());
                     self.terminal = true;
                     return Poll::Ready(Err(ReceiveError::Prefix(error)));
                 }
@@ -888,7 +898,8 @@ impl<R: PollReadReliable> InboundReliable<R> {
             let flow = match registry.associate_inbound(flow_id) {
                 Ok(flow) => flow,
                 Err(error) => {
-                    self.reader.stop_reliable(FLOW_PROTOCOL_ERROR);
+                    self.reader
+                        .stop_reliable(ApplicationErrorCode::FlowProtocolError.quinn());
                     self.terminal = true;
                     return Poll::Ready(Err(ReceiveError::Registry(error)));
                 }
@@ -899,7 +910,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
                 return self.fail(
                     endpoint,
                     registry,
-                    RESOURCE_LIMIT_ERROR,
+                    ApplicationErrorCode::ResourceLimitError.quinn(),
                     ReceiveError::AdapterStagingBelowFlowMaximum {
                         max_message_bytes: flow.max_message_bytes,
                         max_staging_bytes: self.max_staging_bytes,
@@ -985,9 +996,9 @@ impl<R: PollReadReliable> InboundReliable<R> {
 fn frame_error_code(error: &ReliableFrameError) -> VarInt {
     match error {
         ReliableFrameError::StagingLimitExceeded { .. } | ReliableFrameError::AllocationFailed => {
-            RESOURCE_LIMIT_ERROR
+            ApplicationErrorCode::ResourceLimitError.quinn()
         }
-        _ => FLOW_PROTOCOL_ERROR,
+        _ => ApplicationErrorCode::FlowProtocolError.quinn(),
     }
 }
 
@@ -995,11 +1006,11 @@ fn receive_error_code(error: &ReceiveError) -> VarInt {
     match error {
         ReceiveError::Framing(frame) => frame_error_code(frame),
         ReceiveError::UnexpectedCoreOutcome(ReceiveOutcome::TerminalReliableFailure)
-        | ReceiveError::Io(_) => RELIABLE_DELIVERY_FAILED,
+        | ReceiveError::Io(_) => ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
         ReceiveError::AllocationFailed | ReceiveError::AdapterStagingBelowFlowMaximum { .. } => {
-            RESOURCE_LIMIT_ERROR
+            ApplicationErrorCode::ResourceLimitError.quinn()
         }
-        _ => FLOW_PROTOCOL_ERROR,
+        _ => ApplicationErrorCode::FlowProtocolError.quinn(),
     }
 }
 
@@ -1092,7 +1103,9 @@ mod tests {
                     Poll::Pending
                 }
                 FinishAckAction::PendingThenAck => Poll::Ready(Ok(None)),
-                FinishAckAction::Stopped => Poll::Ready(Ok(Some(RELIABLE_DELIVERY_FAILED))),
+                FinishAckAction::Stopped => Poll::Ready(Ok(Some(
+                    ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                ))),
                 FinishAckAction::Error => Poll::Ready(Err(IoFailure::Write)),
             }
         }
