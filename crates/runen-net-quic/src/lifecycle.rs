@@ -251,9 +251,9 @@ impl NegotiatingConnection {
         Ok(())
     }
 
-    pub(super) fn into_received(mut self) -> Result<ReceivedNegotiationFrame, Self> {
+    pub(super) fn into_received(mut self) -> Result<ReceivedNegotiationFrame, Box<Self>> {
         let Some(frame) = self.received.take() else {
-            return Err(self);
+            return Err(Box::new(self));
         };
         Ok(ReceivedNegotiationFrame {
             core: self.core,
@@ -362,9 +362,9 @@ impl PendingNegotiationSend {
         Ok(())
     }
 
-    pub(super) fn complete(self) -> Result<NegotiationSendCompletion, Self> {
+    pub(super) fn complete(self) -> Result<NegotiationSendCompletion, Box<Self>> {
         if !self.pending.is_complete() {
-            return Err(self);
+            return Err(Box::new(self));
         }
         let Self {
             core, disposition, ..
