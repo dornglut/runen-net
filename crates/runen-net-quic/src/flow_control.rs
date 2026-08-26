@@ -3,9 +3,9 @@ use std::num::NonZeroUsize;
 
 use runen_net::{
     delivery::{
-        DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, DeliveryPolicyError,
-        DeliveryScopeLimits, FlowDirection, FlowEstablishmentError, FlowResourcePolicy,
-        FlowTermination, FlowTerminationReason,
+        DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
+        DeliveryPolicyError, DeliveryScopeLimits, FlowDirection, FlowEstablishmentError,
+        FlowResourcePolicy, FlowTermination, FlowTerminationReason,
     },
     identity::ConnectionHandle,
 };
@@ -34,6 +34,8 @@ pub(super) enum OutboundOpenError {
     },
     WrongDirection(FlowDirection),
     InvalidPolicy(DeliveryPolicyError),
+    CoreFlowAlreadyExists(DeliveryFlowKey),
+    PendingCoreFlow(DeliveryFlowKey),
     StableMessageLimitMismatch {
         policy_max: usize,
         stable_max: usize,
@@ -93,6 +95,32 @@ pub(super) enum InboundAdmissionError {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(super) struct PreparedFlow {
+    flow_id: FlowId,
+    key: DeliveryFlowKey,
+    mode: DeliveryMode,
+    max_message_bytes: usize,
+}
+
+impl PreparedFlow {
+    pub(super) const fn flow_id(self) -> FlowId {
+        self.flow_id
+    }
+
+    pub(super) const fn key(self) -> DeliveryFlowKey {
+        self.key
+    }
+
+    pub(super) const fn mode(self) -> DeliveryMode {
+        self.mode
+    }
+
+    pub(super) const fn max_message_bytes(self) -> usize {
+        self.max_message_bytes
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) struct EstablishedFlow {
     flow_id: FlowId,
     key: DeliveryFlowKey,
@@ -121,7 +149,7 @@ impl EstablishedFlow {
 #[derive(Debug)]
 pub(super) struct PreparedOutboundOpen {
     pub(super) frame: ControlFrame,
-    pub(super) flow: EstablishedFlow,
+    pub(super) flow: PreparedFlow,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -209,6 +237,13 @@ struct PendingOutboundFlow {
     stable_max_message_bytes: NonZeroUsize,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+struct PendingInboundFlow {
+    flow_id: FlowId,
+    mode: DeliveryMode,
+    max_message_bytes: u64,
+}
+
 #[derive(Debug)]
 pub(super) struct FlowControl {
     connection: ConnectionHandle,
@@ -218,7 +253,7 @@ pub(super) struct FlowControl {
     local_flow_ids: FlowIdCursor,
     peer_flow_ids: FlowIdCursor,
     pending_outbound: HashMap<u64, PendingOutboundFlow>,
-    pending_inbound: Option<FlowId>,
+    pending_inbound: Option<PendingInboundFlow>,
     registry: AcceptedFlowRegistry,
 }
 
@@ -273,6 +308,7 @@ impl FlowControl {
 
     pub(super) fn prepare_outbound_open(
         &mut self,
+        endpoint: &DeliveryEndpoint,
         key: DeliveryFlowKey,
         mode: DeliveryMode,
         policy: FlowResourcePolicy,
@@ -280,15 +316,7 @@ impl FlowControl {
         connection_limits: DeliveryScopeLimits,
         current_datagram_size: Option<usize>,
     ) -> Result<PreparedOutboundOpen, OutboundOpenError> {
-        if key.connection() != self.connection {
-            return Err(OutboundOpenError::WrongConnection {
-                expected: self.connection,
-                actual: key.connection(),
-            });
-        }
-        if key.direction() != FlowDirection::Outbound {
-            return Err(OutboundOpenError::WrongDirection(key.direction()));
-        }
+        self.validate_outbound_identity(endpoint, key)?;
         policy
             .validate_for_mode(mode)
             .map_err(OutboundOpenError::InvalidPolicy)?;
@@ -312,9 +340,7 @@ impl FlowControl {
             });
         }
 
-        let active = self
-            .registry
-            .active_direction_len(FlowDirection::Outbound);
+        let active = self.registry.active_direction_len(FlowDirection::Outbound);
         let in_use = active
             .checked_add(self.pending_outbound.len())
             .and_then(|value| u64::try_from(value).ok())
@@ -349,7 +375,10 @@ impl FlowControl {
         let frame = owned_frame(ControlFrameType::OpenFlow, open.encode())
             .map_err(OutboundOpenError::Allocation)?;
 
-        let allocated = self.local_flow_ids.allocate().map_err(OutboundOpenError::FlowId)?;
+        let allocated = self
+            .local_flow_ids
+            .allocate()
+            .map_err(OutboundOpenError::FlowId)?;
         debug_assert_eq!(allocated, flow_id);
         let previous = self.pending_outbound.insert(
             flow_id.value(),
@@ -365,7 +394,7 @@ impl FlowControl {
 
         Ok(PreparedOutboundOpen {
             frame,
-            flow: EstablishedFlow {
+            flow: PreparedFlow {
                 flow_id,
                 key,
                 mode,
@@ -374,16 +403,41 @@ impl FlowControl {
         })
     }
 
+    fn validate_outbound_identity(
+        &self,
+        endpoint: &DeliveryEndpoint,
+        key: DeliveryFlowKey,
+    ) -> Result<(), OutboundOpenError> {
+        if key.connection() != self.connection {
+            return Err(OutboundOpenError::WrongConnection {
+                expected: self.connection,
+                actual: key.connection(),
+            });
+        }
+        if key.direction() != FlowDirection::Outbound {
+            return Err(OutboundOpenError::WrongDirection(key.direction()));
+        }
+        if endpoint.flow_contract(key).is_some() {
+            return Err(OutboundOpenError::CoreFlowAlreadyExists(key));
+        }
+        if self.pending_outbound.values().any(|pending| pending.key == key) {
+            return Err(OutboundOpenError::PendingCoreFlow(key));
+        }
+        Ok(())
+    }
+
     pub(super) fn receive(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
         frame: ControlFrame,
     ) -> Result<FlowControlProgress, FlowControlError> {
-        if let Some(flow_id) = self.pending_inbound {
-            return Err(FlowControlError::InboundDecisionPending(flow_id));
-        }
         match frame.frame_type {
-            ControlFrameType::OpenFlow => self.receive_open(frame.body),
+            ControlFrameType::OpenFlow => {
+                if let Some(pending) = self.pending_inbound {
+                    return Err(FlowControlError::InboundDecisionPending(pending.flow_id));
+                }
+                self.receive_open(frame.body)
+            }
             ControlFrameType::FlowAccept => self.receive_accept(endpoint, frame.body),
             ControlFrameType::FlowReject => self.receive_reject(frame.body),
             ControlFrameType::FlowTerminate => self.receive_terminate(endpoint, frame.body),
@@ -400,19 +454,22 @@ impl FlowControl {
         if open.max_message_bytes > self.local_settings.max_incoming_message_bytes {
             return self.inbound_rejection(open.flow_id, FlowRejectReason::MessageLimit);
         }
-        let active = self
-            .registry
-            .active_direction_len(FlowDirection::Inbound);
+        let active = self.registry.active_direction_len(FlowDirection::Inbound);
         let active = u64::try_from(active).unwrap_or(u64::MAX);
         if active >= self.local_settings.max_active_incoming_flows {
             return self.inbound_rejection(open.flow_id, FlowRejectReason::ResourceLimit);
         }
 
-        self.pending_inbound = Some(open.flow_id);
-        Ok(FlowControlProgress::InboundOpen(InboundOpenRequest {
+        let pending = PendingInboundFlow {
             flow_id: open.flow_id,
             mode: open.delivery_mode,
             max_message_bytes: open.max_message_bytes,
+        };
+        self.pending_inbound = Some(pending);
+        Ok(FlowControlProgress::InboundOpen(InboundOpenRequest {
+            flow_id: pending.flow_id,
+            mode: pending.mode,
+            max_message_bytes: pending.max_message_bytes,
         }))
     }
 
@@ -496,10 +553,7 @@ impl FlowControl {
         })
     }
 
-    fn receive_reject(
-        &mut self,
-        body: Vec<u8>,
-    ) -> Result<FlowControlProgress, FlowControlError> {
+    fn receive_reject(&mut self, body: Vec<u8>) -> Result<FlowControlProgress, FlowControlError> {
         let reject = FlowReject::decode(&body).map_err(FlowControlError::Body)?;
         self.require_local_response_side(reject.flow_id)?;
         let pending = self
@@ -529,8 +583,7 @@ impl FlowControl {
             return Err(FlowControlError::ReliableNormalUsesFin(terminate.flow_id));
         }
         let flow = established_from_registered(terminate.flow_id, registered);
-        let termination = endpoint
-            .terminate_flow(flow.key, FlowTerminationReason::Requested)
+        let termination = terminate_core_for_wire(endpoint, flow, terminate.reason)
             .map_err(FlowControlError::CoreState)?;
         self.registry.release(terminate.flow_id);
         Ok(FlowControlProgress::RemoteTerminated {
@@ -580,9 +633,7 @@ impl FlowControl {
         if request.max_message_bytes > policy_max {
             return self.resolve_inbound_rejection(request, FlowRejectReason::MessageLimit);
         }
-        let active = self
-            .registry
-            .active_direction_len(FlowDirection::Inbound);
+        let active = self.registry.active_direction_len(FlowDirection::Inbound);
         let active = u64::try_from(active).unwrap_or(u64::MAX);
         if active >= self.local_settings.max_active_incoming_flows {
             return self.resolve_inbound_rejection(request, FlowRejectReason::ResourceLimit);
@@ -683,7 +734,12 @@ impl FlowControl {
         &self,
         request: &InboundOpenRequest,
     ) -> Result<(), InboundAdmissionError> {
-        if self.pending_inbound == Some(request.flow_id) {
+        let expected = PendingInboundFlow {
+            flow_id: request.flow_id,
+            mode: request.mode,
+            max_message_bytes: request.max_message_bytes,
+        };
+        if self.pending_inbound == Some(expected) {
             Ok(())
         } else {
             Err(InboundAdmissionError::RequestNotPending(request.flow_id))
@@ -700,15 +756,15 @@ impl FlowControl {
             .registry
             .registered_flow(flow_id)
             .ok_or(FlowControlError::UnknownActiveFlow(flow_id))?;
-        if registered.mode() == DeliveryMode::ReliableOrdered && reason == FlowTerminateReason::Normal
+        if registered.mode() == DeliveryMode::ReliableOrdered
+            && reason == FlowTerminateReason::Normal
         {
             return Err(FlowControlError::ReliableNormalUsesFin(flow_id));
         }
         let frame = terminate_frame(flow_id, reason).map_err(FlowControlError::Allocation)?;
         let flow = established_from_registered(flow_id, registered);
-        let termination = endpoint
-            .terminate_flow(flow.key, FlowTerminationReason::Requested)
-            .map_err(FlowControlError::CoreState)?;
+        let termination =
+            terminate_core_for_wire(endpoint, flow, reason).map_err(FlowControlError::CoreState)?;
         self.registry.release(flow_id);
         Ok(LocalTermination {
             flow,
@@ -730,6 +786,22 @@ fn established_from_registered(flow_id: FlowId, flow: RegisteredFlow) -> Establi
         key: flow.key(),
         mode: flow.mode(),
         max_message_bytes: flow.max_message_bytes(),
+    }
+}
+
+fn terminate_core_for_wire(
+    endpoint: &mut DeliveryEndpoint,
+    flow: EstablishedFlow,
+    reason: FlowTerminateReason,
+) -> Result<FlowTermination, DeliveryOperationError> {
+    match flow.mode {
+        DeliveryMode::ReliableOrdered => {
+            debug_assert_ne!(reason, FlowTerminateReason::Normal);
+            endpoint.fail_reliable_custody(flow.key)
+        }
+        DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => {
+            endpoint.terminate_flow(flow.key, FlowTerminationReason::Requested)
+        }
     }
 }
 
@@ -755,7 +827,10 @@ fn owned_frame(
 }
 
 fn accept_frame(flow_id: FlowId) -> Result<ControlFrame, TryReserveError> {
-    owned_frame(ControlFrameType::FlowAccept, FlowAccept { flow_id }.encode())
+    owned_frame(
+        ControlFrameType::FlowAccept,
+        FlowAccept { flow_id }.encode(),
+    )
 }
 
 fn reject_frame(
@@ -784,10 +859,10 @@ mod tests {
     use crate::{
         control::SemanticRole,
         datagram::{DatagramReceiveOutcome, receive_datagram},
-        wire::{encode_varint, OpenFlow},
+        wire::{OpenFlow, encode_varint},
     };
     use runen_net::delivery::{
-        DeliveryFlowHandle, OutboundPressureBehavior, ReceiverPressureBehavior,
+        DeliveryFlowHandle, OutboundPressureBehavior, ReceiverPressureBehavior, SubmissionOutcome,
     };
 
     fn nz(value: usize) -> NonZeroUsize {
@@ -833,11 +908,7 @@ mod tests {
         DeliveryScopeLimits::new(nz(active), nz(16), nz(4096))
     }
 
-    fn key(
-        connection: ConnectionHandle,
-        direction: FlowDirection,
-        handle: u64,
-    ) -> DeliveryFlowKey {
+    fn key(connection: ConnectionHandle, direction: FlowDirection, handle: u64) -> DeliveryFlowKey {
         DeliveryFlowKey::new(connection, direction, DeliveryFlowHandle::new(handle))
     }
 
@@ -869,6 +940,42 @@ mod tests {
         }
     }
 
+    fn accept(flow_id: FlowId) -> ControlFrame {
+        frame(ControlFrameType::FlowAccept, FlowAccept { flow_id }.encode())
+    }
+
+    fn reject(flow_id: FlowId, reason: FlowRejectReason) -> ControlFrame {
+        frame(
+            ControlFrameType::FlowReject,
+            FlowReject { flow_id, reason }.encode(),
+        )
+    }
+
+    fn terminate(flow_id: FlowId, reason: FlowTerminateReason) -> ControlFrame {
+        frame(
+            ControlFrameType::FlowTerminate,
+            FlowTerminate { flow_id, reason }.encode(),
+        )
+    }
+
+    fn prepare_reliable(
+        control: &mut FlowControl,
+        endpoint: &DeliveryEndpoint,
+        key: DeliveryFlowKey,
+    ) -> PreparedOutboundOpen {
+        control
+            .prepare_outbound_open(
+                endpoint,
+                key,
+                DeliveryMode::ReliableOrdered,
+                policy(DeliveryMode::ReliableOrdered, 64),
+                nz(64),
+                limits(8),
+                None,
+            )
+            .unwrap()
+    }
+
     #[test]
     fn outbound_preflight_failures_do_not_consume_flow_id_or_create_core_state() {
         let connection = ConnectionHandle::new(1);
@@ -879,6 +986,7 @@ mod tests {
 
         assert!(matches!(
             control.prepare_outbound_open(
+                &endpoint,
                 outbound,
                 DeliveryMode::ReliableOrdered,
                 reliable,
@@ -890,6 +998,7 @@ mod tests {
         ));
         assert!(matches!(
             control.prepare_outbound_open(
+                &endpoint,
                 outbound,
                 DeliveryMode::ReliableOrdered,
                 policy(DeliveryMode::ReliableOrdered, 128),
@@ -899,33 +1008,63 @@ mod tests {
             ),
             Err(OutboundOpenError::PeerMessageLimit { .. })
         ));
-        assert_eq!(endpoint.active_flows(), 0);
-        assert_eq!(control.pending_outbound_len(), 0);
 
-        let prepared = control
-            .prepare_outbound_open(
+        endpoint
+            .establish_flow(
+                outbound,
+                DeliveryMode::ReliableOrdered,
+                reliable,
+                limits(8),
+            )
+            .unwrap();
+        assert!(matches!(
+            control.prepare_outbound_open(
+                &endpoint,
                 outbound,
                 DeliveryMode::ReliableOrdered,
                 reliable,
                 nz(64),
                 limits(8),
                 None,
-            )
+            ),
+            Err(OutboundOpenError::CoreFlowAlreadyExists(key)) if key == outbound
+        ));
+        endpoint
+            .terminate_flow(outbound, FlowTerminationReason::Requested)
             .unwrap();
+
+        let prepared = prepare_reliable(&mut control, &endpoint, outbound);
         assert_eq!(prepared.flow.flow_id().sequence(), 0);
         assert_eq!(endpoint.active_flows(), 0);
         assert_eq!(endpoint.flow_contract(outbound), None);
+        assert_eq!(control.pending_outbound_len(), 1);
+
+        assert!(matches!(
+            control.prepare_outbound_open(
+                &endpoint,
+                outbound,
+                DeliveryMode::ReliableOrdered,
+                reliable,
+                nz(64),
+                limits(8),
+                None,
+            ),
+            Err(OutboundOpenError::PendingCoreFlow(key)) if key == outbound
+        ));
+        assert_eq!(control.pending_outbound_len(), 1);
     }
 
     #[test]
     fn sequenced_unreliable_open_uses_worst_case_sequence_envelope_before_consumption() {
         let connection = ConnectionHandle::new(2);
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
+        let endpoint = DeliveryEndpoint::new(limits(8));
         let outbound = key(connection, FlowDirection::Outbound, 1);
         let p = policy(DeliveryMode::UnreliableSequenced, 64);
 
         assert!(matches!(
             control.prepare_outbound_open(
+                &endpoint,
                 outbound,
                 DeliveryMode::UnreliableSequenced,
                 p,
@@ -940,6 +1079,7 @@ mod tests {
         ));
         let prepared = control
             .prepare_outbound_open(
+                &endpoint,
                 outbound,
                 DeliveryMode::UnreliableSequenced,
                 p,
@@ -955,22 +1095,16 @@ mod tests {
     fn peer_active_ceiling_bounds_pending_and_active_outbound_flows() {
         let connection = ConnectionHandle::new(3);
         let mut control = control(connection, WireSide::Client, 4, 256, 1, 256);
-        let p = policy(DeliveryMode::ReliableOrdered, 64);
-        let first = control
-            .prepare_outbound_open(
-                key(connection, FlowDirection::Outbound, 1),
-                DeliveryMode::ReliableOrdered,
-                p,
-                nz(64),
-                limits(8),
-                None,
-            )
-            .unwrap();
+        let mut endpoint = DeliveryEndpoint::new(limits(8));
+        let first_key = key(connection, FlowDirection::Outbound, 1);
+        let first = prepare_reliable(&mut control, &endpoint, first_key);
+
         assert!(matches!(
             control.prepare_outbound_open(
+                &endpoint,
                 key(connection, FlowDirection::Outbound, 2),
                 DeliveryMode::ReliableOrdered,
-                p,
+                policy(DeliveryMode::ReliableOrdered, 64),
                 nz(64),
                 limits(8),
                 None,
@@ -978,30 +1112,41 @@ mod tests {
             Err(OutboundOpenError::PeerActiveFlowLimit { .. })
         ));
 
-        let mut endpoint = DeliveryEndpoint::new(limits(8));
-        let reject = frame(
-            ControlFrameType::FlowReject,
-            FlowReject {
-                flow_id: first.flow.flow_id(),
-                reason: FlowRejectReason::ResourceLimit,
-            }
-            .encode(),
-        );
         assert!(matches!(
-            control.receive(&mut endpoint, reject).unwrap(),
+            control
+                .receive(
+                    &mut endpoint,
+                    reject(first.flow.flow_id(), FlowRejectReason::ResourceLimit),
+                )
+                .unwrap(),
             FlowControlProgress::OutboundRejected { .. }
         ));
-        let second = control
-            .prepare_outbound_open(
-                key(connection, FlowDirection::Outbound, 2),
+        let second = prepare_reliable(
+            &mut control,
+            &endpoint,
+            key(connection, FlowDirection::Outbound, 2),
+        );
+        assert_eq!(second.flow.flow_id().sequence(), 1);
+
+        let established = control
+            .receive(&mut endpoint, accept(second.flow.flow_id()))
+            .unwrap();
+        assert!(matches!(
+            established,
+            FlowControlProgress::OutboundEstablished(_)
+        ));
+        assert!(matches!(
+            control.prepare_outbound_open(
+                &endpoint,
+                key(connection, FlowDirection::Outbound, 3),
                 DeliveryMode::ReliableOrdered,
-                p,
+                policy(DeliveryMode::ReliableOrdered, 64),
                 nz(64),
                 limits(8),
                 None,
-            )
-            .unwrap();
-        assert_eq!(second.flow.flow_id().sequence(), 1);
+            ),
+            Err(OutboundOpenError::PeerActiveFlowLimit { .. })
+        ));
     }
 
     #[test]
@@ -1010,37 +1155,36 @@ mod tests {
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
         let outbound = key(connection, FlowDirection::Outbound, 444);
-        let prepared = control
-            .prepare_outbound_open(
-                outbound,
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(8),
-                None,
-            )
-            .unwrap();
-        assert_eq!(endpoint.flow_contract(outbound), None);
-        assert_eq!(control.registry().registered_flow(prepared.flow.flow_id()), None);
+        let prepared = prepare_reliable(&mut control, &endpoint, outbound);
 
-        let accept = frame(
-            ControlFrameType::FlowAccept,
-            FlowAccept {
-                flow_id: prepared.flow.flow_id(),
-            }
-            .encode(),
-        );
-        let established = control.receive(&mut endpoint, accept).unwrap();
+        assert_eq!(endpoint.flow_contract(outbound), None);
         assert_eq!(
-            established,
-            FlowControlProgress::OutboundEstablished(prepared.flow)
+            control.registry().registered_flow(prepared.flow.flow_id()),
+            None
         );
+        let established = control
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
+            .unwrap();
+        let FlowControlProgress::OutboundEstablished(flow) = established else {
+            panic!("expected established outbound flow");
+        };
+        assert_eq!(flow.flow_id(), prepared.flow.flow_id());
+        assert_eq!(flow.key(), outbound);
+        assert_eq!(flow.mode(), DeliveryMode::ReliableOrdered);
+        assert_eq!(flow.max_message_bytes(), 64);
         assert_eq!(
             endpoint.flow_contract(outbound),
-            Some((DeliveryMode::ReliableOrdered, policy(DeliveryMode::ReliableOrdered, 64)))
+            Some((
+                DeliveryMode::ReliableOrdered,
+                policy(DeliveryMode::ReliableOrdered, 64)
+            ))
         );
         assert_eq!(
-            control.registry().registered_flow(prepared.flow.flow_id()).unwrap().key(),
+            control
+                .registry()
+                .registered_flow(prepared.flow.flow_id())
+                .unwrap()
+                .key(),
             outbound
         );
     }
@@ -1053,6 +1197,7 @@ mod tests {
         let requested = key(connection, FlowDirection::Outbound, 1);
         let prepared = control
             .prepare_outbound_open(
+                &endpoint,
                 requested,
                 DeliveryMode::ReliableOrdered,
                 policy(DeliveryMode::ReliableOrdered, 64),
@@ -1070,14 +1215,9 @@ mod tests {
                 limits(1),
             )
             .unwrap();
-        let accept = frame(
-            ControlFrameType::FlowAccept,
-            FlowAccept {
-                flow_id: prepared.flow.flow_id(),
-            }
-            .encode(),
-        );
-        let progress = control.receive(&mut endpoint, accept).unwrap();
+        let progress = control
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
+            .unwrap();
         let FlowControlProgress::OutboundFailedAfterAccept {
             flow_id,
             key,
@@ -1096,7 +1236,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_or_out_of_order_inbound_open_does_not_advance_peer_cursor() {
+    fn malformed_wrong_side_and_out_of_order_inbound_open_do_not_advance_peer_cursor() {
         let connection = ConnectionHandle::new(6);
         let mut control = control(connection, WireSide::Server, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
@@ -1107,7 +1247,24 @@ mod tests {
         };
         assert!(matches!(
             control.receive(&mut endpoint, malformed),
-            Err(FlowControlError::Body(ControlBodyError::UnknownDeliveryMode(3)))
+            Err(FlowControlError::Body(
+                ControlBodyError::UnknownDeliveryMode(3)
+            ))
+        ));
+
+        let wrong_side = frame(
+            ControlFrameType::OpenFlow,
+            OpenFlow::new(
+                FlowId::new(WireSide::Server, 0).unwrap(),
+                DeliveryMode::ReliableOrdered,
+                64,
+            )
+            .unwrap()
+            .encode(),
+        );
+        assert!(matches!(
+            control.receive(&mut endpoint, wrong_side),
+            Err(FlowControlError::FlowId(FlowIdCursorError::WrongSide { .. }))
         ));
 
         let out_of_order = frame(
@@ -1223,11 +1380,25 @@ mod tests {
         };
         assert_eq!(flow.flow_id(), wire_flow);
         assert_eq!(flow.key(), host_key);
-        assert_ne!(u64::from(flow.key().handle().get() == wire_flow.value()), 1);
+        assert_ne!(flow.key().handle().get(), wire_flow.value());
         assert_eq!(flow.max_message_bytes(), 64);
         assert_eq!(frame.frame_type, ControlFrameType::FlowAccept);
-        assert_eq!(endpoint.flow_contract(host_key).unwrap().1.max_message_bytes(), 128);
-        assert_eq!(control.registry().registered_flow(wire_flow).unwrap().max_message_bytes(), 64);
+        assert_eq!(
+            endpoint
+                .flow_contract(host_key)
+                .unwrap()
+                .1
+                .max_message_bytes(),
+            128
+        );
+        assert_eq!(
+            control
+                .registry()
+                .registered_flow(wire_flow)
+                .unwrap()
+                .max_message_bytes(),
+            64
+        );
     }
 
     #[test]
@@ -1309,11 +1480,14 @@ mod tests {
     }
 
     #[test]
-    fn one_unresolved_inbound_request_bounds_host_admission_state() {
+    fn pending_inbound_blocks_only_another_open_not_other_flow_control() {
         let connection = ConnectionHandle::new(10);
         let mut control = control(connection, WireSide::Server, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
-        let open = frame(
+        let outbound = key(connection, FlowDirection::Outbound, 700);
+        let prepared = prepare_reliable(&mut control, &endpoint, outbound);
+
+        let inbound_open = frame(
             ControlFrameType::OpenFlow,
             OpenFlow::new(
                 FlowId::new(WireSide::Client, 0).unwrap(),
@@ -1323,21 +1497,37 @@ mod tests {
             .unwrap()
             .encode(),
         );
-        let FlowControlProgress::InboundOpen(request) =
-            control.receive(&mut endpoint, open).unwrap()
+        let FlowControlProgress::InboundOpen(request) = control
+            .receive(&mut endpoint, inbound_open)
+            .unwrap()
         else {
-            panic!("expected request");
+            panic!("expected pending inbound request");
         };
-        let accept = frame(
-            ControlFrameType::FlowAccept,
-            FlowAccept {
-                flow_id: FlowId::new(WireSide::Server, 0).unwrap(),
-            }
+
+        assert!(matches!(
+            control
+                .receive(
+                    &mut endpoint,
+                    reject(prepared.flow.flow_id(), FlowRejectReason::ResourceLimit),
+                )
+                .unwrap(),
+            FlowControlProgress::OutboundRejected { .. }
+        ));
+
+        let second_open = frame(
+            ControlFrameType::OpenFlow,
+            OpenFlow::new(
+                FlowId::new(WireSide::Client, 1).unwrap(),
+                DeliveryMode::ReliableOrdered,
+                64,
+            )
+            .unwrap()
             .encode(),
         );
         assert!(matches!(
-            control.receive(&mut endpoint, accept),
-            Err(FlowControlError::InboundDecisionPending(_))
+            control.receive(&mut endpoint, second_open),
+            Err(FlowControlError::InboundDecisionPending(flow_id))
+                if flow_id == request.flow_id()
         ));
         control
             .reject_inbound(request, FlowRejectReason::ResourceLimit)
@@ -1355,16 +1545,7 @@ mod tests {
         let client_key = key(client_connection, FlowDirection::Outbound, 1001);
         let server_key = key(server_connection, FlowDirection::Inbound, 7007);
 
-        let prepared = client
-            .prepare_outbound_open(
-                client_key,
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(8),
-                None,
-            )
-            .unwrap();
+        let prepared = prepare_reliable(&mut client, &client_endpoint, client_key);
         let FlowControlProgress::InboundOpen(request) = server
             .receive(&mut server_endpoint, prepared.frame)
             .unwrap()
@@ -1388,29 +1569,32 @@ mod tests {
         else {
             panic!("server must accept");
         };
-        let FlowControlProgress::OutboundEstablished(client_flow) = client
-            .receive(&mut client_endpoint, accept)
-            .unwrap()
+        let FlowControlProgress::OutboundEstablished(client_flow) =
+            client.receive(&mut client_endpoint, accept).unwrap()
         else {
             panic!("client must establish");
         };
 
         assert_eq!(client_flow.flow_id(), server_flow.flow_id());
         assert_eq!(client_flow.mode(), server_flow.mode());
-        assert_eq!(client_flow.max_message_bytes(), server_flow.max_message_bytes());
+        assert_eq!(
+            client_flow.max_message_bytes(),
+            server_flow.max_message_bytes()
+        );
         assert_ne!(client_flow.key().handle(), server_flow.key().handle());
         assert_eq!(client_endpoint.active_flows(), 1);
         assert_eq!(server_endpoint.active_flows(), 1);
     }
 
     #[test]
-    fn remote_termination_retires_core_and_registry_and_datagram_cannot_recreate_flow() {
+    fn remote_unreliable_termination_retires_core_registry_and_stale_datagram() {
         let connection = ConnectionHandle::new(12);
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
         let outbound = key(connection, FlowDirection::Outbound, 1);
         let prepared = control
             .prepare_outbound_open(
+                &endpoint,
                 outbound,
                 DeliveryMode::UnreliableUnordered,
                 policy(DeliveryMode::UnreliableUnordered, 64),
@@ -1419,32 +1603,30 @@ mod tests {
                 Some(128),
             )
             .unwrap();
-        let accept = frame(
-            ControlFrameType::FlowAccept,
-            FlowAccept {
-                flow_id: prepared.flow.flow_id(),
-            }
-            .encode(),
-        );
-        control.receive(&mut endpoint, accept).unwrap();
+        control
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
+            .unwrap();
 
-        let terminate = frame(
-            ControlFrameType::FlowTerminate,
-            FlowTerminate {
-                flow_id: prepared.flow.flow_id(),
-                reason: FlowTerminateReason::ResourceFailure,
-            }
-            .encode(),
-        );
         assert!(matches!(
-            control.receive(&mut endpoint, terminate).unwrap(),
+            control
+                .receive(
+                    &mut endpoint,
+                    terminate(
+                        prepared.flow.flow_id(),
+                        FlowTerminateReason::ResourceFailure,
+                    ),
+                )
+                .unwrap(),
             FlowControlProgress::RemoteTerminated {
                 reason: FlowTerminateReason::ResourceFailure,
                 ..
             }
         ));
         assert_eq!(endpoint.flow_contract(outbound), None);
-        assert_eq!(control.registry().registered_flow(prepared.flow.flow_id()), None);
+        assert_eq!(
+            control.registry().registered_flow(prepared.flow.flow_id()),
+            None
+        );
 
         let mut datagram = encode_varint(prepared.flow.flow_id().value())
             .unwrap()
@@ -1458,91 +1640,142 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_unknown_and_wrong_side_control_responses_fail_closed() {
+    fn remote_reliable_exception_preserves_wire_reason_and_core_terminal_failure() {
         let connection = ConnectionHandle::new(13);
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
-        let prepared = control
-            .prepare_outbound_open(
-                key(connection, FlowDirection::Outbound, 1),
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(8),
-                None,
+        let outbound = key(connection, FlowDirection::Outbound, 1);
+        let prepared = prepare_reliable(&mut control, &endpoint, outbound);
+        control
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
+            .unwrap();
+        assert!(matches!(
+            endpoint.submit(outbound, b"accepted".to_vec()).unwrap(),
+            SubmissionOutcome::Accepted {
+                accepted_index: 0,
+                ..
+            }
+        ));
+
+        let result = control
+            .receive(
+                &mut endpoint,
+                terminate(
+                    prepared.flow.flow_id(),
+                    FlowTerminateReason::ReliableDeliveryFailure,
+                ),
             )
             .unwrap();
-        let reject_body = FlowReject {
-            flow_id: prepared.flow.flow_id(),
-            reason: FlowRejectReason::ResourceLimit,
-        }
-        .encode();
+        let FlowControlProgress::RemoteTerminated {
+            flow,
+            reason,
+            termination,
+        } = result
+        else {
+            panic!("expected reliable terminal progress");
+        };
+        assert_eq!(flow.key(), outbound);
+        assert_eq!(reason, FlowTerminateReason::ReliableDeliveryFailure);
+        assert_eq!(termination.reason, FlowTerminationReason::ReliableCustodyLost);
+        assert_eq!(termination.pending_messages, 1);
+        assert!(termination.reliable_obligation_failed);
+        assert_eq!(endpoint.flow_contract(outbound), None);
+        assert_eq!(
+            control.registry().registered_flow(prepared.flow.flow_id()),
+            None
+        );
+    }
+
+    #[test]
+    fn local_reliable_exception_preserves_terminal_failure_and_wire_reason() {
+        let connection = ConnectionHandle::new(14);
+        let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
+        let mut endpoint = DeliveryEndpoint::new(limits(8));
+        let outbound = key(connection, FlowDirection::Outbound, 1);
+        let prepared = prepare_reliable(&mut control, &endpoint, outbound);
+        control
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
+            .unwrap();
+        endpoint.submit(outbound, b"accepted".to_vec()).unwrap();
+
+        let terminated = control
+            .terminate_local(
+                &mut endpoint,
+                prepared.flow.flow_id(),
+                FlowTerminateReason::ProtocolFailure,
+            )
+            .unwrap();
+        assert_eq!(terminated.reason, FlowTerminateReason::ProtocolFailure);
+        assert_eq!(terminated.frame.frame_type, ControlFrameType::FlowTerminate);
+        assert_eq!(
+            terminated.termination.reason,
+            FlowTerminationReason::ReliableCustodyLost
+        );
+        assert!(terminated.termination.reliable_obligation_failed);
+        assert_eq!(endpoint.flow_contract(outbound), None);
+    }
+
+    #[test]
+    fn duplicate_unknown_wrong_side_and_state_inapplicable_responses_fail_closed() {
+        let connection = ConnectionHandle::new(15);
+        let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
+        let mut endpoint = DeliveryEndpoint::new(limits(8));
+        let prepared = prepare_reliable(
+            &mut control,
+            &endpoint,
+            key(connection, FlowDirection::Outbound, 1),
+        );
+        let flow_id = prepared.flow.flow_id();
+
         control
             .receive(
                 &mut endpoint,
-                frame(ControlFrameType::FlowReject, reject_body),
+                reject(flow_id, FlowRejectReason::ResourceLimit),
             )
             .unwrap();
         assert!(matches!(
             control.receive(
                 &mut endpoint,
-                frame(ControlFrameType::FlowReject, reject_body),
+                reject(flow_id, FlowRejectReason::ResourceLimit),
             ),
-            Err(FlowControlError::UnknownPendingFlow(_))
+            Err(FlowControlError::UnknownPendingFlow(id)) if id == flow_id
         ));
 
-        let wrong = frame(
-            ControlFrameType::FlowAccept,
-            FlowAccept {
-                flow_id: FlowId::new(WireSide::Server, 0).unwrap(),
-            }
-            .encode(),
-        );
+        let wrong = FlowId::new(WireSide::Server, 0).unwrap();
         assert!(matches!(
-            control.receive(&mut endpoint, wrong),
-            Err(FlowControlError::WrongResponseSide { .. })
+            control.receive(&mut endpoint, accept(wrong)),
+            Err(FlowControlError::WrongResponseSide {
+                expected: WireSide::Client,
+                received: WireSide::Server,
+            })
+        ));
+        assert!(matches!(
+            control.receive(
+                &mut endpoint,
+                terminate(flow_id, FlowTerminateReason::ResourceFailure),
+            ),
+            Err(FlowControlError::UnknownActiveFlow(id)) if id == flow_id
         ));
     }
 
     #[test]
     fn reliable_normal_control_termination_is_not_a_fin_substitute() {
-        let connection = ConnectionHandle::new(14);
+        let connection = ConnectionHandle::new(16);
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
-        let prepared = control
-            .prepare_outbound_open(
-                key(connection, FlowDirection::Outbound, 1),
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(8),
-                None,
-            )
-            .unwrap();
+        let outbound = key(connection, FlowDirection::Outbound, 1);
+        let prepared = prepare_reliable(&mut control, &endpoint, outbound);
         control
-            .receive(
-                &mut endpoint,
-                frame(
-                    ControlFrameType::FlowAccept,
-                    FlowAccept {
-                        flow_id: prepared.flow.flow_id(),
-                    }
-                    .encode(),
-                ),
-            )
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
             .unwrap();
 
-        let normal = frame(
-            ControlFrameType::FlowTerminate,
-            FlowTerminate {
-                flow_id: prepared.flow.flow_id(),
-                reason: FlowTerminateReason::Normal,
-            }
-            .encode(),
-        );
         assert!(matches!(
-            control.receive(&mut endpoint, normal),
-            Err(FlowControlError::ReliableNormalUsesFin(_))
+            control.receive(
+                &mut endpoint,
+                terminate(prepared.flow.flow_id(), FlowTerminateReason::Normal),
+            ),
+            Err(FlowControlError::ReliableNormalUsesFin(id))
+                if id == prepared.flow.flow_id()
         ));
         assert!(matches!(
             control.terminate_local(
@@ -1550,19 +1783,22 @@ mod tests {
                 prepared.flow.flow_id(),
                 FlowTerminateReason::Normal,
             ),
-            Err(FlowControlError::ReliableNormalUsesFin(_))
+            Err(FlowControlError::ReliableNormalUsesFin(id))
+                if id == prepared.flow.flow_id()
         ));
-        assert!(endpoint.flow_contract(prepared.flow.key()).is_some());
+        assert!(endpoint.flow_contract(outbound).is_some());
     }
 
     #[test]
-    fn local_exceptional_termination_retires_active_mapping_once() {
-        let connection = ConnectionHandle::new(15);
+    fn local_unreliable_normal_termination_retires_active_mapping_once() {
+        let connection = ConnectionHandle::new(17);
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
+        let outbound = key(connection, FlowDirection::Outbound, 1);
         let prepared = control
             .prepare_outbound_open(
-                key(connection, FlowDirection::Outbound, 1),
+                &endpoint,
+                outbound,
                 DeliveryMode::UnreliableUnordered,
                 policy(DeliveryMode::UnreliableUnordered, 64),
                 nz(64),
@@ -1571,17 +1807,9 @@ mod tests {
             )
             .unwrap();
         control
-            .receive(
-                &mut endpoint,
-                frame(
-                    ControlFrameType::FlowAccept,
-                    FlowAccept {
-                        flow_id: prepared.flow.flow_id(),
-                    }
-                    .encode(),
-                ),
-            )
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
             .unwrap();
+
         let terminated = control
             .terminate_local(
                 &mut endpoint,
@@ -1589,16 +1817,22 @@ mod tests {
                 FlowTerminateReason::Normal,
             )
             .unwrap();
+        assert_eq!(terminated.reason, FlowTerminateReason::Normal);
         assert_eq!(terminated.frame.frame_type, ControlFrameType::FlowTerminate);
-        assert_eq!(endpoint.flow_contract(prepared.flow.key()), None);
-        assert_eq!(control.registry().registered_flow(prepared.flow.flow_id()), None);
+        assert_eq!(terminated.termination.reason, FlowTerminationReason::Requested);
+        assert_eq!(endpoint.flow_contract(outbound), None);
+        assert_eq!(
+            control.registry().registered_flow(prepared.flow.flow_id()),
+            None
+        );
         assert!(matches!(
             control.terminate_local(
                 &mut endpoint,
                 prepared.flow.flow_id(),
                 FlowTerminateReason::Normal,
             ),
-            Err(FlowControlError::UnknownActiveFlow(_))
+            Err(FlowControlError::UnknownActiveFlow(id))
+                if id == prepared.flow.flow_id()
         ));
     }
 }
