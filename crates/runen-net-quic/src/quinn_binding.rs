@@ -291,6 +291,9 @@ pub(super) enum SendError {
     Io(IoFailure),
     PendingData,
     AlreadyFinishing,
+    CoreEffectPending,
+    TransportNotPrepared,
+    CoreEffectMismatch,
     Terminal,
 }
 
@@ -318,6 +321,28 @@ pub(super) enum SendProgress {
     Committed { accepted_index: u64 },
     Idle,
     Closed,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(super) enum OutboundTransportPreparation {
+    Idle,
+    Poll,
+}
+
+#[must_use = "ready reliable transport progress must be synchronously applied before subsequent flow progress"]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum OutboundTransportOutcome {
+    Progressed { bytes: usize },
+    CustodyReady { accepted_index: u64 },
+    FinishAcknowledged,
+    Failure(SendError),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum PendingOutboundCoreEffect {
+    Custody { accepted_index: u64 },
+    FinishAcknowledged,
+    Failure,
 }
 
 #[derive(Debug)]
@@ -383,22 +408,24 @@ impl OutboundState {
                 payload_offset: 0,
             });
         }
-        let current = self.current.as_ref().expect("message loaded above");
-        if current.length_offset < current.length.len() {
-            return Ok(Some(&current.length.as_slice()[current.length_offset..]));
-        }
-        if current.payload_offset < current.snapshot.payload_len() {
-            return Ok(Some(&current.snapshot.payload()[current.payload_offset..]));
-        }
-        unreachable!("completed message is committed by advance")
+        self.prepared_segment().map(Some)
     }
 
-    fn advance(
-        &mut self,
-        bytes: usize,
-        endpoint: &mut DeliveryEndpoint,
-        key: DeliveryFlowKey,
-    ) -> Result<Option<u64>, SendError> {
+    fn prepared_segment(&self) -> Result<&[u8], SendError> {
+        if self.flow_header_offset < self.flow_header.len() {
+            return Ok(&self.flow_header.as_slice()[self.flow_header_offset..]);
+        }
+        let current = self.current.as_ref().ok_or(SendError::TransportNotPrepared)?;
+        if current.length_offset < current.length.len() {
+            return Ok(&current.length.as_slice()[current.length_offset..]);
+        }
+        if current.payload_offset < current.snapshot.payload_len() {
+            return Ok(&current.snapshot.payload()[current.payload_offset..]);
+        }
+        Err(SendError::CoreEffectPending)
+    }
+
+    fn advance_transport(&mut self, bytes: usize) -> Result<Option<u64>, SendError> {
         if bytes == 0 {
             return Err(SendError::WriteZero);
         }
@@ -413,7 +440,7 @@ impl OutboundState {
         let current = self
             .current
             .as_mut()
-            .expect("segment loaded before advance");
+            .ok_or(SendError::TransportNotPrepared)?;
         if current.length_offset < current.length.len() {
             let remaining = current.length.len() - current.length_offset;
             if bytes > remaining {
@@ -422,7 +449,7 @@ impl OutboundState {
             current.length_offset += bytes;
             if current.length_offset == current.length.len() && current.snapshot.payload_len() == 0
             {
-                return self.commit_current(endpoint, key).map(Some);
+                return Ok(Some(current.snapshot.accepted_index()));
             }
             return Ok(None);
         }
@@ -432,7 +459,7 @@ impl OutboundState {
         }
         current.payload_offset += bytes;
         if current.payload_offset == current.snapshot.payload_len() {
-            return self.commit_current(endpoint, key).map(Some);
+            return Ok(Some(current.snapshot.accepted_index()));
         }
         Ok(None)
     }
@@ -461,6 +488,8 @@ pub(super) struct OutboundReliable<W> {
     writer: W,
     state: OutboundState,
     finish_ack: Option<FinishAckFuture>,
+    pending_core_effect: Option<PendingOutboundCoreEffect>,
+    transport_prepared: bool,
     terminal: bool,
 }
 
@@ -489,120 +518,239 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
             writer,
             state: OutboundState::new(flow_id, flow.max_message_bytes)?,
             finish_ack: None,
+            pending_core_effect: None,
+            transport_prepared: false,
             terminal: false,
         })
     }
 
-    pub(super) fn poll_step(
+    pub(super) fn prepare_transport(
+        &mut self,
+        endpoint: &mut DeliveryEndpoint,
+        registry: &mut AcceptedFlowRegistry,
+    ) -> Result<OutboundTransportPreparation, SendError> {
+        if self.terminal {
+            return Err(SendError::Terminal);
+        }
+        if self.pending_core_effect.is_some() {
+            return Err(SendError::CoreEffectPending);
+        }
+        if endpoint.flow_contract(self.key).is_none() {
+            return Err(self.fail_sync(
+                endpoint,
+                registry,
+                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                SendError::Core(DeliveryOperationError::UnknownFlow),
+            ));
+        }
+        if self.finish_ack.is_some() {
+            match endpoint.peek_outbound_metadata(self.key) {
+                Ok(Some(_)) => {
+                    return Err(self.fail_sync(
+                        endpoint,
+                        registry,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                        SendError::PendingData,
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    return Err(self.fail_sync(
+                        endpoint,
+                        registry,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                        SendError::Core(error),
+                    ));
+                }
+            }
+            self.transport_prepared = true;
+            return Ok(OutboundTransportPreparation::Poll);
+        }
+        match self.state.next_segment(endpoint, self.key) {
+            Ok(Some(_)) => {
+                self.transport_prepared = true;
+                Ok(OutboundTransportPreparation::Poll)
+            }
+            Ok(None) => {
+                self.transport_prepared = false;
+                Ok(OutboundTransportPreparation::Idle)
+            }
+            Err(error) => Err(self.fail_sync(
+                endpoint,
+                registry,
+                ApplicationErrorCode::FlowProtocolError.quinn(),
+                error,
+            )),
+        }
+    }
+
+    pub(super) fn poll_transport(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<OutboundTransportOutcome, SendError>> {
+        if self.terminal {
+            return Poll::Ready(Err(SendError::Terminal));
+        }
+        if self.pending_core_effect.is_some() {
+            return Poll::Ready(Err(SendError::CoreEffectPending));
+        }
+        if !self.transport_prepared {
+            return Poll::Ready(Err(SendError::TransportNotPrepared));
+        }
+        if let Some(finish_ack) = self.finish_ack.as_mut() {
+            return match finish_ack.as_mut().poll(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(Ok(None)) => {
+                    self.transport_prepared = false;
+                    self.pending_core_effect = Some(PendingOutboundCoreEffect::FinishAcknowledged);
+                    Poll::Ready(Ok(OutboundTransportOutcome::FinishAcknowledged))
+                }
+                Poll::Ready(Ok(Some(_))) | Poll::Ready(Err(_)) => Poll::Ready(Ok(
+                    self.transport_failure(SendError::Io(IoFailure::Write)),
+                )),
+            };
+        }
+        let segment = match self.state.prepared_segment() {
+            Ok(segment) => segment,
+            Err(error) => return Poll::Ready(Err(error)),
+        };
+        match self.writer.poll_write_step(cx, segment) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(Ok(self.transport_failure(SendError::Io(error)))),
+            Poll::Ready(Ok(0)) => Poll::Ready(Ok(self.transport_failure(SendError::WriteZero))),
+            Poll::Ready(Ok(bytes)) => {
+                self.transport_prepared = false;
+                match self.state.advance_transport(bytes) {
+                    Ok(Some(accepted_index)) => {
+                        self.pending_core_effect =
+                            Some(PendingOutboundCoreEffect::Custody { accepted_index });
+                        Poll::Ready(Ok(OutboundTransportOutcome::CustodyReady {
+                            accepted_index,
+                        }))
+                    }
+                    Ok(None) => {
+                        Poll::Ready(Ok(OutboundTransportOutcome::Progressed { bytes }))
+                    }
+                    Err(error) => Poll::Ready(Ok(self.transport_failure(error))),
+                }
+            }
+        }
+    }
+
+    pub(super) fn apply_transport(
+        &mut self,
+        endpoint: &mut DeliveryEndpoint,
+        registry: &mut AcceptedFlowRegistry,
+        outcome: OutboundTransportOutcome,
+    ) -> Result<SendProgress, SendError> {
+        match outcome {
+            OutboundTransportOutcome::Progressed { bytes } => {
+                if self.pending_core_effect.is_some() {
+                    return Err(SendError::CoreEffectMismatch);
+                }
+                Ok(SendProgress::Progressed { bytes })
+            }
+            OutboundTransportOutcome::CustodyReady { accepted_index } => {
+                if self.pending_core_effect
+                    != Some(PendingOutboundCoreEffect::Custody { accepted_index })
+                {
+                    return Err(SendError::CoreEffectMismatch);
+                }
+                match self.state.commit_current(endpoint, self.key) {
+                    Ok(committed_index) if committed_index == accepted_index => {
+                        self.pending_core_effect = None;
+                        Ok(SendProgress::Committed { accepted_index })
+                    }
+                    Ok(_) => Err(self.fail_sync(
+                        endpoint,
+                        registry,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                        SendError::CoreEffectMismatch,
+                    )),
+                    Err(error) => Err(self.fail_sync(
+                        endpoint,
+                        registry,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                        error,
+                    )),
+                }
+            }
+            OutboundTransportOutcome::FinishAcknowledged => {
+                if self.pending_core_effect != Some(PendingOutboundCoreEffect::FinishAcknowledged) {
+                    return Err(SendError::CoreEffectMismatch);
+                }
+                match endpoint.peek_outbound_metadata(self.key) {
+                    Ok(Some(_)) => {
+                        return Err(self.fail_sync(
+                            endpoint,
+                            registry,
+                            ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                            SendError::PendingData,
+                        ));
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(self.fail_sync(
+                            endpoint,
+                            registry,
+                            ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                            SendError::Core(error),
+                        ));
+                    }
+                }
+                if let Err(error) = endpoint.terminate_flow(self.key, FlowTerminationReason::Requested)
+                {
+                    return Err(self.fail_sync(
+                        endpoint,
+                        registry,
+                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                        SendError::Core(error),
+                    ));
+                }
+                registry.release(self.flow_id);
+                self.finish_ack = None;
+                self.pending_core_effect = None;
+                self.terminal = true;
+                Ok(SendProgress::Closed)
+            }
+            OutboundTransportOutcome::Failure(error) => {
+                if self.pending_core_effect != Some(PendingOutboundCoreEffect::Failure) {
+                    return Err(SendError::CoreEffectMismatch);
+                }
+                let _ = endpoint.fail_reliable_custody(self.key);
+                registry.release(self.flow_id);
+                self.finish_ack = None;
+                self.pending_core_effect = None;
+                Err(error)
+            }
+        }
+    }
+
+    fn poll_step(
         &mut self,
         cx: &mut Context<'_>,
         endpoint: &mut DeliveryEndpoint,
         registry: &mut AcceptedFlowRegistry,
     ) -> Poll<Result<SendProgress, SendError>> {
-        if self.terminal {
-            return Poll::Ready(Err(SendError::Terminal));
-        }
-        if endpoint.flow_contract(self.key).is_none() {
-            return self.fail(
-                endpoint,
-                registry,
-                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                SendError::Core(DeliveryOperationError::UnknownFlow),
-            );
-        }
-        if let Some(finish_ack) = self.finish_ack.as_mut() {
-            match endpoint.peek_outbound_metadata(self.key) {
-                Ok(Some(_)) => {
-                    return self.fail(
-                        endpoint,
-                        registry,
-                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                        SendError::PendingData,
-                    );
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    return self.fail(
-                        endpoint,
-                        registry,
-                        ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                        SendError::Core(error),
-                    );
-                }
-            }
-            return match finish_ack.as_mut().poll(cx) {
+        match self.prepare_transport(endpoint, registry) {
+            Err(error) => Poll::Ready(Err(error)),
+            Ok(OutboundTransportPreparation::Idle) => Poll::Ready(Ok(SendProgress::Idle)),
+            Ok(OutboundTransportPreparation::Poll) => match self.poll_transport(cx) {
                 Poll::Pending => Poll::Pending,
-                Poll::Ready(Ok(None)) => {
-                    if let Err(error) =
-                        endpoint.terminate_flow(self.key, FlowTerminationReason::Requested)
-                    {
-                        return self.fail(
-                            endpoint,
-                            registry,
-                            ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                            SendError::Core(error),
-                        );
-                    }
-                    registry.release(self.flow_id);
-                    self.finish_ack = None;
-                    self.terminal = true;
-                    Poll::Ready(Ok(SendProgress::Closed))
+                Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+                Poll::Ready(Ok(outcome)) => {
+                    Poll::Ready(self.apply_transport(endpoint, registry, outcome))
                 }
-                Poll::Ready(Ok(Some(_))) | Poll::Ready(Err(_)) => self.fail(
-                    endpoint,
-                    registry,
-                    ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                    SendError::Io(IoFailure::Write),
-                ),
-            };
-        }
-        let segment = match self.state.next_segment(endpoint, self.key) {
-            Ok(Some(segment)) => segment,
-            Ok(None) => return Poll::Ready(Ok(SendProgress::Idle)),
-            Err(error) => {
-                return self.fail(
-                    endpoint,
-                    registry,
-                    ApplicationErrorCode::FlowProtocolError.quinn(),
-                    error,
-                );
-            }
-        };
-        match self.writer.poll_write_step(cx, segment) {
-            Poll::Pending => Poll::Pending,
-            Poll::Ready(Err(error)) => self.fail(
-                endpoint,
-                registry,
-                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                SendError::Io(error),
-            ),
-            Poll::Ready(Ok(0)) => self.fail(
-                endpoint,
-                registry,
-                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                SendError::WriteZero,
-            ),
-            Poll::Ready(Ok(bytes)) => match self.state.advance(bytes, endpoint, self.key) {
-                Ok(Some(accepted_index)) => {
-                    Poll::Ready(Ok(SendProgress::Committed { accepted_index }))
-                }
-                Ok(None) => Poll::Ready(Ok(SendProgress::Progressed { bytes })),
-                Err(error) => self.fail(
-                    endpoint,
-                    registry,
-                    ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                    error,
-                ),
             },
         }
     }
 
-    pub(super) fn request_finish_normal(
-        &mut self,
-        endpoint: &DeliveryEndpoint,
-    ) -> Result<(), SendError> {
+    pub(super) fn request_finish_normal(&mut self, endpoint: &DeliveryEndpoint) -> Result<(), SendError> {
         if self.terminal {
             return Err(SendError::Terminal);
+        }
+        if self.pending_core_effect.is_some() {
+            return Err(SendError::CoreEffectPending);
         }
         if self.finish_ack.is_some() {
             return Err(SendError::AlreadyFinishing);
@@ -615,23 +763,36 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         }
         self.writer.finish_reliable().map_err(SendError::Io)?;
         self.finish_ack = Some(self.writer.finish_ack_future());
+        self.transport_prepared = false;
         Ok(())
     }
 
-    fn fail(
+    fn transport_failure(&mut self, error: SendError) -> OutboundTransportOutcome {
+        self.transport_prepared = false;
+        self.writer
+            .reset_reliable(ApplicationErrorCode::ReliableDeliveryFailed.quinn());
+        self.terminal = true;
+        self.pending_core_effect = Some(PendingOutboundCoreEffect::Failure);
+        OutboundTransportOutcome::Failure(error)
+    }
+
+    fn fail_sync(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
         registry: &mut AcceptedFlowRegistry,
         code: VarInt,
         error: SendError,
-    ) -> Poll<Result<SendProgress, SendError>> {
+    ) -> SendError {
         if !self.terminal {
             self.writer.reset_reliable(code);
             let _ = endpoint.fail_reliable_custody(self.key);
             registry.release(self.flow_id);
             self.terminal = true;
         }
-        Poll::Ready(Err(error))
+        self.finish_ack = None;
+        self.pending_core_effect = None;
+        self.transport_prepared = false;
+        error
     }
 }
 
@@ -1498,6 +1659,50 @@ mod tests {
         let mut expected = encode_varint(flow_id.value()).unwrap().as_slice().to_vec();
         expected.extend_from_slice(&[3, b'a', b'b', b'c', 2, b'd', b'e']);
         assert_eq!(binding.writer.bytes, expected);
+    }
+
+    #[test]
+    fn outbound_transport_poll_is_core_free_and_requires_synchronous_apply() {
+        let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 26);
+        endpoint.submit(key, b"x".to_vec()).unwrap();
+        let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
+        registry
+            .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
+            .unwrap();
+        let mut binding = OutboundReliable::bind(&mut registry, flow_id, MockWriter::new([])).unwrap();
+        let mut cx = context();
+
+        loop {
+            assert_eq!(
+                binding.prepare_transport(&mut endpoint, &mut registry),
+                Ok(OutboundTransportPreparation::Poll)
+            );
+            let outcome = match binding.poll_transport(&mut cx) {
+                Poll::Pending => continue,
+                Poll::Ready(Ok(outcome)) => outcome,
+                Poll::Ready(Err(error)) => panic!("unexpected transport state error: {error:?}"),
+            };
+            assert_eq!(endpoint.pending_messages(), 1);
+            if matches!(outcome, OutboundTransportOutcome::CustodyReady { .. }) {
+                assert_eq!(
+                    binding.prepare_transport(&mut endpoint, &mut registry),
+                    Err(SendError::CoreEffectPending)
+                );
+            }
+            let progress = binding
+                .apply_transport(&mut endpoint, &mut registry, outcome)
+                .unwrap();
+            if progress == (SendProgress::Committed { accepted_index: 0 }) {
+                break;
+            }
+        }
+
+        assert_eq!(endpoint.pending_messages(), 0);
+        assert_eq!(
+            binding.prepare_transport(&mut endpoint, &mut registry),
+            Ok(OutboundTransportPreparation::Idle)
+        );
     }
 
     #[test]
