@@ -71,11 +71,11 @@ impl PendingFlowControlSend {
     pub(super) async fn send(
         self,
         sender: &mut ControlSender,
-    ) -> Result<FlowControlSendEffect, FlowControlSendError> {
+    ) -> Result<FlowControlSendEffect, Box<FlowControlSendError>> {
         let Self { frame, effect } = self;
         match sender.send_frame(frame.frame_type, &frame.body).await {
             Ok(()) => Ok(effect),
-            Err(error) => Err(FlowControlSendError { error, effect }),
+            Err(error) => Err(Box::new(FlowControlSendError { error, effect })),
         }
     }
 }
