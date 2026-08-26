@@ -12,8 +12,8 @@ use runen_net::{
 use crate::{
     control::{
         ControlFrame, ControlFrameError, ControlFrameType, ProfileBootstrapError,
-        ProfileReadyConnection, ProfileReadyParts, ValidatedControlProfile, bootstrap_client_control,
-        bootstrap_server_control, confirm_profile_transport,
+        ProfileReadyConnection, ProfileReadyParts, ValidatedControlProfile,
+        bootstrap_client_control, bootstrap_server_control, confirm_profile_transport,
     },
     endpoint::{
         ConfiguredEndpoint, ConnectionAdmissionError, ConnectionSlotPermit,
@@ -367,9 +367,7 @@ impl PendingNegotiationSend {
             return Err(self);
         }
         let Self {
-            core,
-            disposition,
-            ..
+            core, disposition, ..
         } = self;
         match disposition {
             PendingSendDisposition::Continue => Ok(NegotiationSendCompletion::Negotiating(
@@ -427,12 +425,12 @@ fn transition_from_progress(
     result: Result<NegotiationProgress, NegotiationControlError>,
 ) -> Result<NegotiationTransition, NegotiationLifecycleError> {
     match result {
-        Ok(NegotiationProgress::Waiting) => Ok(NegotiationTransition::Negotiating(
-            NegotiatingConnection {
+        Ok(NegotiationProgress::Waiting) => {
+            Ok(NegotiationTransition::Negotiating(NegotiatingConnection {
                 core,
                 received: None,
-            },
-        )),
+            }))
+        }
         Ok(NegotiationProgress::AuthoritySelectionRequired) => Ok(
             NegotiationTransition::AuthoritySelection(AuthoritySelectionRequired { core }),
         ),
