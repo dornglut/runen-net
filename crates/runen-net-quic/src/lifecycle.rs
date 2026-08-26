@@ -20,6 +20,7 @@ use crate::{
         ConfiguredEndpoint, ConnectionAdmissionError, ConnectionSlotPermit,
         ValidatedEndpointResources,
     },
+    flow_control::{FlowControl, FlowControlConfigError},
     negotiation::{
         NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress,
         NegotiationProtocolError,
@@ -95,6 +96,19 @@ pub(super) struct PendingNegotiationSend {
 #[derive(Debug)]
 pub(super) struct EstablishedNegotiatedConnection {
     core: NegotiationCore,
+}
+
+#[must_use = "flow-controlled connection owns the sole delivery-flow control state"]
+#[derive(Debug)]
+pub(super) struct FlowControlledConnection {
+    core: NegotiationCore,
+    flow_control: FlowControl,
+}
+
+#[derive(Debug)]
+pub(super) struct FlowControlActivationError {
+    pub(super) error: FlowControlConfigError,
+    pub(super) established: Box<EstablishedNegotiatedConnection>,
 }
 
 #[must_use = "connection teardown result contains host identity and Core cleanup evidence"]
@@ -193,6 +207,23 @@ impl PendingControlSend {
 
     const fn is_complete(&self) -> bool {
         self.sent
+    }
+}
+
+impl NegotiationCore {
+    fn teardown(
+        mut self,
+        manager: &mut NegotiationManager,
+        delivery: &mut DeliveryEndpoint,
+    ) -> ConnectionTeardown {
+        let connection = self.connection;
+        let flow_terminations = delivery.terminate_connection(connection);
+        let negotiation_cleanup_error = self.exchange.abort(manager).err();
+        ConnectionTeardown {
+            connection,
+            flow_terminations,
+            negotiation_cleanup_error,
+        }
     }
 }
 
@@ -430,19 +461,45 @@ impl PendingNegotiationSend {
 }
 
 impl EstablishedNegotiatedConnection {
+    pub(super) fn into_flow_control(
+        self,
+    ) -> Result<FlowControlledConnection, FlowControlActivationError> {
+        let flow_control = match FlowControl::from_profile_parts(self.core.connection, &self.core.profile)
+        {
+            Ok(flow_control) => flow_control,
+            Err(error) => {
+                return Err(FlowControlActivationError {
+                    error,
+                    established: Box::new(self),
+                });
+            }
+        };
+        Ok(FlowControlledConnection {
+            core: self.core,
+            flow_control,
+        })
+    }
+
     pub(super) fn teardown(
-        mut self,
+        self,
         manager: &mut NegotiationManager,
         delivery: &mut DeliveryEndpoint,
     ) -> ConnectionTeardown {
-        let connection = self.core.connection;
-        let flow_terminations = delivery.terminate_connection(connection);
-        let negotiation_cleanup_error = self.core.exchange.abort(manager).err();
-        ConnectionTeardown {
-            connection,
-            flow_terminations,
-            negotiation_cleanup_error,
-        }
+        self.core.teardown(manager, delivery)
+    }
+}
+
+impl FlowControlledConnection {
+    pub(super) fn teardown(
+        self,
+        manager: &mut NegotiationManager,
+        delivery: &mut DeliveryEndpoint,
+    ) -> ConnectionTeardown {
+        let Self {
+            core,
+            flow_control: _flow_control,
+        } = self;
+        core.teardown(manager, delivery)
     }
 }
 
