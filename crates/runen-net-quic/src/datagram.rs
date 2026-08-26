@@ -344,7 +344,7 @@ const fn map_registration_send_error(error: RegistrationUseError) -> DatagramSen
     }
 }
 
-fn datagram_len(
+pub(super) fn datagram_len(
     flow_id: FlowId,
     mode: DeliveryMode,
     sequence: Option<u64>,
