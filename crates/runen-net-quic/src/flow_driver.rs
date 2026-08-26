@@ -1,5 +1,7 @@
+use std::num::NonZeroUsize;
+
 use quinn::Connection;
-use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, FlowTermination};
+use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowTermination};
 
 use crate::{
     control::{ControlFrame, ControlSender, ProfileBootstrapError},
@@ -154,7 +156,15 @@ pub(super) fn accept_inbound(
     endpoint: &mut DeliveryEndpoint,
     request: InboundOpenRequest,
     admission: InboundAdmission,
+    reliable_max_staging_bytes: NonZeroUsize,
 ) -> Result<PendingFlowControlSend, InboundAdmissionError> {
+    if let Some(reason) = reliable_staging_rejection(
+        request.mode(),
+        request.max_message_bytes(),
+        reliable_max_staging_bytes,
+    ) {
+        return reject_inbound(flow_control, request, reason);
+    }
     let resolution = flow_control.accept_inbound(endpoint, request, admission)?;
     Ok(pending_inbound_resolution(resolution))
 }
@@ -190,6 +200,18 @@ pub(super) fn terminate_local(
     ))
 }
 
+fn reliable_staging_rejection(
+    mode: DeliveryMode,
+    max_message_bytes: u64,
+    max_staging_bytes: NonZeroUsize,
+) -> Option<FlowRejectReason> {
+    if mode != DeliveryMode::ReliableOrdered {
+        return None;
+    }
+    let max_staging_bytes = u64::try_from(max_staging_bytes.get()).unwrap_or(u64::MAX);
+    (max_message_bytes > max_staging_bytes).then_some(FlowRejectReason::ResourceLimit)
+}
+
 fn pending_inbound_resolution(resolution: InboundResolution) -> PendingFlowControlSend {
     match resolution {
         InboundResolution::Accepted { flow, frame } => {
@@ -203,5 +225,42 @@ fn pending_inbound_resolution(resolution: InboundResolution) -> PendingFlowContr
             frame,
             FlowControlSendEffect::InboundRejected { flow_id, reason },
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nz(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn reliable_staging_gate_only_rejects_oversized_reliable_requests() {
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::ReliableOrdered, 63, nz(64)),
+            None
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::ReliableOrdered, 64, nz(64)),
+            None
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::ReliableOrdered, 65, nz(64)),
+            Some(FlowRejectReason::ResourceLimit)
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::UnreliableUnordered, u64::MAX, nz(1)),
+            None
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::UnreliableSequenced, u64::MAX, nz(1)),
+            None
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::ReliableOrdered, u64::MAX, nz(1)),
+            Some(FlowRejectReason::ResourceLimit)
+        );
     }
 }
