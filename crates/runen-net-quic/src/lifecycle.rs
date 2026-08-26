@@ -20,7 +20,7 @@ use crate::{
         ConfiguredEndpoint, ConnectionAdmissionError, ConnectionSlotPermit,
         ValidatedEndpointResources,
     },
-    flow_control::{FlowControl, FlowControlConfigError},
+    flow_control::{FlowControl, FlowControlConfigError, FlowControlError},
     negotiation::{
         NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress,
         NegotiationProtocolError,
@@ -31,6 +31,7 @@ use crate::{
 const PROFILE_BOOTSTRAP_CLOSE_REASON: &[u8] = b"profile bootstrap failed";
 const PROFILE_CONTROL_CLOSE_REASON: &[u8] = b"profile control failed";
 const NEGOTIATION_CLOSE_REASON: &[u8] = b"negotiation failed";
+const FLOW_CONTROL_CLOSE_REASON: &[u8] = b"flow control failed";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) enum ProfilePreflightError {
@@ -644,7 +645,10 @@ fn close_negotiation_failed(connection: &Connection) {
     );
 }
 
-fn close_for_post_profile_control_error(connection: &Connection, error: &ProfileBootstrapError) {
+pub(super) fn close_for_post_profile_control_error(
+    connection: &Connection,
+    error: &ProfileBootstrapError,
+) {
     if let Some(code) = post_profile_close_code(error) {
         connection.close(code.quinn(), PROFILE_CONTROL_CLOSE_REASON);
     }
@@ -656,6 +660,32 @@ fn post_profile_close_code(error: &ProfileBootstrapError) -> Option<ApplicationE
             Some(ApplicationErrorCode::ProfileProtocolError)
         }
         _ => bootstrap_close_code(error),
+    }
+}
+
+pub(super) fn close_for_received_flow_control_error(
+    connection: &Connection,
+    error: &FlowControlError,
+) {
+    if let Some(code) = received_flow_control_close_code(error) {
+        connection.close(code.quinn(), FLOW_CONTROL_CLOSE_REASON);
+    }
+}
+
+fn received_flow_control_close_code(error: &FlowControlError) -> Option<ApplicationErrorCode> {
+    match error {
+        FlowControlError::UnexpectedFrame(_) => Some(ApplicationErrorCode::ProfileProtocolError),
+        FlowControlError::Body(_)
+        | FlowControlError::FlowId(_)
+        | FlowControlError::WrongResponseSide { .. }
+        | FlowControlError::UnknownPendingFlow(_)
+        | FlowControlError::UnknownActiveFlow(_)
+        | FlowControlError::ReliableNormalUsesFin(_) => Some(ApplicationErrorCode::FlowProtocolError),
+        FlowControlError::Allocation(_) => Some(ApplicationErrorCode::ResourceLimitError),
+        FlowControlError::InboundDecisionPending(_)
+        | FlowControlError::CoreState(_)
+        | FlowControlError::LocalEstablishment(_)
+        | FlowControlError::Registry(_) => None,
     }
 }
 
@@ -834,7 +864,7 @@ mod tests {
     use crate::{
         control::{ControlFrameType, LocalControlLimits, SemanticRole, SettingsError},
         endpoint::EndpointResourceLimits,
-        wire::VarIntDecodeError,
+        wire::{ControlBodyError, FlowId, FlowIdCursorError, VarIntDecodeError},
     };
 
     fn resources(max_connections: usize) -> ValidatedEndpointResources {
@@ -1009,6 +1039,59 @@ mod tests {
                 VarIntDecodeError::NonMinimal,
             ))),
             Some(ApplicationErrorCode::ControlFrameError)
+        );
+    }
+
+    #[test]
+    fn received_non_flow_frame_maps_to_profile_protocol_error() {
+        assert_eq!(
+            received_flow_control_close_code(&FlowControlError::UnexpectedFrame(
+                ControlFrameType::NegotiationOffer,
+            )),
+            Some(ApplicationErrorCode::ProfileProtocolError)
+        );
+    }
+
+    #[test]
+    fn received_flow_wire_and_state_errors_map_to_flow_protocol_error() {
+        let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
+        let cases = [
+            FlowControlError::Body(ControlBodyError::TrailingBytes),
+            FlowControlError::FlowId(FlowIdCursorError::UnexpectedSequence {
+                expected: 0,
+                received: 1,
+            }),
+            FlowControlError::WrongResponseSide {
+                expected: WireSide::Client,
+                received: WireSide::Server,
+            },
+            FlowControlError::UnknownPendingFlow(flow_id),
+            FlowControlError::UnknownActiveFlow(flow_id),
+            FlowControlError::ReliableNormalUsesFin(flow_id),
+        ];
+        for error in cases {
+            assert_eq!(
+                received_flow_control_close_code(&error),
+                Some(ApplicationErrorCode::FlowProtocolError)
+            );
+        }
+    }
+
+    #[test]
+    fn received_flow_allocation_failure_maps_to_resource_limit() {
+        let allocation = Vec::<u8>::new().try_reserve(usize::MAX).unwrap_err();
+        assert_eq!(
+            received_flow_control_close_code(&FlowControlError::Allocation(allocation)),
+            Some(ApplicationErrorCode::ResourceLimitError)
+        );
+    }
+
+    #[test]
+    fn local_inbound_scheduling_state_is_not_reclassified_as_peer_fault() {
+        let flow_id = FlowId::new(WireSide::Server, 0).unwrap();
+        assert_eq!(
+            received_flow_control_close_code(&FlowControlError::InboundDecisionPending(flow_id)),
+            None
         );
     }
 
