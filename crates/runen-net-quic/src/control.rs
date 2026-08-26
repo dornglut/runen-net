@@ -1,8 +1,8 @@
 use std::collections::TryReserveError;
 
 use quinn::{
-    Connecting, Connection, ConnectionError, ReadExactError, RecvStream, SendStream, Side,
-    WriteError, crypto::rustls::HandshakeData,
+    Connection, ConnectionError, ReadExactError, RecvStream, SendStream, Side, WriteError,
+    crypto::rustls::HandshakeData,
 };
 
 use crate::{
@@ -444,15 +444,18 @@ pub(super) struct ConfirmedProfileTransport {
 }
 
 impl ConfirmedProfileTransport {
+    pub(super) const fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
     pub(super) const fn side(&self) -> WireSide {
         self.side
     }
 }
 
-pub(super) async fn confirm_profile_transport(
-    connecting: Connecting,
+pub(super) fn confirm_profile_transport(
+    connection: Connection,
 ) -> Result<ConfirmedProfileTransport, ProfileBootstrapError> {
-    let connection = connecting.await?;
     let handshake = connection
         .handshake_data()
         .ok_or(ProfileBootstrapError::MissingHandshakeData)?
