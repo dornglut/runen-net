@@ -1,5 +1,7 @@
+use std::num::NonZeroUsize;
+
 use quinn::Connection;
-use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, FlowTermination};
+use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowTermination};
 
 use crate::{
     control::{ControlFrame, ControlSender, ProfileBootstrapError},
@@ -154,7 +156,17 @@ pub(super) fn accept_inbound(
     endpoint: &mut DeliveryEndpoint,
     request: InboundOpenRequest,
     admission: InboundAdmission,
+    reliable_staging_ceiling: NonZeroUsize,
 ) -> Result<PendingFlowControlSend, InboundAdmissionError> {
+    if let Some(reason) = reliable_staging_rejection(
+        request.mode(),
+        request.max_message_bytes(),
+        reliable_staging_ceiling,
+    ) {
+        let resolution = flow_control.reject_inbound(request, reason)?;
+        return Ok(pending_inbound_resolution(resolution));
+    }
+
     let resolution = flow_control.accept_inbound(endpoint, request, admission)?;
     Ok(pending_inbound_resolution(resolution))
 }
@@ -203,5 +215,70 @@ fn pending_inbound_resolution(resolution: InboundResolution) -> PendingFlowContr
             frame,
             FlowControlSendEffect::InboundRejected { flow_id, reason },
         ),
+    }
+}
+
+fn reliable_staging_rejection(
+    mode: DeliveryMode,
+    max_message_bytes: u64,
+    reliable_staging_ceiling: NonZeroUsize,
+) -> Option<FlowRejectReason> {
+    if mode != DeliveryMode::ReliableOrdered {
+        return None;
+    }
+
+    match usize::try_from(max_message_bytes) {
+        Ok(max_message_bytes) if max_message_bytes <= reliable_staging_ceiling.get() => None,
+        Ok(_) | Err(_) => Some(FlowRejectReason::ResourceLimit),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn nz(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn reliable_staging_gate_is_mode_scoped_and_non_wrapping() {
+        let ceiling = nz(64);
+
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::ReliableOrdered, 63, ceiling),
+            None
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::ReliableOrdered, 64, ceiling),
+            None
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::ReliableOrdered, 65, ceiling),
+            Some(FlowRejectReason::ResourceLimit)
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::UnreliableUnordered, u64::MAX, nz(1)),
+            None
+        );
+        assert_eq!(
+            reliable_staging_rejection(DeliveryMode::UnreliableSequenced, u64::MAX, nz(1)),
+            None
+        );
+
+        let platform_ceiling = nz(usize::MAX);
+        let expected = if usize::try_from(u64::MAX).is_ok() {
+            None
+        } else {
+            Some(FlowRejectReason::ResourceLimit)
+        };
+        assert_eq!(
+            reliable_staging_rejection(
+                DeliveryMode::ReliableOrdered,
+                u64::MAX,
+                platform_ceiling,
+            ),
+            expected
+        );
     }
 }
