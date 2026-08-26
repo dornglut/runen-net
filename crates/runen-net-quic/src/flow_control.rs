@@ -146,6 +146,15 @@ impl EstablishedFlow {
     }
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(super) struct OutboundOpenRequest {
+    pub(super) key: DeliveryFlowKey,
+    pub(super) mode: DeliveryMode,
+    pub(super) policy: FlowResourcePolicy,
+    pub(super) stable_max_message_bytes: NonZeroUsize,
+    pub(super) connection_limits: DeliveryScopeLimits,
+}
+
 #[derive(Debug)]
 pub(super) struct PreparedOutboundOpen {
     pub(super) frame: ControlFrame,
@@ -309,13 +318,16 @@ impl FlowControl {
     pub(super) fn prepare_outbound_open(
         &mut self,
         endpoint: &DeliveryEndpoint,
-        key: DeliveryFlowKey,
-        mode: DeliveryMode,
-        policy: FlowResourcePolicy,
-        stable_max_message_bytes: NonZeroUsize,
-        connection_limits: DeliveryScopeLimits,
+        request: OutboundOpenRequest,
         current_datagram_size: Option<usize>,
     ) -> Result<PreparedOutboundOpen, OutboundOpenError> {
+        let OutboundOpenRequest {
+            key,
+            mode,
+            policy,
+            stable_max_message_bytes,
+            connection_limits,
+        } = request;
         self.validate_outbound_identity(endpoint, key)?;
         policy
             .validate_for_mode(mode)
@@ -587,7 +599,8 @@ impl FlowControl {
             return Err(FlowControlError::ReliableNormalUsesFin(terminate.flow_id));
         }
         let flow = established_from_registered(terminate.flow_id, registered);
-        let termination = terminate_core_for_wire(endpoint, flow, terminate.reason)
+        let termination = endpoint
+            .terminate_flow(flow.key, FlowTerminationReason::Requested)
             .map_err(FlowControlError::CoreState)?;
         self.registry.release(terminate.flow_id);
         Ok(FlowControlProgress::RemoteTerminated {
@@ -767,8 +780,9 @@ impl FlowControl {
         }
         let frame = terminate_frame(flow_id, reason).map_err(FlowControlError::Allocation)?;
         let flow = established_from_registered(flow_id, registered);
-        let termination =
-            terminate_core_for_wire(endpoint, flow, reason).map_err(FlowControlError::CoreState)?;
+        let termination = endpoint
+            .terminate_flow(flow.key, FlowTerminationReason::Requested)
+            .map_err(FlowControlError::CoreState)?;
         self.registry.release(flow_id);
         Ok(LocalTermination {
             flow,
@@ -790,22 +804,6 @@ fn established_from_registered(flow_id: FlowId, flow: RegisteredFlow) -> Establi
         key: flow.key(),
         mode: flow.mode(),
         max_message_bytes: flow.max_message_bytes(),
-    }
-}
-
-fn terminate_core_for_wire(
-    endpoint: &mut DeliveryEndpoint,
-    flow: EstablishedFlow,
-    reason: FlowTerminateReason,
-) -> Result<FlowTermination, DeliveryOperationError> {
-    match flow.mode {
-        DeliveryMode::ReliableOrdered => {
-            debug_assert_ne!(reason, FlowTerminateReason::Normal);
-            endpoint.fail_reliable_custody(flow.key)
-        }
-        DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => {
-            endpoint.terminate_flow(flow.key, FlowTerminationReason::Requested)
-        }
     }
 }
 
@@ -973,11 +971,13 @@ mod tests {
         control
             .prepare_outbound_open(
                 endpoint,
-                key,
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key,
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: policy(DeliveryMode::ReliableOrdered, 64),
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 None,
             )
             .unwrap()
@@ -994,11 +994,13 @@ mod tests {
         assert!(matches!(
             control.prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::ReliableOrdered,
-                reliable,
-                nz(32),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: reliable,
+                    stable_max_message_bytes: nz(32),
+                    connection_limits: limits(8),
+                },
                 None,
             ),
             Err(OutboundOpenError::StableMessageLimitMismatch { .. })
@@ -1006,11 +1008,13 @@ mod tests {
         assert!(matches!(
             control.prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 128),
-                nz(128),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: policy(DeliveryMode::ReliableOrdered, 128),
+                    stable_max_message_bytes: nz(128),
+                    connection_limits: limits(8),
+                },
                 None,
             ),
             Err(OutboundOpenError::PeerMessageLimit { .. })
@@ -1022,11 +1026,13 @@ mod tests {
         assert!(matches!(
             control.prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::ReliableOrdered,
-                reliable,
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: reliable,
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 None,
             ),
             Err(OutboundOpenError::CoreFlowAlreadyExists(key)) if key == outbound
@@ -1044,11 +1050,13 @@ mod tests {
         assert!(matches!(
             control.prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::ReliableOrdered,
-                reliable,
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: reliable,
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 None,
             ),
             Err(OutboundOpenError::PendingCoreFlow(key)) if key == outbound
@@ -1067,11 +1075,13 @@ mod tests {
         assert!(matches!(
             control.prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::UnreliableSequenced,
-                p,
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::UnreliableSequenced,
+                    policy: p,
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 Some(72),
             ),
             Err(OutboundOpenError::DatagramTooSmall {
@@ -1082,11 +1092,13 @@ mod tests {
         let prepared = control
             .prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::UnreliableSequenced,
-                p,
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::UnreliableSequenced,
+                    policy: p,
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 Some(73),
             )
             .unwrap();
@@ -1104,11 +1116,13 @@ mod tests {
         assert!(matches!(
             control.prepare_outbound_open(
                 &endpoint,
-                key(connection, FlowDirection::Outbound, 2),
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: key(connection, FlowDirection::Outbound, 2),
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: policy(DeliveryMode::ReliableOrdered, 64),
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 None,
             ),
             Err(OutboundOpenError::PeerActiveFlowLimit { .. })
@@ -1140,11 +1154,13 @@ mod tests {
         assert!(matches!(
             control.prepare_outbound_open(
                 &endpoint,
-                key(connection, FlowDirection::Outbound, 3),
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: key(connection, FlowDirection::Outbound, 3),
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: policy(DeliveryMode::ReliableOrdered, 64),
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 None,
             ),
             Err(OutboundOpenError::PeerActiveFlowLimit { .. })
@@ -1200,11 +1216,13 @@ mod tests {
         let prepared = control
             .prepare_outbound_open(
                 &endpoint,
-                requested,
-                DeliveryMode::ReliableOrdered,
-                policy(DeliveryMode::ReliableOrdered, 64),
-                nz(64),
-                limits(1),
+                OutboundOpenRequest {
+                    key: requested,
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: policy(DeliveryMode::ReliableOrdered, 64),
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(1),
+                },
                 None,
             )
             .unwrap();
@@ -1598,11 +1616,13 @@ mod tests {
         let prepared = control
             .prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::UnreliableUnordered,
-                policy(DeliveryMode::UnreliableUnordered, 64),
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::UnreliableUnordered,
+                    policy: policy(DeliveryMode::UnreliableUnordered, 64),
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 Some(128),
             )
             .unwrap();
@@ -1643,7 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_reliable_exception_preserves_wire_reason_and_core_terminal_failure() {
+    fn remote_reliable_exception_preserves_wire_reason_without_redefining_core_reason() {
         let connection = ConnectionHandle::new(13);
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
@@ -1679,10 +1699,7 @@ mod tests {
         };
         assert_eq!(flow.key(), outbound);
         assert_eq!(reason, FlowTerminateReason::ReliableDeliveryFailure);
-        assert_eq!(
-            termination.reason,
-            FlowTerminationReason::ReliableCustodyLost
-        );
+        assert_eq!(termination.reason, FlowTerminationReason::Requested);
         assert_eq!(termination.pending_messages, 1);
         assert!(termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(outbound), None);
@@ -1693,7 +1710,7 @@ mod tests {
     }
 
     #[test]
-    fn local_reliable_exception_preserves_terminal_failure_and_wire_reason() {
+    fn local_reliable_exception_preserves_wire_reason_without_redefining_core_reason() {
         let connection = ConnectionHandle::new(14);
         let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
         let mut endpoint = DeliveryEndpoint::new(limits(8));
@@ -1713,10 +1730,7 @@ mod tests {
             .unwrap();
         assert_eq!(terminated.reason, FlowTerminateReason::ProtocolFailure);
         assert_eq!(terminated.frame.frame_type, ControlFrameType::FlowTerminate);
-        assert_eq!(
-            terminated.termination.reason,
-            FlowTerminationReason::ReliableCustodyLost
-        );
+        assert_eq!(terminated.termination.reason, FlowTerminationReason::Requested);
         assert!(terminated.termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(outbound), None);
     }
@@ -1804,11 +1818,13 @@ mod tests {
         let prepared = control
             .prepare_outbound_open(
                 &endpoint,
-                outbound,
-                DeliveryMode::UnreliableUnordered,
-                policy(DeliveryMode::UnreliableUnordered, 64),
-                nz(64),
-                limits(8),
+                OutboundOpenRequest {
+                    key: outbound,
+                    mode: DeliveryMode::UnreliableUnordered,
+                    policy: policy(DeliveryMode::UnreliableUnordered, 64),
+                    stable_max_message_bytes: nz(64),
+                    connection_limits: limits(8),
+                },
                 Some(128),
             )
             .unwrap();
@@ -1825,10 +1841,7 @@ mod tests {
             .unwrap();
         assert_eq!(terminated.reason, FlowTerminateReason::Normal);
         assert_eq!(terminated.frame.frame_type, ControlFrameType::FlowTerminate);
-        assert_eq!(
-            terminated.termination.reason,
-            FlowTerminationReason::Requested
-        );
+        assert_eq!(terminated.termination.reason, FlowTerminationReason::Requested);
         assert_eq!(endpoint.flow_contract(outbound), None);
         assert_eq!(
             control.registry().registered_flow(prepared.flow.flow_id()),
