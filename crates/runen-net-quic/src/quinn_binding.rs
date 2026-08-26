@@ -140,6 +140,13 @@ impl AcceptedFlowRegistry {
         self.flows.get(&flow_id.value()).copied()
     }
 
+    pub(super) fn active_direction_len(&self, direction: FlowDirection) -> usize {
+        self.flows
+            .values()
+            .filter(|flow| flow.key.direction() == direction)
+            .count()
+    }
+
     fn associate_outbound(&mut self, flow_id: FlowId) -> Result<RegisteredFlow, RegistryError> {
         self.associate(
             flow_id,
@@ -184,7 +191,7 @@ impl AcceptedFlowRegistry {
         }
     }
 
-    fn release(&mut self, flow_id: FlowId) {
+    pub(super) fn release(&mut self, flow_id: FlowId) {
         self.flows.remove(&flow_id.value());
     }
 

@@ -22,6 +22,11 @@ mod datagram;
 mod endpoint;
 #[allow(
     dead_code,
+    reason = "RN5E4B1 lands crate-private delivery-flow control before RN5E5 wiring"
+)]
+mod flow_control;
+#[allow(
+    dead_code,
     reason = "RN5E4A2B lands crate-private compatibility negotiation control before RN5E4B/RN5E5 wiring"
 )]
 mod negotiation;
