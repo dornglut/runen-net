@@ -12,8 +12,8 @@ use runen_net::{
 
 use crate::{
     control::{
-        ControlFrame, ControlFrameError, ControlFrameType, ProfileBootstrapError,
-        ProfileReadyConnection, ProfileReadyParts, ValidatedControlProfile,
+        ControlFrame, ControlFrameError, ControlFrameType, ControlReceiver, ControlSender,
+        ProfileBootstrapError, ProfileReadyConnection, ProfileReadyParts, ValidatedControlProfile,
         bootstrap_client_control, bootstrap_server_control, confirm_profile_transport,
     },
     endpoint::{
@@ -103,6 +103,15 @@ pub(super) struct EstablishedNegotiatedConnection {
 pub(super) struct FlowControlledConnection {
     core: NegotiationCore,
     flow_control: FlowControl,
+}
+
+#[must_use = "driver parts borrow the live connection and independent control directions"]
+#[derive(Debug)]
+pub(super) struct FlowControlDriverParts<'a> {
+    pub(super) connection: &'a Connection,
+    pub(super) sender: &'a mut ControlSender,
+    pub(super) receiver: &'a mut ControlReceiver,
+    pub(super) flow_control: &'a mut FlowControl,
 }
 
 #[derive(Debug)]
@@ -490,6 +499,21 @@ impl EstablishedNegotiatedConnection {
 }
 
 impl FlowControlledConnection {
+    pub(super) fn driver_parts(&mut self) -> FlowControlDriverParts<'_> {
+        let ProfileReadyParts {
+            connection,
+            sender,
+            receiver,
+            ..
+        } = &mut self.core.profile;
+        FlowControlDriverParts {
+            connection,
+            sender,
+            receiver,
+            flow_control: &mut self.flow_control,
+        }
+    }
+
     pub(super) fn teardown(
         self,
         manager: &mut NegotiationManager,
