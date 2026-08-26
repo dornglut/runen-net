@@ -86,11 +86,8 @@ pub(super) fn prepare_outbound_open(
     endpoint: &DeliveryEndpoint,
     request: OutboundOpenRequest,
 ) -> Result<PendingFlowControlSend, OutboundOpenError> {
-    let PreparedOutboundOpen { frame, flow } = flow_control.prepare_outbound_open(
-        endpoint,
-        request,
-        connection.max_datagram_size(),
-    )?;
+    let PreparedOutboundOpen { frame, flow } =
+        flow_control.prepare_outbound_open(endpoint, request, connection.max_datagram_size())?;
     Ok(PendingFlowControlSend::new(
         frame,
         FlowControlSendEffect::OutboundOpenPrepared(flow),
@@ -104,7 +101,9 @@ pub(super) fn process_received(
 ) -> Result<FlowControlDriverProgress, FlowControlError> {
     let progress = flow_control.receive(endpoint, frame)?;
     Ok(match progress {
-        FlowControlProgress::InboundOpen(request) => FlowControlDriverProgress::InboundOpen(request),
+        FlowControlProgress::InboundOpen(request) => {
+            FlowControlDriverProgress::InboundOpen(request)
+        }
         FlowControlProgress::InboundRejected {
             flow_id,
             reason,
@@ -193,10 +192,9 @@ pub(super) fn terminate_local(
 
 fn pending_inbound_resolution(resolution: InboundResolution) -> PendingFlowControlSend {
     match resolution {
-        InboundResolution::Accepted { flow, frame } => PendingFlowControlSend::new(
-            frame,
-            FlowControlSendEffect::InboundAccepted(flow),
-        ),
+        InboundResolution::Accepted { flow, frame } => {
+            PendingFlowControlSend::new(frame, FlowControlSendEffect::InboundAccepted(flow))
+        }
         InboundResolution::Rejected {
             flow_id,
             reason,
