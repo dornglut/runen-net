@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: runen-net-validation-${{ github.workflow }}-${{ github.ref }}
+  group: runen-net-validation-${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
   cancel-in-progress: true
 
 jobs:
