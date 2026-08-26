@@ -27,6 +27,11 @@ mod endpoint;
 mod flow_control;
 #[allow(
     dead_code,
+    reason = "RN5E5A2B lands crate-private admitted ProfileReady lifecycle before later RN5E5 wiring"
+)]
+mod lifecycle;
+#[allow(
+    dead_code,
     reason = "RN5E4A2B lands crate-private compatibility negotiation control before RN5E4B/RN5E5 wiring"
 )]
 mod negotiation;
