@@ -420,7 +420,11 @@ impl FlowControl {
         if endpoint.flow_contract(key).is_some() {
             return Err(OutboundOpenError::CoreFlowAlreadyExists(key));
         }
-        if self.pending_outbound.values().any(|pending| pending.key == key) {
+        if self
+            .pending_outbound
+            .values()
+            .any(|pending| pending.key == key)
+        {
             return Err(OutboundOpenError::PendingCoreFlow(key));
         }
         Ok(())
@@ -941,7 +945,10 @@ mod tests {
     }
 
     fn accept(flow_id: FlowId) -> ControlFrame {
-        frame(ControlFrameType::FlowAccept, FlowAccept { flow_id }.encode())
+        frame(
+            ControlFrameType::FlowAccept,
+            FlowAccept { flow_id }.encode(),
+        )
     }
 
     fn reject(flow_id: FlowId, reason: FlowRejectReason) -> ControlFrame {
@@ -1010,12 +1017,7 @@ mod tests {
         ));
 
         endpoint
-            .establish_flow(
-                outbound,
-                DeliveryMode::ReliableOrdered,
-                reliable,
-                limits(8),
-            )
+            .establish_flow(outbound, DeliveryMode::ReliableOrdered, reliable, limits(8))
             .unwrap();
         assert!(matches!(
             control.prepare_outbound_open(
@@ -1264,7 +1266,9 @@ mod tests {
         );
         assert!(matches!(
             control.receive(&mut endpoint, wrong_side),
-            Err(FlowControlError::FlowId(FlowIdCursorError::WrongSide { .. }))
+            Err(FlowControlError::FlowId(
+                FlowIdCursorError::WrongSide { .. }
+            ))
         ));
 
         let out_of_order = frame(
@@ -1497,9 +1501,8 @@ mod tests {
             .unwrap()
             .encode(),
         );
-        let FlowControlProgress::InboundOpen(request) = control
-            .receive(&mut endpoint, inbound_open)
-            .unwrap()
+        let FlowControlProgress::InboundOpen(request) =
+            control.receive(&mut endpoint, inbound_open).unwrap()
         else {
             panic!("expected pending inbound request");
         };
@@ -1676,7 +1679,10 @@ mod tests {
         };
         assert_eq!(flow.key(), outbound);
         assert_eq!(reason, FlowTerminateReason::ReliableDeliveryFailure);
-        assert_eq!(termination.reason, FlowTerminationReason::ReliableCustodyLost);
+        assert_eq!(
+            termination.reason,
+            FlowTerminationReason::ReliableCustodyLost
+        );
         assert_eq!(termination.pending_messages, 1);
         assert!(termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(outbound), None);
@@ -1819,7 +1825,10 @@ mod tests {
             .unwrap();
         assert_eq!(terminated.reason, FlowTerminateReason::Normal);
         assert_eq!(terminated.frame.frame_type, ControlFrameType::FlowTerminate);
-        assert_eq!(terminated.termination.reason, FlowTerminationReason::Requested);
+        assert_eq!(
+            terminated.termination.reason,
+            FlowTerminationReason::Requested
+        );
         assert_eq!(endpoint.flow_contract(outbound), None);
         assert_eq!(
             control.registry().registered_flow(prepared.flow.flow_id()),
