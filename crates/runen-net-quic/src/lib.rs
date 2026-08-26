@@ -27,6 +27,11 @@ mod endpoint;
 mod flow_control;
 #[allow(
     dead_code,
+    reason = "RN5E5A4D lands crate-private phase-separated flow-control sends before the later RN5E5 lifecycle driver"
+)]
+mod flow_driver;
+#[allow(
+    dead_code,
     reason = "RN5E5A2B lands crate-private admitted ProfileReady lifecycle before later RN5E5 wiring"
 )]
 mod lifecycle;
