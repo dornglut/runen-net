@@ -1,8 +1,38 @@
+use quinn::VarInt;
 use runen_net::delivery::DeliveryMode;
 
 pub(crate) const MAX_VARINT: u64 = (1u64 << 62) - 1;
 const MAX_FLOW_SEQUENCE: u64 = MAX_VARINT >> 1;
 const MAX_CONTROL_BODY_BYTES: usize = 24;
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum ApplicationErrorCode {
+    NoError,
+    ProfileProtocolError,
+    ControlFrameError,
+    ResourceLimitError,
+    NegotiationFailed,
+    FlowProtocolError,
+    ReliableDeliveryFailed,
+}
+
+impl ApplicationErrorCode {
+    const fn wire(self) -> u32 {
+        match self {
+            Self::NoError => 0,
+            Self::ProfileProtocolError => 1,
+            Self::ControlFrameError => 2,
+            Self::ResourceLimitError => 3,
+            Self::NegotiationFailed => 4,
+            Self::FlowProtocolError => 5,
+            Self::ReliableDeliveryFailed => 6,
+        }
+    }
+
+    pub(crate) const fn quinn(self) -> VarInt {
+        VarInt::from_u32(self.wire())
+    }
+}
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) enum VarIntEncodeError {
@@ -489,6 +519,24 @@ fn decode_delivery_mode(value: u64) -> Result<DeliveryMode, ControlBodyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn application_error_codes_match_revision_one_exactly() {
+        let cases = [
+            (ApplicationErrorCode::NoError, 0),
+            (ApplicationErrorCode::ProfileProtocolError, 1),
+            (ApplicationErrorCode::ControlFrameError, 2),
+            (ApplicationErrorCode::ResourceLimitError, 3),
+            (ApplicationErrorCode::NegotiationFailed, 4),
+            (ApplicationErrorCode::FlowProtocolError, 5),
+            (ApplicationErrorCode::ReliableDeliveryFailed, 6),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(code.wire(), expected);
+            assert_eq!(code.quinn().into_inner(), u64::from(expected));
+        }
+    }
 
     #[test]
     fn varint_boundaries_are_minimal_and_round_trip() {
