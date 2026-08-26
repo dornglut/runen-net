@@ -2,7 +2,10 @@ use std::{
     io,
     net::{SocketAddr, UdpSocket},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -74,11 +77,60 @@ pub(super) struct ValidatedEndpointResources {
     max_idle_timeout: IdleTimeout,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(super) enum ConnectionAdmissionError {
+    AtCapacity,
+}
+
+#[derive(Debug)]
+struct ConnectionSlots {
+    max: NonZeroUsize,
+    active: AtomicUsize,
+}
+
+impl ConnectionSlots {
+    const fn new(max: NonZeroUsize) -> Self {
+        Self {
+            max,
+            active: AtomicUsize::new(0),
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Result<ConnectionSlotPermit, ConnectionAdmissionError> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.max.get()).then_some(active + 1)
+            })
+            .map_err(|_| ConnectionAdmissionError::AtCapacity)?;
+        Ok(ConnectionSlotPermit {
+            slots: Arc::clone(self),
+        })
+    }
+
+    #[cfg(test)]
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ConnectionSlotPermit {
+    slots: Arc<ConnectionSlots>,
+}
+
+impl Drop for ConnectionSlotPermit {
+    fn drop(&mut self) {
+        let previous = self.slots.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct ConfiguredEndpoint {
     endpoint: Endpoint,
     resources: ValidatedEndpointResources,
     side: WireSide,
+    connection_slots: Arc<ConnectionSlots>,
 }
 
 impl ConfiguredEndpoint {
@@ -92,6 +144,12 @@ impl ConfiguredEndpoint {
 
     pub(super) const fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    pub(super) fn try_acquire_connection_slot(
+        &self,
+    ) -> Result<ConnectionSlotPermit, ConnectionAdmissionError> {
+        self.connection_slots.try_acquire()
     }
 }
 
@@ -271,6 +329,7 @@ pub(super) fn bind_client_endpoint(
         endpoint,
         resources,
         side: WireSide::Client,
+        connection_slots: Arc::new(ConnectionSlots::new(resources.max_connections())),
     })
 }
 
@@ -297,6 +356,7 @@ pub(super) fn bind_server_endpoint(
         endpoint,
         resources,
         side: WireSide::Server,
+        connection_slots: Arc::new(ConnectionSlots::new(resources.max_connections())),
     })
 }
 
@@ -406,6 +466,8 @@ fn apply_server_profile(config: &mut rustls::ServerConfig) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Condvar, Mutex, mpsc};
+
     use quinn::rustls::{
         pki_types::{Der, TrustAnchor},
         server::ResolvesServerCertUsingSni,
@@ -546,6 +608,100 @@ mod tests {
             input.validate(),
             Err(EndpointResourceError::ZeroIdleTimeout)
         );
+    }
+
+    #[test]
+    fn connection_admission_is_finite_and_raii_released() {
+        let slots = Arc::new(ConnectionSlots::new(NonZeroUsize::new(3).unwrap()));
+        let first = slots.try_acquire().unwrap();
+        let second = slots.try_acquire().unwrap();
+        let third = slots.try_acquire().unwrap();
+        assert_eq!(slots.active(), 3);
+        assert!(matches!(
+            slots.try_acquire(),
+            Err(ConnectionAdmissionError::AtCapacity)
+        ));
+        assert_eq!(slots.active(), 3);
+
+        drop(second);
+        assert_eq!(slots.active(), 2);
+        let replacement = slots.try_acquire().unwrap();
+        assert_eq!(slots.active(), 3);
+
+        drop(first);
+        drop(replacement);
+        assert_eq!(slots.active(), 1);
+        drop(third);
+        assert_eq!(slots.active(), 0);
+    }
+
+    #[test]
+    fn connection_admission_is_atomic_under_overlapping_callers() {
+        const CAPACITY: usize = 4;
+        const CALLERS: usize = 16;
+
+        let slots = Arc::new(ConnectionSlots::new(NonZeroUsize::new(CAPACITY).unwrap()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let (tx, rx) = mpsc::channel();
+        let mut threads = Vec::new();
+
+        for _ in 0..CALLERS {
+            let slots = Arc::clone(&slots);
+            let release = Arc::clone(&release);
+            let tx = tx.clone();
+            threads.push(std::thread::spawn(move || match slots.try_acquire() {
+                Ok(permit) => {
+                    tx.send(true).unwrap();
+                    let (released, wake) = &*release;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                    drop(permit);
+                }
+                Err(ConnectionAdmissionError::AtCapacity) => tx.send(false).unwrap(),
+            }));
+        }
+        drop(tx);
+
+        let mut accepted = 0usize;
+        for _ in 0..CALLERS {
+            if rx.recv().unwrap() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(slots.active(), accepted);
+
+        let (released, wake) = &*release;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+
+        assert_eq!(accepted, CAPACITY);
+        assert_eq!(slots.active(), 0);
+    }
+
+    #[test]
+    fn connection_admission_owners_are_independent() {
+        let first = Arc::new(ConnectionSlots::new(NonZeroUsize::new(1).unwrap()));
+        let second = Arc::new(ConnectionSlots::new(NonZeroUsize::new(1).unwrap()));
+
+        let first_permit = first.try_acquire().unwrap();
+        assert!(matches!(
+            first.try_acquire(),
+            Err(ConnectionAdmissionError::AtCapacity)
+        ));
+        let second_permit = second.try_acquire().unwrap();
+        assert_eq!(first.active(), 1);
+        assert_eq!(second.active(), 1);
+
+        drop(first_permit);
+        assert_eq!(first.active(), 0);
+        assert_eq!(second.active(), 1);
+        drop(second_permit);
+        assert_eq!(second.active(), 0);
     }
 
     #[test]
