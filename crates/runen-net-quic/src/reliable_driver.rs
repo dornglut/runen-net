@@ -8,10 +8,14 @@ use std::{
 };
 
 use quinn::{Connection, ConnectionError, RecvStream, SendStream};
-use runen_net::delivery::{DeliveryEndpoint, DeliveryMode, FlowDirection};
+use runen_net::{
+    delivery::{DeliveryEndpoint, DeliveryMode, FlowDirection},
+    protocol::NegotiationManager,
+};
 
 use crate::{
     flow_control::{EstablishedFlow, FlowControl},
+    lifecycle::{ConnectionTeardown, FlowControlDriverParts, FlowControlledConnection},
     quinn_binding::{
         InboundReliable, OutboundReliable, ReceiveError, ReceiveProgress, SendError, SendProgress,
     },
@@ -27,25 +31,6 @@ type AcceptUniFuture =
 struct ReliableReceiveLimits {
     scratch_bytes: NonZeroUsize,
     max_staging_bytes: NonZeroUsize,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct ReliableIoCapacity {
-    max_outbound: NonZeroUsize,
-    max_inbound: NonZeroUsize,
-}
-
-impl ReliableIoCapacity {
-    const fn outbound_at_capacity(self, pending: usize, active: usize) -> bool {
-        match pending.checked_add(active) {
-            Some(total) => total >= self.max_outbound.get(),
-            None => true,
-        }
-    }
-
-    const fn inbound_at_capacity(self, active: usize) -> bool {
-        active >= self.max_inbound.get()
-    }
 }
 
 struct PendingOutboundOpen {
@@ -64,7 +49,7 @@ pub(super) enum ReliableIoStateError {
     WrongDirection,
     RegistryMismatch,
     DuplicateOutboundFlow,
-    OutboundCapacityExceeded,
+    CapacityOverflow,
     InboundAcceptTerminated,
 }
 
@@ -94,7 +79,6 @@ pub(super) enum ActiveReliableProgress {
 
 pub(super) struct ReliableConnectionIo {
     receive: ReliableReceiveLimits,
-    capacity: ReliableIoCapacity,
     accept_uni: Option<AcceptUniFuture>,
     pending_outbound: Vec<PendingOutboundOpen>,
     active_outbound: Vec<ActiveOutbound>,
@@ -109,7 +93,6 @@ impl fmt::Debug for ReliableConnectionIo {
         formatter
             .debug_struct("ReliableConnectionIo")
             .field("receive", &self.receive)
-            .field("capacity", &self.capacity)
             .field("accept_uni_pending", &self.accept_uni.is_some())
             .field("pending_outbound", &self.pending_outbound.len())
             .field("active_outbound", &self.active_outbound.len())
@@ -119,23 +102,17 @@ impl fmt::Debug for ReliableConnectionIo {
 }
 
 impl ReliableConnectionIo {
-    pub(super) fn new(
-        connection: &Connection,
+    fn new(
+        connection: Connection,
         scratch_bytes: NonZeroUsize,
         max_staging_bytes: NonZeroUsize,
-        max_outbound: NonZeroUsize,
-        max_inbound: NonZeroUsize,
     ) -> Self {
         Self {
             receive: ReliableReceiveLimits {
                 scratch_bytes,
                 max_staging_bytes,
             },
-            capacity: ReliableIoCapacity {
-                max_outbound,
-                max_inbound,
-            },
-            accept_uni: Some(accept_uni_owned(connection.clone())),
+            accept_uni: Some(accept_uni_owned(connection)),
             pending_outbound: Vec::new(),
             active_outbound: Vec::new(),
             active_inbound: Vec::new(),
@@ -187,14 +164,6 @@ impl ReliableConnectionIo {
                 ReliableIoStateError::DuplicateOutboundFlow,
             ));
         }
-        if self
-            .capacity
-            .outbound_at_capacity(self.pending_outbound.len(), self.active_outbound.len())
-        {
-            return Err(ReliableIoError::State(
-                ReliableIoStateError::OutboundCapacityExceeded,
-            ));
-        }
 
         let target_active_capacity = self
             .active_outbound
@@ -202,7 +171,7 @@ impl ReliableConnectionIo {
             .checked_add(self.pending_outbound.len())
             .and_then(|value| value.checked_add(1))
             .ok_or(ReliableIoError::State(
-                ReliableIoStateError::OutboundCapacityExceeded,
+                ReliableIoStateError::CapacityOverflow,
             ))?;
         self.active_outbound
             .try_reserve(target_active_capacity - self.active_outbound.len())
@@ -236,8 +205,7 @@ impl ReliableConnectionIo {
                 return Poll::Ready(Ok(OutboundAcquisitionProgress::Cancelled { flow_id }));
             }
 
-            let polled = self.pending_outbound[index].future.as_mut().poll(cx);
-            match polled {
+            match self.pending_outbound[index].future.as_mut().poll(cx) {
                 Poll::Pending => {}
                 Poll::Ready(Err(error)) => {
                     let _ = self.pending_outbound.swap_remove(index);
@@ -269,16 +237,16 @@ impl ReliableConnectionIo {
         cx: &mut Context<'_>,
         connection: &Connection,
     ) -> Poll<Result<(), ReliableIoError>> {
-        if self.capacity.inbound_at_capacity(self.active_inbound.len()) {
-            return Poll::Pending;
-        }
         self.active_inbound
             .try_reserve(1)
             .map_err(ReliableIoError::Allocation)?;
-        let accept_uni = self.accept_uni.as_mut().ok_or(ReliableIoError::State(
-            ReliableIoStateError::InboundAcceptTerminated,
-        ))?;
-        match accept_uni.as_mut().poll(cx) {
+        let polled = {
+            let accept_uni = self.accept_uni.as_mut().ok_or(ReliableIoError::State(
+                ReliableIoStateError::InboundAcceptTerminated,
+            ))?;
+            accept_uni.as_mut().poll(cx)
+        };
+        match polled {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Err(error)) => {
                 self.accept_uni = None;
@@ -312,12 +280,11 @@ impl ReliableConnectionIo {
         for offset in 0..len {
             let index = (start + offset) % len;
             let flow_id = self.active_outbound[index].flow_id;
-            let polled = self.active_outbound[index].binding.poll_step(
+            match self.active_outbound[index].binding.poll_step(
                 cx,
                 endpoint,
                 flow_control.registry_mut(),
-            );
-            match polled {
+            ) {
                 Poll::Pending | Poll::Ready(Ok(SendProgress::Idle)) => {}
                 Poll::Ready(Ok(progress @ SendProgress::Closed)) => {
                     let _ = self.active_outbound.swap_remove(index);
@@ -361,12 +328,11 @@ impl ReliableConnectionIo {
         let start = self.inbound_cursor % len;
         for offset in 0..len {
             let index = (start + offset) % len;
-            let polled = self.active_inbound[index].poll_step(
+            match self.active_inbound[index].poll_step(
                 cx,
                 endpoint,
                 flow_control.registry_mut(),
-            );
-            match polled {
+            ) {
                 Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining)) => {}
                 Poll::Ready(Ok(progress @ ReceiveProgress::Closed)) => {
                     let _ = self.active_inbound.swap_remove(index);
@@ -386,6 +352,60 @@ impl ReliableConnectionIo {
         }
         self.inbound_cursor = (start + 1) % len;
         Poll::Pending
+    }
+}
+
+#[must_use = "reliable flow-controlled connection owns connection-local stream state"]
+#[derive(Debug)]
+pub(super) struct ReliableFlowControlledConnection {
+    flow_controlled: FlowControlledConnection,
+    reliable: ReliableConnectionIo,
+}
+
+#[must_use = "reliable driver parts borrow one connection-local reliable I/O owner"]
+#[derive(Debug)]
+pub(super) struct ReliableFlowDriverParts<'a> {
+    pub(super) flow: FlowControlDriverParts<'a>,
+    pub(super) reliable: &'a mut ReliableConnectionIo,
+}
+
+impl FlowControlledConnection {
+    pub(super) fn into_reliable_io(
+        mut self,
+        scratch_bytes: NonZeroUsize,
+        max_staging_bytes: NonZeroUsize,
+    ) -> ReliableFlowControlledConnection {
+        let connection = {
+            let parts = self.driver_parts();
+            parts.connection.clone()
+        };
+        ReliableFlowControlledConnection {
+            flow_controlled: self,
+            reliable: ReliableConnectionIo::new(connection, scratch_bytes, max_staging_bytes),
+        }
+    }
+}
+
+impl ReliableFlowControlledConnection {
+    pub(super) fn driver_parts(&mut self) -> ReliableFlowDriverParts<'_> {
+        ReliableFlowDriverParts {
+            flow: self.flow_controlled.driver_parts(),
+            reliable: &mut self.reliable,
+        }
+    }
+
+    pub(super) fn teardown(
+        self,
+        manager: &mut NegotiationManager,
+        delivery: &mut DeliveryEndpoint,
+    ) -> ConnectionTeardown {
+        let Self {
+            flow_controlled,
+            reliable,
+        } = self;
+        let teardown = flow_controlled.teardown(manager, delivery);
+        drop(reliable);
+        teardown
     }
 }
 
@@ -432,6 +452,14 @@ mod tests {
         FlowId::new(side, sequence).unwrap()
     }
 
+    fn assert_owned_send<T: Send + 'static>() {}
+
+    #[test]
+    fn acquisition_future_types_are_owned_and_send() {
+        assert_owned_send::<OpenUniFuture>();
+        assert_owned_send::<AcceptUniFuture>();
+    }
+
     #[test]
     fn receive_limits_preserve_exact_staging_authority() {
         let limits = ReliableReceiveLimits {
@@ -440,19 +468,6 @@ mod tests {
         };
         assert_eq!(limits.scratch_bytes, nz(8));
         assert_eq!(limits.max_staging_bytes, nz(64));
-    }
-
-    #[test]
-    fn capacity_is_directional_and_finite() {
-        let capacity = ReliableIoCapacity {
-            max_outbound: nz(2),
-            max_inbound: nz(1),
-        };
-        assert!(!capacity.outbound_at_capacity(0, 0));
-        assert!(!capacity.outbound_at_capacity(1, 0));
-        assert!(capacity.outbound_at_capacity(1, 1));
-        assert!(!capacity.inbound_at_capacity(0));
-        assert!(capacity.inbound_at_capacity(1));
     }
 
     #[test]
