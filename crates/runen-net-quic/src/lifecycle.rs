@@ -1,14 +1,11 @@
 use std::net::SocketAddr;
 
-use quinn::{
-    ConnectError, Connection, ConnectionError, ReadError, ReadExactError, WriteError,
-};
+use quinn::{ConnectError, Connection, ConnectionError, ReadError, ReadExactError, WriteError};
 
 use crate::{
     control::{
-        ControlFrameError, ProfileBootstrapError, ProfileReadyConnection, ProfileReadyParts,
-        ValidatedControlProfile, bootstrap_client_control, bootstrap_server_control,
-        confirm_profile_transport,
+        ControlFrameError, ProfileBootstrapError, ProfileReadyConnection, ValidatedControlProfile,
+        bootstrap_client_control, bootstrap_server_control, confirm_profile_transport,
     },
     endpoint::{
         ConfiguredEndpoint, ConnectionAdmissionError, ConnectionSlotPermit,
@@ -41,25 +38,6 @@ pub(super) enum ProfileConnectionError {
 pub(super) struct AdmittedProfileReadyConnection {
     profile_ready: ProfileReadyConnection,
     connection_permit: ConnectionSlotPermit,
-}
-
-#[derive(Debug)]
-pub(super) struct AdmittedProfileReadyParts {
-    pub(super) profile_ready: ProfileReadyParts,
-    pub(super) connection_permit: ConnectionSlotPermit,
-}
-
-impl AdmittedProfileReadyConnection {
-    pub(super) fn connection(&self) -> &Connection {
-        self.profile_ready.connection()
-    }
-
-    pub(super) fn into_parts(self) -> AdmittedProfileReadyParts {
-        AdmittedProfileReadyParts {
-            profile_ready: self.profile_ready.into_parts(),
-            connection_permit: self.connection_permit,
-        }
-    }
 }
 
 pub(super) async fn connect_profile_ready(
@@ -235,9 +213,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        control::{
-            ControlFrameType, LocalControlLimits, SemanticRole, SettingsError,
-        },
+        control::{ControlFrameType, LocalControlLimits, SemanticRole, SettingsError},
         endpoint::EndpointResourceLimits,
         wire::VarIntDecodeError,
     };
