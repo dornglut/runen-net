@@ -289,6 +289,13 @@ impl ReceivedNegotiationFrame {
             .receive(manager, requirements, self.frame);
         transition_from_progress(self.core, result)
     }
+
+    pub(super) fn abort_cancelled(
+        self,
+        manager: &mut NegotiationManager,
+    ) -> NegotiationLifecycleError {
+        abort_negotiation(self.core, manager, None)
+    }
 }
 
 impl AuthoritySelectionRequired {
