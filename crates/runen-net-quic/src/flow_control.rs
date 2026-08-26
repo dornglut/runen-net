@@ -1730,7 +1730,10 @@ mod tests {
             .unwrap();
         assert_eq!(terminated.reason, FlowTerminateReason::ProtocolFailure);
         assert_eq!(terminated.frame.frame_type, ControlFrameType::FlowTerminate);
-        assert_eq!(terminated.termination.reason, FlowTerminationReason::Requested);
+        assert_eq!(
+            terminated.termination.reason,
+            FlowTerminationReason::Requested
+        );
         assert!(terminated.termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(outbound), None);
     }
@@ -1841,7 +1844,10 @@ mod tests {
             .unwrap();
         assert_eq!(terminated.reason, FlowTerminateReason::Normal);
         assert_eq!(terminated.frame.frame_type, ControlFrameType::FlowTerminate);
-        assert_eq!(terminated.termination.reason, FlowTerminationReason::Requested);
+        assert_eq!(
+            terminated.termination.reason,
+            FlowTerminationReason::Requested
+        );
         assert_eq!(endpoint.flow_contract(outbound), None);
         assert_eq!(
             control.registry().registered_flow(prepared.flow.flow_id()),
