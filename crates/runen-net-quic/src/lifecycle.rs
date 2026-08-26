@@ -680,7 +680,9 @@ fn received_flow_control_close_code(error: &FlowControlError) -> Option<Applicat
         | FlowControlError::WrongResponseSide { .. }
         | FlowControlError::UnknownPendingFlow(_)
         | FlowControlError::UnknownActiveFlow(_)
-        | FlowControlError::ReliableNormalUsesFin(_) => Some(ApplicationErrorCode::FlowProtocolError),
+        | FlowControlError::ReliableNormalUsesFin(_) => {
+            Some(ApplicationErrorCode::FlowProtocolError)
+        }
         FlowControlError::Allocation(_) => Some(ApplicationErrorCode::ResourceLimitError),
         FlowControlError::InboundDecisionPending(_)
         | FlowControlError::CoreState(_)
