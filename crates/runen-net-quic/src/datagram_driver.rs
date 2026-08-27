@@ -101,6 +101,12 @@ impl DatagramConnectionIo {
         flow_control: &FlowControl,
         flow: EstablishedFlow,
     ) -> Result<(), DatagramIoError> {
+        retain_live_outbound(
+            &mut self.outbound,
+            &mut self.outbound_cursor,
+            |flow_id| registered_outbound_unreliable_is_live(flow_control, flow_id),
+        );
+
         let registered =
             flow_control
                 .registry()
@@ -144,7 +150,7 @@ impl DatagramConnectionIo {
             let flow_id = self.outbound[index];
             if !registered_outbound_unreliable_is_live(flow_control, flow_id) {
                 let _ = self.outbound.swap_remove(index);
-                self.outbound_cursor = cursor_after_remove(index, self.outbound.len());
+                self.outbound_cursor = normalize_cursor(index, self.outbound.len());
                 return Ok(Some(DatagramOutboundProgress::Cancelled { flow_id }));
             }
 
@@ -235,13 +241,24 @@ const fn is_outbound_unreliable(direction: FlowDirection, mode: DeliveryMode) ->
     direction == FlowDirection::Outbound && mode != DeliveryMode::ReliableOrdered
 }
 
-const fn cursor_after_remove(index: usize, new_len: usize) -> usize {
-    if new_len == 0 { 0 } else { index % new_len }
+fn retain_live_outbound(
+    outbound: &mut Vec<FlowId>,
+    cursor: &mut usize,
+    mut is_live: impl FnMut(FlowId) -> bool,
+) {
+    outbound.retain(|flow_id| is_live(*flow_id));
+    *cursor = normalize_cursor(*cursor, outbound.len());
+}
+
+const fn normalize_cursor(cursor: usize, len: usize) -> usize {
+    if len == 0 { 0 } else { cursor % len }
 }
 
 #[cfg(test)]
 mod tests {
     use runen_net::{delivery::DeliveryFlowHandle, identity::ConnectionHandle};
+
+    use crate::wire::WireSide;
 
     use super::*;
 
@@ -251,6 +268,10 @@ mod tests {
             direction,
             DeliveryFlowHandle::new(handle),
         )
+    }
+
+    fn flow(sequence: u64) -> FlowId {
+        FlowId::new(WireSide::Client, sequence).unwrap()
     }
 
     fn assert_owned_send<T: Send + 'static>() {}
@@ -340,10 +361,24 @@ mod tests {
     }
 
     #[test]
-    fn cursor_removal_stays_in_bounds() {
-        assert_eq!(cursor_after_remove(0, 0), 0);
-        assert_eq!(cursor_after_remove(0, 1), 0);
-        assert_eq!(cursor_after_remove(2, 2), 0);
-        assert_eq!(cursor_after_remove(1, 2), 1);
+    fn stale_compaction_bounds_tracking_and_normalizes_cursor() {
+        let first = flow(0);
+        let second = flow(1);
+        let third = flow(2);
+        let mut outbound = vec![first, second, third];
+        let mut cursor = 5;
+
+        retain_live_outbound(&mut outbound, &mut cursor, |flow_id| flow_id == second);
+
+        assert_eq!(outbound, vec![second]);
+        assert_eq!(cursor, 0);
+    }
+
+    #[test]
+    fn cursor_normalization_stays_in_bounds() {
+        assert_eq!(normalize_cursor(0, 0), 0);
+        assert_eq!(normalize_cursor(0, 1), 0);
+        assert_eq!(normalize_cursor(2, 2), 0);
+        assert_eq!(normalize_cursor(1, 2), 1);
     }
 }
