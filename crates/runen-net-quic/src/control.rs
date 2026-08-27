@@ -662,6 +662,15 @@ pub(super) struct ControlSender {
 }
 
 impl ControlSender {
+    #[cfg(test)]
+    pub(super) async fn send_raw_bytes_for_test(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), ControlFrameError> {
+        self.send.write_all(bytes).await?;
+        Ok(())
+    }
+
     pub(super) async fn send_frame(
         &mut self,
         frame_type: ControlFrameType,
