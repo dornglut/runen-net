@@ -26,25 +26,9 @@ jobs:
 
           path = Path('crates/runen-net-quic/src/conformance_tests.rs')
           text = path.read_text()
-          marker = '''    send_unreliable_and_expect(
-              &mut first_server,
-              &mut first_client,
-              first_sequenced,
-              b"first-connection-sequenced".to_vec(),
-          )
-          .await;
-          '''
+          marker = '    let buffered_payload = b"first-connection-buffered-custody".to_vec();\n'
           if marker not in text:
-              marker = '''    send_unreliable_and_expect(
-                  &mut first_server,
-                  &mut first_client,
-                  first_sequenced,
-                  b"first-connection-sequenced".to_vec(),
-              )
-              .await;
-              '''
-          if marker not in text:
-              raise SystemExit('first sequenced send anchor not found')
+              raise SystemExit('buffered custody marker not found')
           reliable = '''    send_reliable_and_expect(
               &mut first_client,
               &mut first_server,
@@ -52,6 +36,7 @@ jobs:
               b"first-connection-reliable".to_vec(),
           )
           .await;
+
           '''
           text = text.replace(marker, reliable + marker, 1)
           path.write_text(text)
