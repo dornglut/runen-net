@@ -21,143 +21,21 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path('crates/runen-net-quic/src/conformance_tests.rs')
           text = path.read_text()
-
-          old_call = '''    send_unreliable_and_expect(
-        &mut client_side,
-        &mut server_side,
-        survivor,
-        b"survivor-after-malformed".to_vec(),
-    )
-    .await;
-'''
-          new_call = '''    send_unreliable_and_expect_index(
-        &mut client_side,
-        &mut server_side,
-        survivor,
-        b"survivor-after-malformed".to_vec(),
-        1,
-    )
-    .await;
-'''
+          old_call = '    send_unreliable_and_expect(\n        &mut client_side,\n        &mut server_side,\n        survivor,\n        b"survivor-after-malformed".to_vec(),\n    )\n    .await;'
+          new_call = '    send_unreliable_and_expect_index(\n        &mut client_side,\n        &mut server_side,\n        survivor,\n        b"survivor-after-malformed".to_vec(),\n        1,\n    )\n    .await;'
           if old_call not in text:
               raise SystemExit('A5U post-failure survivor call anchor not found')
           text = text.replace(old_call, new_call, 1)
-
-          old_send = '''async fn send_unreliable_and_expect(
-    sender: &mut LiveSide,
-    receiver: &mut LiveSide,
-    flow: LiveFlow,
-    payload: Vec<u8>,
-) {
-    assert!(matches!(
-        sender
-            .driver
-            .submit_unreliable(&mut sender.host.delivery, flow.flow_id, payload.clone(),),
-        Ok(DatagramSubmitOutcome::Submitted(
-            DatagramSubmissionOutcome::Accepted {
-                accepted_index: 0,
-                local_pressure_drops: 0,
-            }
-        ))
-    ));
-    drive_until_exposed(sender, receiver, flow.inbound, &payload).await;
-}
-'''
-          new_send = '''async fn send_unreliable_and_expect(
-    sender: &mut LiveSide,
-    receiver: &mut LiveSide,
-    flow: LiveFlow,
-    payload: Vec<u8>,
-) {
-    send_unreliable_and_expect_index(sender, receiver, flow, payload, 0).await;
-}
-
-async fn send_unreliable_and_expect_index(
-    sender: &mut LiveSide,
-    receiver: &mut LiveSide,
-    flow: LiveFlow,
-    payload: Vec<u8>,
-    expected_index: u64,
-) {
-    assert!(matches!(
-        sender
-            .driver
-            .submit_unreliable(&mut sender.host.delivery, flow.flow_id, payload.clone(),),
-        Ok(DatagramSubmitOutcome::Submitted(
-            DatagramSubmissionOutcome::Accepted {
-                accepted_index,
-                local_pressure_drops: 0,
-            }
-        )) if accepted_index == expected_index
-    ));
-    drive_until_exposed_index(sender, receiver, flow.inbound, &payload, expected_index).await;
-}
-'''
-          if old_send not in text:
-              raise SystemExit('unreliable helper anchor not found')
-          text = text.replace(old_send, new_send, 1)
-
-          old_expose = '''async fn drive_until_exposed(
-    sender: &mut LiveSide,
-    receiver: &mut LiveSide,
-    inbound: DeliveryFlowKey,
-    expected: &[u8],
-) {
-    loop {
-        if let Some(message) = receiver.host.delivery.poll_exposure(inbound).unwrap() {
-            assert_eq!(message.accepted_index(), 0);
-            assert_eq!(message.payload(), expected);
-            return;
-        }
-        let (sender_progress, receiver_progress) = next_pair_progress(sender, receiver).await;
-        if let Some(progress) = sender_progress.as_ref() {
-            assert_non_failure_progress(progress);
-        }
-        if let Some(progress) = receiver_progress.as_ref() {
-            assert_non_failure_progress(progress);
-        }
-    }
-}
-'''
-          new_expose = '''async fn drive_until_exposed(
-    sender: &mut LiveSide,
-    receiver: &mut LiveSide,
-    inbound: DeliveryFlowKey,
-    expected: &[u8],
-) {
-    drive_until_exposed_index(sender, receiver, inbound, expected, 0).await;
-}
-
-async fn drive_until_exposed_index(
-    sender: &mut LiveSide,
-    receiver: &mut LiveSide,
-    inbound: DeliveryFlowKey,
-    expected: &[u8],
-    expected_index: u64,
-) {
-    loop {
-        if let Some(message) = receiver.host.delivery.poll_exposure(inbound).unwrap() {
-            assert_eq!(message.accepted_index(), expected_index);
-            assert_eq!(message.payload(), expected);
-            return;
-        }
-        let (sender_progress, receiver_progress) = next_pair_progress(sender, receiver).await;
-        if let Some(progress) = sender_progress.as_ref() {
-            assert_non_failure_progress(progress);
-        }
-        if let Some(progress) = receiver_progress.as_ref() {
-            assert_non_failure_progress(progress);
-        }
-    }
-}
-'''
-          if old_expose not in text:
-              raise SystemExit('exposure helper anchor not found')
-          text = text.replace(old_expose, new_expose, 1)
-
+          send_start = text.index('async fn send_unreliable_and_expect(')
+          send_end = text.index('async fn drive_until_buffered_without_exposure(', send_start)
+          new_send = 'async fn send_unreliable_and_expect(\n    sender: &mut LiveSide,\n    receiver: &mut LiveSide,\n    flow: LiveFlow,\n    payload: Vec<u8>,\n) {\n    send_unreliable_and_expect_index(sender, receiver, flow, payload, 0).await;\n}\n\nasync fn send_unreliable_and_expect_index(\n    sender: &mut LiveSide,\n    receiver: &mut LiveSide,\n    flow: LiveFlow,\n    payload: Vec<u8>,\n    expected_index: u64,\n) {\n    assert!(matches!(\n        sender\n            .driver\n            .submit_unreliable(&mut sender.host.delivery, flow.flow_id, payload.clone(),),\n        Ok(DatagramSubmitOutcome::Submitted(\n            DatagramSubmissionOutcome::Accepted {\n                accepted_index,\n                local_pressure_drops: 0,\n            }\n        )) if accepted_index == expected_index\n    ));\n    drive_until_exposed_index(sender, receiver, flow.inbound, &payload, expected_index).await;\n}\n\n'
+          text = text[:send_start] + new_send + text[send_end:]
+          expose_start = text.index('async fn drive_until_exposed(')
+          expose_end = text.index('async fn close_reliable_normally(', expose_start)
+          new_expose = 'async fn drive_until_exposed(\n    sender: &mut LiveSide,\n    receiver: &mut LiveSide,\n    inbound: DeliveryFlowKey,\n    expected: &[u8],\n) {\n    drive_until_exposed_index(sender, receiver, inbound, expected, 0).await;\n}\n\nasync fn drive_until_exposed_index(\n    sender: &mut LiveSide,\n    receiver: &mut LiveSide,\n    inbound: DeliveryFlowKey,\n    expected: &[u8],\n    expected_index: u64,\n) {\n    loop {\n        if let Some(message) = receiver.host.delivery.poll_exposure(inbound).unwrap() {\n            assert_eq!(message.accepted_index(), expected_index);\n            assert_eq!(message.payload(), expected);\n            return;\n        }\n        let (sender_progress, receiver_progress) = next_pair_progress(sender, receiver).await;\n        if let Some(progress) = sender_progress.as_ref() {\n            assert_non_failure_progress(progress);\n        }\n        if let Some(progress) = receiver_progress.as_ref() {\n            assert_non_failure_progress(progress);\n        }\n    }\n}\n\n'
+          text = text[:expose_start] + new_expose + text[expose_end:]
           path.write_text(text)
           PY
           cargo +stable fmt --all
