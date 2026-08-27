@@ -341,6 +341,22 @@ async fn run_known_flow_datagram_isolation_scenario() {
         }
     }
 
+    loop {
+        let (client_progress, server_progress) =
+            next_pair_progress(&mut client_side, &mut server_side).await;
+        if let Some(progress) = server_progress.as_ref() {
+            assert_non_failure_progress(progress);
+        }
+        if let Some(progress) = client_progress {
+            match progress {
+                EstablishedConnectionProgress::DatagramOutbound(
+                    crate::datagram_driver::DatagramOutboundProgress::Cancelled { flow_id },
+                ) if flow_id == target.flow_id => break,
+                other => assert_non_failure_progress(&other),
+            }
+        }
+    }
+
     assert!(
         client_side
             .host
