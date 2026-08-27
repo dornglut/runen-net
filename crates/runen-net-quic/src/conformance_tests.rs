@@ -39,7 +39,7 @@ use crate::{
     datagram::DatagramSubmissionOutcome,
     endpoint::{
         ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,
-        bind_client_endpoint, bind_server_endpoint,
+        bind_client_endpoint, bind_server_endpoint, bind_server_endpoint_without_datagrams,
     },
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
@@ -123,6 +123,100 @@ fn live_settings_role_mismatch_rejects_profile_and_releases_admission() {
             .await
             .expect("live SETTINGS role-mismatch conformance scenario timed out");
     });
+}
+
+#[test]
+fn live_missing_datagram_rejects_profile_and_releases_admission() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_missing_datagram_scenario())
+            .await
+            .expect("live missing-DATAGRAM conformance scenario timed out");
+    });
+}
+
+async fn run_missing_datagram_scenario() {
+    let resources = resources_with_max_connections(1);
+    let (certificate, private_key, roots) = ephemeral_identity();
+    let client = bind_client_endpoint(loopback_ephemeral(), resources, roots).unwrap();
+    let no_datagram_server = bind_server_endpoint_without_datagrams(
+        loopback_ephemeral(),
+        resources,
+        vec![certificate.clone()],
+        private_key.clone_key(),
+    )
+    .unwrap();
+    let no_datagram_address = no_datagram_server.local_addr().unwrap();
+
+    let negative_peer = async {
+        let incoming = no_datagram_server
+            .accept()
+            .await
+            .expect("negative DATAGRAM endpoint closed before handshake");
+        let connecting = incoming
+            .accept()
+            .expect("negative DATAGRAM peer rejected compatible QUIC handshake");
+        let connection = connecting
+            .await
+            .expect("negative DATAGRAM peer failed compatible runennet/1 handshake");
+        assert!(
+            connection.accept_bi().await.is_err(),
+            "production client opened the RunenNet control stream before DATAGRAM confirmation"
+        );
+    };
+    let (client_failure, ()) = join2(
+        connect_profile_ready(
+            &client,
+            no_datagram_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        negative_peer,
+    )
+    .await;
+    assert!(matches!(
+        client_failure,
+        Err(ProfileConnectionError::Bootstrap(
+            ProfileBootstrapError::DatagramUnsupported
+        ))
+    ));
+
+    no_datagram_server.close(VarInt::from_u32(0), b"negative DATAGRAM test complete");
+    no_datagram_server.wait_idle().await;
+
+    let server = bind_server_endpoint(
+        loopback_ephemeral(),
+        resources,
+        vec![certificate],
+        private_key,
+    )
+    .unwrap();
+    let server_address = server.endpoint().local_addr().unwrap();
+    let (client_ready, server_ready) = join2(
+        connect_profile_ready(
+            &client,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        accept_profile_ready(&server, profile(resources, SemanticRole::NonAuthority)),
+    )
+    .await;
+    let client_ready =
+        client_ready.expect("capacity-1 client permit leaked after DATAGRAM rejection");
+    let server_ready = server_ready
+        .expect("conforming retry server failed after DATAGRAM rejection")
+        .expect("conforming retry server endpoint closed unexpectedly");
+
+    drop(client_ready);
+    drop(server_ready);
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"missing-DATAGRAM test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"missing-DATAGRAM test complete");
+    join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
 }
 
 async fn run_role_mismatch_scenario() {

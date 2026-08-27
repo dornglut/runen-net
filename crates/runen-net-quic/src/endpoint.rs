@@ -360,6 +360,29 @@ pub(super) fn bind_server_endpoint(
     })
 }
 
+#[cfg(test)]
+pub(super) fn bind_server_endpoint_without_datagrams(
+    bind_addr: SocketAddr,
+    resources: ValidatedEndpointResources,
+    certificate_chain: Vec<CertificateDer<'static>>,
+    private_key: PrivateKeyDer<'static>,
+) -> Result<Endpoint, EndpointBuildError> {
+    let tls = build_server_tls(certificate_chain, private_key)?;
+    let crypto =
+        QuicServerConfig::try_from(tls).map_err(EndpointBuildError::MissingInitialCipherSuite)?;
+    let mut server_config = ServerConfig::with_crypto(Arc::new(crypto));
+    let mut transport = build_transport_config(WireSide::Server, resources);
+    transport.datagram_receive_buffer_size(None);
+    server_config.transport_config(Arc::new(transport));
+    let socket = bind_udp_socket(bind_addr)?;
+    Ok(Endpoint::new(
+        build_endpoint_config(resources)?,
+        Some(server_config),
+        socket,
+        Arc::new(TokioRuntime),
+    )?)
+}
+
 fn bind_udp_socket(bind_addr: SocketAddr) -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind(bind_addr)?;
     socket.set_nonblocking(true)?;
