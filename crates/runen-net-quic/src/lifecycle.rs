@@ -4,16 +4,13 @@ use quinn::{ConnectError, Connection, ConnectionError, ReadError, ReadExactError
 use runen_net::{
     delivery::{DeliveryEndpoint, FlowTermination},
     identity::ConnectionHandle,
-    protocol::{
-        CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerError,
-        NegotiationRequirements, NegotiationStatus,
-    },
+    protocol::NegotiationManager,
 };
 
 use crate::{
     control::{
-        ControlFrame, ControlFrameError, ControlFrameType, ControlReceiver, ControlSender,
-        ProfileBootstrapError, ProfileReadyConnection, ProfileReadyParts, ValidatedControlProfile,
+        ControlFrameError, ControlReceiver, ControlSender, ProfileBootstrapError,
+        ProfileReadyConnection, ProfileReadyParts, ValidatedControlProfile,
         bootstrap_client_control, bootstrap_server_control, confirm_profile_transport,
     },
     endpoint::{
@@ -21,10 +18,7 @@ use crate::{
         ValidatedEndpointResources,
     },
     flow_control::{FlowControl, FlowControlConfigError, FlowControlError},
-    negotiation::{
-        NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress,
-        NegotiationProtocolError,
-    },
+    negotiation::{NegotiationControlError, NegotiationExchange},
     wire::{ApplicationErrorCode, WireSide},
 };
 
@@ -57,52 +51,30 @@ pub(super) struct AdmittedProfileReadyConnection {
     connection_permit: ConnectionSlotPermit,
 }
 
+impl AdmittedProfileReadyConnection {
+    pub(super) fn into_parts(self) -> (ProfileReadyConnection, ConnectionSlotPermit) {
+        (self.profile_ready, self.connection_permit)
+    }
+}
+
 #[derive(Debug)]
-struct NegotiationCore {
+struct ConnectionCore {
     connection: ConnectionHandle,
     profile: ProfileReadyParts,
     connection_permit: ConnectionSlotPermit,
     exchange: NegotiationExchange,
 }
 
-#[must_use = "negotiation state must be progressed or synchronously aborted"]
-#[derive(Debug)]
-pub(super) struct NegotiatingConnection {
-    core: NegotiationCore,
-    received: Option<ControlFrame>,
-}
-
-#[must_use = "received negotiation control must be synchronously processed or aborted"]
-#[derive(Debug)]
-pub(super) struct ReceivedNegotiationFrame {
-    core: NegotiationCore,
-    frame: ControlFrame,
-}
-
-#[must_use = "authority selection state must be selected or synchronously aborted"]
-#[derive(Debug)]
-pub(super) struct AuthoritySelectionRequired {
-    core: NegotiationCore,
-}
-
-#[must_use = "pending negotiation control must be sent and completed or synchronously aborted"]
-#[derive(Debug)]
-pub(super) struct PendingNegotiationSend {
-    core: NegotiationCore,
-    pending: PendingControlSend,
-    disposition: PendingSendDisposition,
-}
-
 #[must_use = "established negotiation state owns connection-scoped Core negotiation state"]
 #[derive(Debug)]
 pub(super) struct EstablishedNegotiatedConnection {
-    core: NegotiationCore,
+    core: ConnectionCore,
 }
 
 #[must_use = "flow-controlled connection owns the sole delivery-flow control state"]
 #[derive(Debug)]
 pub(super) struct FlowControlledConnection {
-    core: NegotiationCore,
+    core: ConnectionCore,
     flow_control: FlowControl,
 }
 
@@ -147,98 +119,7 @@ pub(super) struct ConnectionTeardown {
     pub(super) negotiation_cleanup_error: Option<NegotiationControlError>,
 }
 
-#[derive(Debug)]
-pub(super) enum NegotiationTransition {
-    Negotiating(NegotiatingConnection),
-    AuthoritySelection(AuthoritySelectionRequired),
-    PendingSend(PendingNegotiationSend),
-    Established(EstablishedNegotiatedConnection),
-}
-
-#[derive(Debug)]
-pub(super) enum NegotiationSendCompletion {
-    Negotiating(NegotiatingConnection),
-    Established(EstablishedNegotiatedConnection),
-    LocalFailure(NegotiationOutcome),
-}
-
-#[derive(Debug)]
-pub(super) enum NegotiationLifecycleError {
-    LocalFailure {
-        outcome: NegotiationOutcome,
-        report_error: Option<ProfileBootstrapError>,
-        cleanup_error: Option<NegotiationControlError>,
-    },
-    RemoteFailure(NegotiationOutcome),
-    ProfileProtocol(NegotiationProtocolError),
-    ManagerState(NegotiationManagerError),
-    UnexpectedCoreStatus(NegotiationStatus),
-    IoAbort {
-        error: Option<ProfileBootstrapError>,
-        cleanup_error: Option<NegotiationControlError>,
-    },
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(super) enum NegotiationReceiveStateError {
-    FrameAlreadyReceived,
-}
-
-#[derive(Debug)]
-pub(super) enum NegotiationReceiveError {
-    State(NegotiationReceiveStateError),
-    Control(ProfileBootstrapError),
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub(super) enum NegotiationSendStateError {
-    FrameAlreadyConsumed,
-}
-
-#[derive(Debug)]
-pub(super) enum NegotiationPendingSendError {
-    State(NegotiationSendStateError),
-    Control(ProfileBootstrapError),
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum PendingSendDisposition {
-    Continue,
-    Establish,
-    TerminalLocalFailure(NegotiationOutcome),
-}
-
-#[derive(Debug)]
-struct PendingControlSend {
-    frame: Option<ControlFrame>,
-    sent: bool,
-}
-
-impl PendingControlSend {
-    fn new(frame: ControlFrame) -> Self {
-        Self {
-            frame: Some(frame),
-            sent: false,
-        }
-    }
-
-    fn take(&mut self) -> Result<ControlFrame, NegotiationSendStateError> {
-        self.frame
-            .take()
-            .ok_or(NegotiationSendStateError::FrameAlreadyConsumed)
-    }
-
-    fn mark_sent(&mut self) {
-        debug_assert!(!self.sent);
-        self.sent = true;
-    }
-
-    const fn is_complete(&self) -> bool {
-        self.sent
-    }
-}
-
-impl NegotiationCore {
+impl ConnectionCore {
     fn teardown(
         self,
         manager: &mut NegotiationManager,
@@ -282,6 +163,51 @@ impl NegotiationCore {
     }
 }
 
+impl EstablishedNegotiatedConnection {
+    pub(super) fn from_parts(
+        connection: ConnectionHandle,
+        profile: ProfileReadyParts,
+        connection_permit: ConnectionSlotPermit,
+        exchange: NegotiationExchange,
+    ) -> Self {
+        Self {
+            core: ConnectionCore {
+                connection,
+                profile,
+                connection_permit,
+                exchange,
+            },
+        }
+    }
+
+    pub(super) fn into_flow_control(
+        self,
+    ) -> Result<FlowControlledConnection, FlowControlActivationError> {
+        let flow_control =
+            match FlowControl::from_profile_parts(self.core.connection, &self.core.profile) {
+                Ok(flow_control) => flow_control,
+                Err(error) => {
+                    return Err(FlowControlActivationError {
+                        error,
+                        established: Box::new(self),
+                    });
+                }
+            };
+        Ok(FlowControlledConnection {
+            core: self.core,
+            flow_control,
+        })
+    }
+
+    pub(super) fn teardown(
+        self,
+        manager: &mut NegotiationManager,
+        delivery: &mut DeliveryEndpoint,
+    ) -> ConnectionTeardown {
+        self.core.teardown(manager, delivery)
+    }
+}
+
 impl EstablishedTeardown {
     pub(super) fn teardown(
         self,
@@ -311,283 +237,6 @@ impl EstablishedIoParts {
             teardown,
         } = self;
         teardown.teardown(manager, delivery)
-    }
-}
-
-fn teardown_connection(
-    connection: ConnectionHandle,
-    mut exchange: NegotiationExchange,
-    manager: &mut NegotiationManager,
-    delivery: &mut DeliveryEndpoint,
-) -> ConnectionTeardown {
-    let flow_terminations = delivery.terminate_connection(connection);
-    let negotiation_cleanup_error = exchange.abort(manager).err();
-    ConnectionTeardown {
-        connection,
-        flow_terminations,
-        negotiation_cleanup_error,
-    }
-}
-
-pub(super) fn begin_negotiation(
-    admitted: AdmittedProfileReadyConnection,
-    connection: ConnectionHandle,
-    manager: &mut NegotiationManager,
-    offer: CompatibilityOffer,
-) -> Result<PendingNegotiationSend, NegotiationLifecycleError> {
-    let AdmittedProfileReadyConnection {
-        profile_ready,
-        connection_permit,
-    } = admitted;
-    let mut exchange = NegotiationExchange::from_profile(connection, &profile_ready);
-    let profile = profile_ready.into_parts();
-    let frame = match exchange.prepare_offer(manager, offer) {
-        Ok(frame) => frame,
-        Err(NegotiationControlError::LocalFailure { outcome, report }) => {
-            let core = NegotiationCore {
-                connection,
-                profile,
-                connection_permit,
-                exchange,
-            };
-            return pending_local_failure(core, outcome, report);
-        }
-        Err(error) => {
-            let core = NegotiationCore {
-                connection,
-                profile,
-                connection_permit,
-                exchange,
-            };
-            return Err(terminal_negotiation_error(core, error));
-        }
-    };
-
-    Ok(PendingNegotiationSend::new(
-        NegotiationCore {
-            connection,
-            profile,
-            connection_permit,
-            exchange,
-        },
-        frame,
-        PendingSendDisposition::Continue,
-    ))
-}
-
-impl NegotiatingConnection {
-    pub(super) async fn receive(&mut self) -> Result<(), NegotiationReceiveError> {
-        if self.received.is_some() {
-            return Err(NegotiationReceiveError::State(
-                NegotiationReceiveStateError::FrameAlreadyReceived,
-            ));
-        }
-        let frame = self
-            .core
-            .profile
-            .receiver
-            .receive_frame()
-            .await
-            .map_err(NegotiationReceiveError::Control)?;
-        self.received = Some(frame);
-        Ok(())
-    }
-
-    pub(super) fn into_received(mut self) -> Result<ReceivedNegotiationFrame, Box<Self>> {
-        let Some(frame) = self.received.take() else {
-            return Err(Box::new(self));
-        };
-        Ok(ReceivedNegotiationFrame {
-            core: self.core,
-            frame,
-        })
-    }
-
-    pub(super) fn abort_after_control_error(
-        self,
-        manager: &mut NegotiationManager,
-        error: ProfileBootstrapError,
-    ) -> NegotiationLifecycleError {
-        abort_negotiation(self.core, manager, Some(error))
-    }
-
-    pub(super) fn abort_cancelled(
-        self,
-        manager: &mut NegotiationManager,
-    ) -> NegotiationLifecycleError {
-        abort_negotiation(self.core, manager, None)
-    }
-}
-
-impl ReceivedNegotiationFrame {
-    pub(super) fn process(
-        mut self,
-        manager: &mut NegotiationManager,
-        requirements: &NegotiationRequirements,
-    ) -> Result<NegotiationTransition, NegotiationLifecycleError> {
-        let result = self
-            .core
-            .exchange
-            .receive(manager, requirements, self.frame);
-        transition_from_progress(self.core, result)
-    }
-
-    pub(super) fn abort_cancelled(
-        self,
-        manager: &mut NegotiationManager,
-    ) -> NegotiationLifecycleError {
-        abort_negotiation(self.core, manager, None)
-    }
-}
-
-impl AuthoritySelectionRequired {
-    pub(super) const fn connection(&self) -> ConnectionHandle {
-        self.core.connection
-    }
-
-    pub(super) fn select(
-        mut self,
-        manager: &mut NegotiationManager,
-        contract: NegotiatedContract,
-        requirements: &NegotiationRequirements,
-    ) -> Result<PendingNegotiationSend, NegotiationLifecycleError> {
-        match self
-            .core
-            .exchange
-            .propose_authority(manager, contract, requirements)
-        {
-            Ok(frame) => Ok(PendingNegotiationSend::new(
-                self.core,
-                frame,
-                PendingSendDisposition::Continue,
-            )),
-            Err(NegotiationControlError::LocalFailure { outcome, report }) => {
-                pending_local_failure(self.core, outcome, report)
-            }
-            Err(error) => Err(terminal_negotiation_error(self.core, error)),
-        }
-    }
-
-    pub(super) fn abort_cancelled(
-        self,
-        manager: &mut NegotiationManager,
-    ) -> NegotiationLifecycleError {
-        abort_negotiation(self.core, manager, None)
-    }
-}
-
-impl PendingNegotiationSend {
-    fn new(
-        core: NegotiationCore,
-        frame: ControlFrame,
-        disposition: PendingSendDisposition,
-    ) -> Self {
-        Self {
-            core,
-            pending: PendingControlSend::new(frame),
-            disposition,
-        }
-    }
-
-    pub(super) async fn send(&mut self) -> Result<(), NegotiationPendingSendError> {
-        let frame = self
-            .pending
-            .take()
-            .map_err(NegotiationPendingSendError::State)?;
-        self.core
-            .profile
-            .sender
-            .send_frame(frame.frame_type, &frame.body)
-            .await
-            .map_err(NegotiationPendingSendError::Control)?;
-        self.pending.mark_sent();
-        Ok(())
-    }
-
-    pub(super) fn complete(self) -> Result<NegotiationSendCompletion, Box<Self>> {
-        if !self.pending.is_complete() {
-            return Err(Box::new(self));
-        }
-        let Self {
-            core, disposition, ..
-        } = self;
-        match disposition {
-            PendingSendDisposition::Continue => Ok(NegotiationSendCompletion::Negotiating(
-                NegotiatingConnection {
-                    core,
-                    received: None,
-                },
-            )),
-            PendingSendDisposition::Establish => Ok(NegotiationSendCompletion::Established(
-                EstablishedNegotiatedConnection { core },
-            )),
-            PendingSendDisposition::TerminalLocalFailure(outcome) => {
-                close_negotiation_failed(&core.profile.connection);
-                Ok(NegotiationSendCompletion::LocalFailure(outcome))
-            }
-        }
-    }
-
-    pub(super) fn abort_after_control_error(
-        mut self,
-        manager: &mut NegotiationManager,
-        error: ProfileBootstrapError,
-    ) -> NegotiationLifecycleError {
-        if let PendingSendDisposition::TerminalLocalFailure(outcome) = self.disposition {
-            let cleanup_error = self.core.exchange.abort(manager).err();
-            close_negotiation_failed(&self.core.profile.connection);
-            return NegotiationLifecycleError::LocalFailure {
-                outcome,
-                report_error: Some(error),
-                cleanup_error,
-            };
-        }
-        abort_negotiation(self.core, manager, Some(error))
-    }
-
-    pub(super) fn abort_cancelled(
-        mut self,
-        manager: &mut NegotiationManager,
-    ) -> NegotiationLifecycleError {
-        if let PendingSendDisposition::TerminalLocalFailure(outcome) = self.disposition {
-            let cleanup_error = self.core.exchange.abort(manager).err();
-            close_negotiation_failed(&self.core.profile.connection);
-            return NegotiationLifecycleError::LocalFailure {
-                outcome,
-                report_error: None,
-                cleanup_error,
-            };
-        }
-        abort_negotiation(self.core, manager, None)
-    }
-}
-
-impl EstablishedNegotiatedConnection {
-    pub(super) fn into_flow_control(
-        self,
-    ) -> Result<FlowControlledConnection, FlowControlActivationError> {
-        let flow_control =
-            match FlowControl::from_profile_parts(self.core.connection, &self.core.profile) {
-                Ok(flow_control) => flow_control,
-                Err(error) => {
-                    return Err(FlowControlActivationError {
-                        error,
-                        established: Box::new(self),
-                    });
-                }
-            };
-        Ok(FlowControlledConnection {
-            core: self.core,
-            flow_control,
-        })
-    }
-
-    pub(super) fn teardown(
-        self,
-        manager: &mut NegotiationManager,
-        delivery: &mut DeliveryEndpoint,
-    ) -> ConnectionTeardown {
-        self.core.teardown(manager, delivery)
     }
 }
 
@@ -621,119 +270,31 @@ impl FlowControlledConnection {
     }
 }
 
-fn transition_from_progress(
-    core: NegotiationCore,
-    result: Result<NegotiationProgress, NegotiationControlError>,
-) -> Result<NegotiationTransition, NegotiationLifecycleError> {
-    match result {
-        Ok(NegotiationProgress::Waiting) => {
-            Ok(NegotiationTransition::Negotiating(NegotiatingConnection {
-                core,
-                received: None,
-            }))
-        }
-        Ok(NegotiationProgress::AuthoritySelectionRequired) => Ok(
-            NegotiationTransition::AuthoritySelection(AuthoritySelectionRequired { core }),
-        ),
-        Ok(NegotiationProgress::Send(frame)) => {
-            let disposition = controller_send_disposition(frame.frame_type);
-            Ok(NegotiationTransition::PendingSend(
-                PendingNegotiationSend::new(core, frame, disposition),
-            ))
-        }
-        Ok(NegotiationProgress::Established) => Ok(NegotiationTransition::Established(
-            EstablishedNegotiatedConnection { core },
-        )),
-        Ok(NegotiationProgress::RemoteFailed(outcome)) => {
-            close_negotiation_failed(&core.profile.connection);
-            Err(NegotiationLifecycleError::RemoteFailure(outcome))
-        }
-        Err(NegotiationControlError::LocalFailure { outcome, report }) => {
-            pending_local_failure(core, outcome, report).map(NegotiationTransition::PendingSend)
-        }
-        Err(error) => Err(terminal_negotiation_error(core, error)),
-    }
-}
-
-fn pending_local_failure(
-    core: NegotiationCore,
-    outcome: NegotiationOutcome,
-    report: Option<ControlFrame>,
-) -> Result<PendingNegotiationSend, NegotiationLifecycleError> {
-    match report {
-        Some(frame) => Ok(PendingNegotiationSend::new(
-            core,
-            frame,
-            PendingSendDisposition::TerminalLocalFailure(outcome),
-        )),
-        None => {
-            close_negotiation_failed(&core.profile.connection);
-            Err(NegotiationLifecycleError::LocalFailure {
-                outcome,
-                report_error: None,
-                cleanup_error: None,
-            })
-        }
-    }
-}
-
-fn terminal_negotiation_error(
-    core: NegotiationCore,
-    error: NegotiationControlError,
-) -> NegotiationLifecycleError {
-    match error {
-        NegotiationControlError::LocalFailure { outcome, .. } => {
-            close_negotiation_failed(&core.profile.connection);
-            NegotiationLifecycleError::LocalFailure {
-                outcome,
-                report_error: None,
-                cleanup_error: None,
-            }
-        }
-        NegotiationControlError::ProfileProtocol(error) => {
-            core.profile.connection.close(
-                ApplicationErrorCode::ProfileProtocolError.quinn(),
-                NEGOTIATION_CLOSE_REASON,
-            );
-            NegotiationLifecycleError::ProfileProtocol(error)
-        }
-        NegotiationControlError::ManagerState(error) => {
-            close_negotiation_failed(&core.profile.connection);
-            NegotiationLifecycleError::ManagerState(error)
-        }
-        NegotiationControlError::UnexpectedCoreStatus(status) => {
-            close_negotiation_failed(&core.profile.connection);
-            NegotiationLifecycleError::UnexpectedCoreStatus(status)
-        }
-    }
-}
-
-fn abort_negotiation(
-    mut core: NegotiationCore,
+pub(super) fn teardown_connection(
+    connection: ConnectionHandle,
+    mut exchange: NegotiationExchange,
     manager: &mut NegotiationManager,
-    error: Option<ProfileBootstrapError>,
-) -> NegotiationLifecycleError {
-    match error.as_ref() {
-        Some(error) => close_for_post_profile_control_error(&core.profile.connection, error),
-        None => close_negotiation_failed(&core.profile.connection),
-    }
-    let cleanup_error = core.exchange.abort(manager).err();
-    NegotiationLifecycleError::IoAbort {
-        error,
-        cleanup_error,
+    delivery: &mut DeliveryEndpoint,
+) -> ConnectionTeardown {
+    let flow_terminations = delivery.terminate_connection(connection);
+    let negotiation_cleanup_error = exchange.abort(manager).err();
+    ConnectionTeardown {
+        connection,
+        flow_terminations,
+        negotiation_cleanup_error,
     }
 }
 
-const fn controller_send_disposition(frame_type: ControlFrameType) -> PendingSendDisposition {
-    match frame_type {
-        ControlFrameType::NegotiationEstablished => PendingSendDisposition::Establish,
-        _ => PendingSendDisposition::Continue,
-    }
-}
-
-fn close_negotiation_failed(connection: &Connection) {
+pub(super) fn close_negotiation_failed(connection: &Connection) {
     connection.close(
         ApplicationErrorCode::NegotiationFailed.quinn(),
+        NEGOTIATION_CLOSE_REASON,
+    );
+}
+
+pub(super) fn close_negotiation_protocol_error(connection: &Connection) {
+    connection.close(
+        ApplicationErrorCode::ProfileProtocolError.quinn(),
         NEGOTIATION_CLOSE_REASON,
     );
 }
@@ -1195,52 +756,6 @@ mod tests {
         assert_eq!(
             received_flow_control_close_code(&FlowControlError::InboundDecisionPending(flow_id)),
             None
-        );
-    }
-
-    #[test]
-    fn only_final_negotiation_established_send_has_establish_disposition() {
-        for frame_type in [
-            ControlFrameType::NegotiationOffer,
-            ControlFrameType::NegotiationProposal,
-            ControlFrameType::NegotiationValidated,
-            ControlFrameType::NegotiationFailed,
-        ] {
-            assert_eq!(
-                controller_send_disposition(frame_type),
-                PendingSendDisposition::Continue
-            );
-        }
-        assert_eq!(
-            controller_send_disposition(ControlFrameType::NegotiationEstablished),
-            PendingSendDisposition::Establish
-        );
-    }
-
-    #[test]
-    fn pending_control_send_is_one_shot_and_completes_only_after_success_marker() {
-        let mut pending = PendingControlSend::new(ControlFrame {
-            frame_type: ControlFrameType::NegotiationOffer,
-            body: Vec::new(),
-        });
-        assert!(!pending.is_complete());
-        assert!(pending.take().is_ok());
-        assert_eq!(
-            pending.take().unwrap_err(),
-            NegotiationSendStateError::FrameAlreadyConsumed
-        );
-        assert!(!pending.is_complete());
-        pending.mark_sent();
-        assert!(pending.is_complete());
-    }
-
-    #[test]
-    fn terminal_local_failure_disposition_preserves_exact_outcome() {
-        let disposition =
-            PendingSendDisposition::TerminalLocalFailure(NegotiationOutcome::InvalidSelection);
-        assert_eq!(
-            disposition,
-            PendingSendDisposition::TerminalLocalFailure(NegotiationOutcome::InvalidSelection)
         );
     }
 }
