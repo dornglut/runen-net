@@ -27,7 +27,9 @@ use crate::{
         close_for_post_profile_control_error, close_negotiation_failed,
         close_negotiation_protocol_error, teardown_connection,
     },
-    negotiation::{NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress},
+    negotiation::{
+        NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress,
+    },
     wire::WireSide,
 };
 
@@ -104,7 +106,10 @@ pub enum ConnectionError {
 
 impl fmt::Display for ConnectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "RunenNet connection progression failed: {self:?}")
+        write!(
+            formatter,
+            "RunenNet connection progression failed: {self:?}"
+        )
     }
 }
 
@@ -367,17 +372,27 @@ impl Connection {
         };
 
         let state = match result {
-            Ok(frame) => sending_state(core, sender, receiver, frame, PendingSendDisposition::Continue),
-            Err(NegotiationControlError::LocalFailure { outcome, report: Some(frame) }) => {
-                sending_state(
-                    core,
-                    sender,
-                    receiver,
-                    frame,
-                    PendingSendDisposition::TerminalLocalFailure(outcome),
-                )
-            }
-            Err(NegotiationControlError::LocalFailure { outcome, report: None }) => {
+            Ok(frame) => sending_state(
+                core,
+                sender,
+                receiver,
+                frame,
+                PendingSendDisposition::Continue,
+            ),
+            Err(NegotiationControlError::LocalFailure {
+                outcome,
+                report: Some(frame),
+            }) => sending_state(
+                core,
+                sender,
+                receiver,
+                frame,
+                PendingSendDisposition::TerminalLocalFailure(outcome),
+            ),
+            Err(NegotiationControlError::LocalFailure {
+                outcome,
+                report: None,
+            }) => {
                 close_negotiation_failed(&core.profile.connection);
                 return Err(ConnectionError::LocalNegotiation {
                     outcome: outcome.into(),
@@ -455,7 +470,9 @@ impl Connection {
                             }
                         },
                         Err(error) => {
-                            if let PendingSendDisposition::TerminalLocalFailure(outcome) = disposition {
+                            if let PendingSendDisposition::TerminalLocalFailure(outcome) =
+                                disposition
+                            {
                                 close_negotiation_failed(&core.profile.connection);
                                 self.state = ConnectionState::Failed { core };
                                 return Poll::Ready(Err(ConnectionError::LocalNegotiation {
@@ -537,11 +554,15 @@ impl Connection {
                 }
                 ConnectionState::Failed { core } => {
                     self.state = ConnectionState::Failed { core };
-                    return Poll::Ready(Err(ConnectionError::State(ConnectionStateError::Terminal)));
+                    return Poll::Ready(Err(ConnectionError::State(
+                        ConnectionStateError::Terminal,
+                    )));
                 }
                 ConnectionState::Transitioning => {
                     self.state = ConnectionState::Transitioning;
-                    return Poll::Ready(Err(ConnectionError::State(ConnectionStateError::Terminal)));
+                    return Poll::Ready(Err(ConnectionError::State(
+                        ConnectionStateError::Terminal,
+                    )));
                 }
             }
         }
@@ -557,19 +578,22 @@ impl Connection {
         contract: NegotiatedContract,
     ) -> Result<(), ConnectionError> {
         let state = std::mem::replace(&mut self.state, ConnectionState::Transitioning);
-        let ConnectionState::AuthoritySelection {
-            mut core,
-            sender,
-            receiver,
-        } = state
-        else {
-            let error = if matches!(state, ConnectionState::Failed { .. }) {
-                ConnectionStateError::Terminal
-            } else {
-                ConnectionStateError::AuthoritySelectionNotRequired
-            };
-            self.state = state;
-            return Err(ConnectionError::State(error));
+        let (mut core, sender, receiver) = match state {
+            ConnectionState::AuthoritySelection {
+                core,
+                sender,
+                receiver,
+            } => (core, sender, receiver),
+            ConnectionState::Failed { core } => {
+                self.state = ConnectionState::Failed { core };
+                return Err(ConnectionError::State(ConnectionStateError::Terminal));
+            }
+            state => {
+                self.state = state;
+                return Err(ConnectionError::State(
+                    ConnectionStateError::AuthoritySelectionNotRequired,
+                ));
+            }
         };
 
         let result = core
@@ -677,13 +701,16 @@ fn transition_from_controller(
                 ConnectionEvent::AuthoritySelectionRequired { connection },
             )
         }
-        Ok(NegotiationProgress::Send(frame)) => DriverTransition::State(sending_state(
-            core,
-            sender,
-            receiver,
-            frame,
-            controller_send_disposition(frame.frame_type),
-        )),
+        Ok(NegotiationProgress::Send(frame)) => {
+            let disposition = controller_send_disposition(frame.frame_type);
+            DriverTransition::State(sending_state(
+                core,
+                sender,
+                receiver,
+                frame,
+                disposition,
+            ))
+        }
         Ok(NegotiationProgress::Established) => {
             let connection = core.connection;
             DriverTransition::Event(
@@ -730,7 +757,10 @@ fn transition_from_controller(
     }
 }
 
-fn terminal_controller_error(core: &NegotiationCore, error: NegotiationControlError) -> ConnectionError {
+fn terminal_controller_error(
+    core: &NegotiationCore,
+    error: NegotiationControlError,
+) -> ConnectionError {
     match error {
         NegotiationControlError::LocalFailure { outcome, .. } => {
             close_negotiation_failed(&core.profile.connection);
@@ -781,7 +811,10 @@ fn receiving_state(
     }
 }
 
-fn send_control_owned(mut sender: ControlSender, frame: ControlFrame) -> OwnedNegotiationSendFuture {
+fn send_control_owned(
+    mut sender: ControlSender,
+    frame: ControlFrame,
+) -> OwnedNegotiationSendFuture {
     Box::pin(async move {
         let result = sender.send_frame(frame.frame_type, &frame.body).await;
         NegotiationSendCompletion { sender, result }
