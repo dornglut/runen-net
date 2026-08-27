@@ -20,9 +20,7 @@ use crate::{
     quinn_binding::{ReceiveError, SendError},
     reliable::ReliableFrameError,
     reliable_driver::ReliableFailureContext,
-    wire::{
-        ApplicationErrorCode, FlowId, FlowRejectReason, FlowTerminate, FlowTerminateReason,
-    },
+    wire::{ApplicationErrorCode, FlowId, FlowRejectReason, FlowTerminate, FlowTerminateReason},
 };
 
 pub(super) type OwnedControlReceiveFuture =
@@ -122,12 +120,8 @@ pub(super) enum EstablishedDataFailureDisposition {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum EstablishedDataFailureProgress {
     PendingSend(PendingFlowControlSend),
-    CleanupOnly {
-        flow_id: FlowId,
-    },
-    ConnectionTerminal {
-        code: Option<ApplicationErrorCode>,
-    },
+    CleanupOnly { flow_id: FlowId },
+    ConnectionTerminal { code: Option<ApplicationErrorCode> },
 }
 
 impl PendingFlowControlSend {
@@ -311,11 +305,7 @@ pub(super) fn classify_outbound_reliable_active_failure(
     context: ReliableFailureContext,
     error: &SendError,
 ) -> EstablishedDataFailureDisposition {
-    classify_reliable_active_context(
-        flow_control,
-        context,
-        reliable_send_failure_reason(error),
-    )
+    classify_reliable_active_context(flow_control, context, reliable_send_failure_reason(error))
 }
 
 pub(super) fn classify_inbound_reliable_active_failure(
@@ -526,9 +516,7 @@ const fn known_flow_disposition(
     }
 }
 
-fn classify_unresolved_reliable_receive(
-    error: &ReceiveError,
-) -> EstablishedDataFailureDisposition {
+fn classify_unresolved_reliable_receive(error: &ReceiveError) -> EstablishedDataFailureDisposition {
     let code = match error {
         ReceiveError::Registry(_)
         | ReceiveError::Prefix(_)
@@ -816,11 +804,9 @@ mod tests {
     #[test]
     fn report_only_termination_uses_canonical_wire_encoder_without_core_state() {
         let flow_id = flow(9);
-        let pending = pending_report_only_termination(
-            flow_id,
-            FlowTerminateReason::ReliableDeliveryFailure,
-        )
-        .unwrap();
+        let pending =
+            pending_report_only_termination(flow_id, FlowTerminateReason::ReliableDeliveryFailure)
+                .unwrap();
         assert_eq!(pending.frame.frame_type, ControlFrameType::FlowTerminate);
         assert_eq!(
             FlowTerminate::decode(&pending.frame.body),
@@ -872,20 +858,14 @@ mod tests {
     fn sequence_exhaustion_is_normal_only_for_live_sequenced_flow() {
         let flow_id = flow(11);
         assert_eq!(
-            sequence_exhaustion_disposition(
-                flow_id,
-                Some(DeliveryMode::UnreliableSequenced),
-            ),
+            sequence_exhaustion_disposition(flow_id, Some(DeliveryMode::UnreliableSequenced),),
             EstablishedDataFailureDisposition::TerminateAndReport {
                 flow_id,
                 reason: FlowTerminateReason::Normal,
             }
         );
         assert_eq!(
-            sequence_exhaustion_disposition(
-                flow_id,
-                Some(DeliveryMode::UnreliableUnordered),
-            ),
+            sequence_exhaustion_disposition(flow_id, Some(DeliveryMode::UnreliableUnordered),),
             EstablishedDataFailureDisposition::TerminateAndReport {
                 flow_id,
                 reason: FlowTerminateReason::ProtocolFailure,
