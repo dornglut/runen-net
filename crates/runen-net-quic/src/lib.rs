@@ -5,6 +5,14 @@
 //! boundary for that profile and does not own transport-independent RunenNet
 //! semantics.
 
+mod facade;
+pub use facade::{
+    CertificateDer, ClientEndpoint, ClientTrust, EndpointBindError, EndpointConfig,
+    EndpointResourceError, EndpointResourceLimits, PrivateKeyDer, ProfileBootstrapFailure,
+    ProfileConfig, ProfileConfigError, ProfileConnectionError, ProfileLimits,
+    ProfileReadyConnection, SemanticRole, ServerEndpoint, ServerIdentity, TlsMaterialError,
+};
+
 #[cfg(test)]
 mod conformance_tests;
 #[allow(
