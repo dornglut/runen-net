@@ -23,32 +23,15 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
 
           path = Path('crates/runen-net-quic/src/conformance_tests.rs')
           text = path.read_text()
 
-          old = '''    send_unreliable_and_expect(
-              &mut first_server,
-              &mut first_client,
-              first_sequenced,
-              b"first-connection-sequenced".to_vec(),
-          )
-          .await;
-
-          let first_reliable_flow_id = first_reliable.flow_id;
-          let first_sequenced_flow_id = first_sequenced.flow_id;
-          let client_host = teardown_live_side(first_client, 2);
-          let server_host = teardown_live_side(first_server, 2);
-          '''
-          new = '''    send_unreliable_and_expect(
-              &mut first_server,
-              &mut first_client,
-              first_sequenced,
-              b"first-connection-sequenced".to_vec(),
-          )
-          .await;
-
-          let buffered_payload = b"first-connection-buffered-custody".to_vec();
+          marker = '    let first_reliable_flow_id = first_reliable.flow_id;\n'
+          if marker not in text:
+              raise SystemExit('first lifetime marker not found')
+          custody = '''    let buffered_payload = b"first-connection-buffered-custody".to_vec();
           assert!(matches!(
               first_server.driver.submit_unreliable(
                   &mut first_server.host.delivery,
@@ -75,58 +58,42 @@ jobs:
               buffered_payload.len()
           );
 
-          let first_reliable_flow_id = first_reliable.flow_id;
-          let first_sequenced_flow_id = first_sequenced.flow_id;
-          let client_host = teardown_live_side(first_client, 2, 1);
-          let server_host = teardown_live_side(first_server, 2, 0);
           '''
-          if old not in text:
-              raise SystemExit('replacement first-lifetime anchor not found')
-          text = text.replace(old, new, 1)
+          text = text.replace(marker, custody + marker, 1)
 
-          old = '''    assert_eq!(replacement_client.host.delivery.active_flows(), 0);
-          assert_eq!(replacement_server.host.delivery.active_flows(), 0);
-          '''
-          new = '''    assert_eq!(replacement_client.host.delivery.active_flows(), 0);
-          assert_eq!(replacement_server.host.delivery.active_flows(), 0);
-          assert_eq!(replacement_client.host.delivery.pending_messages(), 0);
-          assert_eq!(replacement_server.host.delivery.pending_messages(), 0);
-          assert_eq!(replacement_client.host.delivery.pending_payload_bytes(), 0);
-          assert_eq!(replacement_server.host.delivery.pending_payload_bytes(), 0);
-          '''
-          if old not in text:
-              raise SystemExit('replacement fresh-host anchor not found')
-          text = text.replace(old, new, 1)
-
-          old = '''    let _client_host = teardown_live_side(replacement_client, 2);
-          let _server_host = teardown_live_side(replacement_server, 2);
-          '''
-          new = '''    let _client_host = teardown_live_side(replacement_client, 2, 0);
-          let _server_host = teardown_live_side(replacement_server, 2, 0);
-          '''
-          if old not in text:
-              raise SystemExit('replacement final teardown anchor not found')
-          text = text.replace(old, new, 1)
-
-          old = '''fn teardown_live_side(mut side: LiveSide, expected_flows: usize) -> HostState {
-              let connection = side.connection;
-              let teardown = side
-                  .driver
-                  .teardown(&mut side.host.negotiation, &mut side.host.delivery);
-              assert_eq!(teardown.connection, connection);
-              assert!(teardown.negotiation_cleanup_error.is_none());
-              assert_eq!(teardown.flow_terminations.len(), expected_flows);
-              assert!(
-                  teardown
-                      .flow_terminations
-                      .iter()
-                      .all(|termination| { termination.reason == FlowTerminationReason::ConnectionEnded })
-              );
-              assert_eq!(side.host.delivery.active_flows(), 0);
-              side.host
+          replacements = {
+              '    let client_host = teardown_live_side(first_client, 2);\n':
+                  '    let client_host = teardown_live_side(first_client, 2, 1);\n',
+              '    let server_host = teardown_live_side(first_server, 2);\n':
+                  '    let server_host = teardown_live_side(first_server, 2, 0);\n',
+              '    let _client_host = teardown_live_side(replacement_client, 2);\n':
+                  '    let _client_host = teardown_live_side(replacement_client, 2, 0);\n',
+              '    let _server_host = teardown_live_side(replacement_server, 2);\n':
+                  '    let _server_host = teardown_live_side(replacement_server, 2, 0);\n',
           }
-          '''
-          new = '''fn teardown_live_side(
+          for old, new in replacements.items():
+              if old not in text:
+                  raise SystemExit(f'missing teardown call: {old.strip()}')
+              text = text.replace(old, new, 1)
+
+          fresh = '    assert_eq!(replacement_server.host.delivery.active_flows(), 0);\n'
+          if fresh not in text:
+              raise SystemExit('fresh replacement marker not found')
+          text = text.replace(
+              fresh,
+              fresh
+              + '    assert_eq!(replacement_client.host.delivery.pending_messages(), 0);\n'
+              + '    assert_eq!(replacement_server.host.delivery.pending_messages(), 0);\n'
+              + '    assert_eq!(replacement_client.host.delivery.pending_payload_bytes(), 0);\n'
+              + '    assert_eq!(replacement_server.host.delivery.pending_payload_bytes(), 0);\n',
+              1,
+          )
+
+          pattern = re.compile(
+              r'fn teardown_live_side\(mut side: LiveSide, expected_flows: usize\) -> HostState \{.*?\n\}\n\n(?=async fn wait_for_connection_terminal_error)',
+              re.S,
+          )
+          replacement = '''fn teardown_live_side(
               mut side: LiveSide,
               expected_flows: usize,
               expected_pending_messages: usize,
@@ -157,19 +124,16 @@ jobs:
               assert_eq!(side.host.delivery.pending_payload_bytes(), 0);
               side.host
           }
-          '''
-          if old not in text:
-              raise SystemExit('teardown helper anchor not found')
-          text = text.replace(old, new, 1)
 
-          anchor = '''async fn drive_until_exposed(
-              sender: &mut LiveSide,
-              receiver: &mut LiveSide,
-              inbound: DeliveryFlowKey,
-              expected: &[u8],
-          ) {
           '''
-          insert = '''async fn drive_until_buffered_without_exposure(
+          text, count = pattern.subn(replacement, text, count=1)
+          if count != 1:
+              raise SystemExit('teardown helper replacement failed')
+
+          anchor = 'async fn drive_until_exposed(\n'
+          if anchor not in text:
+              raise SystemExit('drive helper anchor not found')
+          helper = '''async fn drive_until_buffered_without_exposure(
               sender: &mut LiveSide,
               receiver: &mut LiveSide,
               inbound: DeliveryFlowKey,
@@ -192,9 +156,7 @@ jobs:
           }
 
           '''
-          if anchor not in text:
-              raise SystemExit('drive helper anchor not found')
-          text = text.replace(anchor, insert + anchor, 1)
+          text = text.replace(anchor, helper + anchor, 1)
 
           path.write_text(text)
           PY
