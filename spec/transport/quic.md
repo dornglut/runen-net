@@ -384,7 +384,7 @@ The receiver determines the mode from the already-established FlowId. An unknown
 
 The first accepted message on an `UnreliableSequenced` flow has sequence value zero. Each later accepted message consumes exactly the next integer. Rejected submissions do not consume a value.
 
-Sequence values MUST NOT wrap. After the largest representable QUIC variable-length integer has been consumed, that flow MUST terminate before accepting another message. Sequence state and exhaustion in one delivery flow do not constrain another delivery flow.
+Sequence values MUST NOT wrap. After the largest representable QUIC variable-length integer has been consumed, the sender MUST terminate that flow with `FLOW_TERMINATE(Normal)` before accepting another message. This is the normal finite lifetime boundary of that wire-revision-1 sequenced flow, not a peer protocol failure, resource failure, or reliable-delivery failure. Sequence state and exhaustion in one delivery flow do not constrain another delivery flow.
 
 The receiver applies the stale/duplicate exposure rule owned by the delivery-flow specification to the decoded sequence value.
 
@@ -433,6 +433,27 @@ For an unreliable flow, processing `FLOW_TERMINATE` ends the flow immediately; l
 For a reliable flow, a normal sender close is represented by clean FIN on the persistent stream at a message boundary. `FLOW_TERMINATE` is used when either endpoint must report exceptional termination. A receiver-originated exceptional termination MUST cause the sender to cease writes and terminate/reset the corresponding reliable stream. Stream reset/stop details may use the application error codes below but MUST preserve the observable RunenNet terminal-failure class.
 
 Flow termination never authorizes FlowId reuse.
+
+### Established data-path failure disposition
+
+Once a syntactically valid FlowId has been resolved to one currently active delivery flow, a data-path failure attributable only to that flow SHOULD terminate that flow rather than the profile connection when the control stream remains usable and isolation is unambiguous.
+
+The existing `FLOW_TERMINATE` reasons are used by cause:
+
+- malformed or state-invalid data for that known flow, including use of a transport realization incompatible with its established mode or direction, uses `ProtocolFailure`;
+- a local finite resource or allocation failure that prevents that known flow from continuing uses `ResourceFailure`;
+- inability to preserve a `ReliableOrdered` delivery obligation uses `ReliableDeliveryFailure`;
+- intentional normal close of an unreliable flow uses `Normal`; this includes the `UnreliableSequenced` sequence-domain exhaustion defined above.
+
+Normal sender close of a reliable flow remains clean FIN and MUST NOT use `FLOW_TERMINATE(Normal)`.
+
+When an endpoint exceptionally terminates a known reliable flow, the required stream stop/reset and the connection-scoped `FLOW_TERMINATE` report are two realizations of the same flow termination. If the control stream remains usable, the terminating endpoint MUST report the corresponding `FLOW_TERMINATE` reason. An implementation MUST NOT duplicate semantic/Core flow termination merely because both transport reporting mechanisms are used.
+
+A malformed delivery-data prefix or reliable stream association failure for which no valid currently active FlowId can be identified cannot be isolated safely to one flow. A peer-caused violation in that state terminates the profile connection with `PROFILE_PROTOCOL_ERROR`. This includes malformed/non-minimal FlowId metadata, 0-RTT delivery data, and unknown, wrong-side, non-reliable, or duplicate reliable stream association. A local finite resource/allocation failure before safe flow identity exists MAY terminate the profile connection with `RESOURCE_LIMIT_ERROR` and MUST NOT be relabeled as peer protocol failure.
+
+An unknown or already-terminated syntactically valid DATAGRAM FlowId remains a stale discard. Once a DATAGRAM resolves to a currently active flow, malformed sequence metadata, wrong flow direction, use of DATAGRAM for `ReliableOrdered`, or violation of the established stable payload ceiling uses flow-local `ProtocolFailure` when the control stream remains usable. A local allocation failure while admitting payload for that known flow uses `ResourceFailure`.
+
+QUIC connection loss terminates the entire profile connection and all flows; no per-flow `FLOW_TERMINATE` report is required when the control stream is no longer usable. Loss of a required profile capability after ProfileReady is likewise connection-terminal. A locally detected capability or configuration failure MUST NOT be reported as a peer protocol violation merely to obtain a close code.
 
 ## QUIC resource realization
 
