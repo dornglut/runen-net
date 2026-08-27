@@ -1,0 +1,33 @@
+name: RN6B Focus
+
+on:
+  push:
+    branches:
+      - rn6b-public-profile-endpoints
+    paths:
+      - .github/workflows/rn6b-focus.yml
+
+permissions:
+  contents: write
+
+jobs:
+  focus:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: rn6b-public-profile-endpoints
+      - name: Format and run public ProfileReady tests
+        run: |
+          cargo fmt --all
+          cargo test -p runen-net-quic --test public_profile
+      - name: Commit mechanical updates
+        run: |
+          if git diff --quiet; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock crates/runen-net-quic/src/facade.rs crates/runen-net-quic/src/lib.rs crates/runen-net-quic/tests/public_profile.rs
+          git commit -m "RN6B: apply focused public facade checks"
+          git push origin HEAD:rn6b-public-profile-endpoints
