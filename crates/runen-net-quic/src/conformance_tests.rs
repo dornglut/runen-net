@@ -9,7 +9,7 @@ use std::{
 };
 
 use quinn::{
-    VarInt,
+    ConnectionError, VarInt,
     rustls::{
         RootCertStore,
         pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
@@ -35,7 +35,10 @@ use crate::{
         ConnectionDriverError, ConnectionDriverStateError, DatagramSubmitOutcome,
         EstablishedConnectionDriver, EstablishedConnectionProgress, OutboundFinishOutcome,
     },
-    control::{LocalControlLimits, ProfileBootstrapError, SemanticRole, ValidatedControlProfile},
+    control::{
+        ControlFrameError, LocalControlLimits, ProfileBootstrapError, SemanticRole,
+        ValidatedControlProfile, bootstrap_server_control, confirm_profile_transport,
+    },
     datagram::DatagramSubmissionOutcome,
     endpoint::{
         ConfiguredEndpoint, ConnectionAdmissionError, EndpointResourceLimits,
@@ -44,12 +47,13 @@ use crate::{
     },
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
-        AdmittedProfileReadyConnection, EstablishedNegotiatedConnection, NegotiationSendCompletion,
-        NegotiationTransition, PendingNegotiationSend, ProfileConnectionError,
-        accept_profile_ready, begin_negotiation, connect_profile_ready,
+        AdmittedProfileReadyConnection, EstablishedNegotiatedConnection, NegotiationLifecycleError,
+        NegotiationReceiveError, NegotiationSendCompletion, NegotiationTransition,
+        PendingNegotiationSend, ProfileConnectionError, accept_profile_ready, begin_negotiation,
+        connect_profile_ready,
     },
     quinn_binding::{ReceiveProgress, SendProgress},
-    wire::{FlowId, WireSide},
+    wire::{ApplicationErrorCode, FlowId, WireSide},
 };
 
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(20);
@@ -124,6 +128,117 @@ fn live_settings_role_mismatch_rejects_profile_and_releases_admission() {
             .await
             .expect("live SETTINGS role-mismatch conformance scenario timed out");
     });
+}
+
+#[test]
+fn live_unknown_post_profile_control_frame_closes_with_control_frame_error() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_unknown_control_frame_scenario())
+            .await
+            .expect("live malformed-control conformance scenario timed out");
+    });
+}
+
+async fn run_unknown_control_frame_scenario() {
+    let resources = resources_with_max_connections(1);
+    let (certificate, private_key, roots) = ephemeral_identity();
+    let client = bind_client_endpoint(loopback_ephemeral(), resources, roots).unwrap();
+    let server = bind_server_endpoint(
+        loopback_ephemeral(),
+        resources,
+        vec![certificate],
+        private_key,
+    )
+    .unwrap();
+    let server_address = server.endpoint().local_addr().unwrap();
+
+    let adversarial_server = async {
+        let incoming = server
+            .endpoint()
+            .accept()
+            .await
+            .expect("adversarial server endpoint closed before connection");
+        let connecting = incoming
+            .accept()
+            .expect("adversarial server rejected valid QUIC admission");
+        let connection = connecting
+            .await
+            .expect("adversarial server failed valid runennet/1 handshake");
+        let transport = confirm_profile_transport(connection)
+            .expect("adversarial server failed production transport confirmation");
+        bootstrap_server_control(transport, profile(resources, SemanticRole::NonAuthority))
+            .await
+            .expect("adversarial server failed production ProfileReady bootstrap")
+    };
+
+    let (client_ready, server_ready) = join2(
+        connect_profile_ready(
+            &client,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        adversarial_server,
+    )
+    .await;
+    let client_ready = client_ready.expect("production client failed ProfileReady");
+    let mut server_parts = server_ready.into_parts();
+
+    let mut manager = new_manager();
+    let pending = begin_negotiation(client_ready, FIRST_CONNECTION, &mut manager, offer())
+        .expect("valid client offer failed before send");
+    let transition = complete_negotiation_send(pending).await;
+    let mut negotiating = match transition {
+        NegotiationTransition::Negotiating(negotiating) => negotiating,
+        other => panic!("valid client offer did not enter receive phase: {other:?}"),
+    };
+
+    server_parts
+        .sender
+        .send_raw_bytes_for_test(&[10])
+        .await
+        .expect("adversarial raw control byte was not written");
+
+    let receive_error = negotiating
+        .receive()
+        .await
+        .expect_err("unknown control frame unexpectedly reached negotiation semantics");
+    assert!(matches!(
+        &receive_error,
+        NegotiationReceiveError::Control(ProfileBootstrapError::Frame(
+            ControlFrameError::UnknownFrameType(10)
+        ))
+    ));
+    let NegotiationReceiveError::Control(control_error) = receive_error else {
+        unreachable!("exact control error was asserted above");
+    };
+    let lifecycle_error = negotiating.abort_after_control_error(&mut manager, control_error);
+    assert!(matches!(
+        lifecycle_error,
+        NegotiationLifecycleError::IoAbort {
+            error: Some(ProfileBootstrapError::Frame(
+                ControlFrameError::UnknownFrameType(10)
+            )),
+            cleanup_error: None,
+        }
+    ));
+
+    match server_parts.connection.closed().await {
+        ConnectionError::ApplicationClosed(close) => assert_eq!(
+            close.error_code,
+            ApplicationErrorCode::ControlFrameError.quinn()
+        ),
+        other => panic!("malformed control produced wrong peer close: {other:?}"),
+    }
+
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"malformed-control test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"malformed-control test complete");
+    join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
 }
 
 #[test]
