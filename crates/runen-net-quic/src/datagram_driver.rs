@@ -9,7 +9,7 @@ use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowD
 
 use crate::{
     datagram::{
-        DatagramReceiveError, DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress,
+        DatagramReceiveFailure, DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress,
         DatagramSender, DatagramSubmissionError, DatagramSubmissionOutcome,
         OwnedDatagramReadFuture, read_quinn_datagram_owned, receive_datagram,
     },
@@ -31,7 +31,7 @@ pub(super) enum DatagramIoError {
     State(DatagramIoStateError),
     Allocation(TryReserveError),
     Connection(ConnectionError),
-    Receive(DatagramReceiveError),
+    Receive(DatagramReceiveFailure),
     Send {
         flow_id: FlowId,
         error: DatagramSendError,
