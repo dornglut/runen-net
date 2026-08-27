@@ -24,24 +24,18 @@ jobs:
 
           path = Path('crates/runen-net-quic/src/conformance_tests.rs')
           text = path.read_text()
-          old = '''        let connecting = incoming
-              .accept()
-              .expect("incompatible-ALPN peer rejected QUIC admission before TLS handshake");
-          assert!(
-              connecting.await.is_err(),
-              "incompatible ALPN unexpectedly produced a QUIC Connection"
-          );
-          '''
-          new = '''        if let Ok(connecting) = incoming.accept() {
+          scenario = text.index('async fn run_incompatible_alpn_scenario()')
+          start = text.index('        let connecting = incoming\n', scenario)
+          end = text.index('    };\n    let (client_failure, ()) = join2(', start)
+          replacement = '''        if let Ok(connecting) = incoming.accept() {
               assert!(
                   connecting.await.is_err(),
                   "incompatible ALPN unexpectedly produced a QUIC Connection"
               );
           }
           '''
-          if old not in text:
-              raise SystemExit('handshake observation anchor not found')
-          path.write_text(text.replace(old, new, 1))
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text)
           PY
           cargo +stable fmt --all
       - name: Commit corrected evidence
