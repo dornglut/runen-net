@@ -489,9 +489,10 @@ pub(super) fn receive_datagram(
     let (accepted_index, payload_offset) = match flow.mode() {
         DeliveryMode::UnreliableUnordered => (UNORDERED_INGRESS_INDEX, flow_bytes),
         DeliveryMode::UnreliableSequenced => {
-            let (sequence, sequence_bytes) = decode_varint(&datagram[flow_bytes..]).map_err(|error| {
-                DatagramReceiveFailure::resolved(flow_id, DatagramReceiveError::VarInt(error))
-            })?;
+            let (sequence, sequence_bytes) =
+                decode_varint(&datagram[flow_bytes..]).map_err(|error| {
+                    DatagramReceiveFailure::resolved(flow_id, DatagramReceiveError::VarInt(error))
+                })?;
             (sequence, flow_bytes + sequence_bytes)
         }
         DeliveryMode::ReliableOrdered => {
