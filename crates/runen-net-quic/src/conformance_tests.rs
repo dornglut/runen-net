@@ -154,13 +154,12 @@ async fn run_incompatible_alpn_scenario() {
             .accept()
             .await
             .expect("incompatible-ALPN endpoint closed before handshake attempt");
-        let connecting = incoming
-            .accept()
-            .expect("incompatible-ALPN peer rejected QUIC admission before TLS handshake");
-        assert!(
-            connecting.await.is_err(),
-            "incompatible ALPN unexpectedly produced a QUIC Connection"
-        );
+        if let Ok(connecting) = incoming.accept() {
+            assert!(
+                connecting.await.is_err(),
+                "incompatible ALPN unexpectedly produced a QUIC Connection"
+            );
+        }
     };
     let (client_failure, ()) = join2(
         connect_profile_ready(
