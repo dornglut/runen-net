@@ -101,11 +101,9 @@ impl DatagramConnectionIo {
         flow_control: &FlowControl,
         flow: EstablishedFlow,
     ) -> Result<(), DatagramIoError> {
-        retain_live_outbound(
-            &mut self.outbound,
-            &mut self.outbound_cursor,
-            |flow_id| registered_outbound_unreliable_is_live(flow_control, flow_id),
-        );
+        retain_live_outbound(&mut self.outbound, &mut self.outbound_cursor, |flow_id| {
+            registered_outbound_unreliable_is_live(flow_control, flow_id)
+        });
 
         let registered =
             flow_control
