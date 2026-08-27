@@ -53,6 +53,8 @@ pub(super) enum ReliableIoStateError {
     DuplicateOutboundFlow,
     CapacityOverflow,
     InboundAcceptTerminated,
+    OutboundAcquisitionPending,
+    UnknownOutboundFlow,
 }
 
 #[derive(Debug)]
@@ -77,6 +79,13 @@ pub(super) enum ActiveReliableProgress {
         progress: SendProgress,
     },
     Inbound(ReceiveProgress),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum OutboundFinishTarget {
+    Pending,
+    Active(usize),
+    Unknown,
 }
 
 pub(super) struct ReliableConnectionIo {
@@ -126,6 +135,30 @@ impl ReliableConnectionIo {
 
     pub(super) const fn max_staging_bytes(&self) -> NonZeroUsize {
         self.receive.max_staging_bytes
+    }
+
+    pub(super) fn request_outbound_finish_normal(
+        &mut self,
+        endpoint: &DeliveryEndpoint,
+        flow_id: FlowId,
+    ) -> Result<(), ReliableIoError> {
+        let target = outbound_finish_target(
+            flow_id,
+            self.pending_outbound.iter().map(|pending| pending.flow_id),
+            self.active_outbound.iter().map(|active| active.flow_id),
+        );
+        match target {
+            OutboundFinishTarget::Pending => Err(ReliableIoError::State(
+                ReliableIoStateError::OutboundAcquisitionPending,
+            )),
+            OutboundFinishTarget::Active(index) => self.active_outbound[index]
+                .binding
+                .request_finish_normal(endpoint)
+                .map_err(|error| ReliableIoError::OutboundBinding { flow_id, error }),
+            OutboundFinishTarget::Unknown => Err(ReliableIoError::State(
+                ReliableIoStateError::UnknownOutboundFlow,
+            )),
+        }
     }
 
     pub(super) fn schedule_outbound(
@@ -439,6 +472,20 @@ fn contains_flow_id(
         .any(|item| item == flow_id)
 }
 
+fn outbound_finish_target(
+    flow_id: FlowId,
+    pending: impl IntoIterator<Item = FlowId>,
+    active: impl IntoIterator<Item = FlowId>,
+) -> OutboundFinishTarget {
+    if pending.into_iter().any(|item| item == flow_id) {
+        return OutboundFinishTarget::Pending;
+    }
+    active
+        .into_iter()
+        .position(|item| item == flow_id)
+        .map_or(OutboundFinishTarget::Unknown, OutboundFinishTarget::Active)
+}
+
 const fn cursor_after_remove(index: usize, new_len: usize) -> usize {
     if new_len == 0 { 0 } else { index % new_len }
 }
@@ -489,6 +536,26 @@ mod tests {
         assert!(contains_flow_id(first, [first], [second]));
         assert!(contains_flow_id(second, [first], [second]));
         assert!(!contains_flow_id(third, [first], [second]));
+    }
+
+    #[test]
+    fn normal_finish_target_is_explicitly_pending_active_or_unknown() {
+        let pending = flow(WireSide::Client, 0);
+        let active = flow(WireSide::Client, 1);
+        let unknown = flow(WireSide::Client, 2);
+
+        assert_eq!(
+            outbound_finish_target(pending, [pending], [active]),
+            OutboundFinishTarget::Pending
+        );
+        assert_eq!(
+            outbound_finish_target(active, [pending], [active]),
+            OutboundFinishTarget::Active(0)
+        );
+        assert_eq!(
+            outbound_finish_target(unknown, [pending], [active]),
+            OutboundFinishTarget::Unknown
+        );
     }
 
     #[test]
