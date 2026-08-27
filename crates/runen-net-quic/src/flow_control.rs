@@ -315,6 +315,10 @@ impl FlowControl {
         &mut self.registry
     }
 
+    pub(super) const fn has_pending_inbound(&self) -> bool {
+        self.pending_inbound.is_some()
+    }
+
     pub(super) fn prepare_outbound_open(
         &mut self,
         endpoint: &DeliveryEndpoint,
