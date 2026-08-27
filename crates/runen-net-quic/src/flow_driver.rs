@@ -2,7 +2,8 @@ use std::{future::Future, num::NonZeroUsize, pin::Pin};
 
 use quinn::Connection;
 use runen_net::delivery::{
-    DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowTermination, ReceiveOutcome,
+    DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowTermination,
+    ReceiveOutcome,
 };
 
 use crate::{
@@ -347,6 +348,20 @@ pub(super) fn classify_outbound_reliable_acquisition_failure(
     )
 }
 
+pub(super) fn classify_outbound_reliable_finish_failure(
+    flow_control: &FlowControl,
+    flow_id: FlowId,
+    error: &SendError,
+) -> Option<EstablishedDataFailureDisposition> {
+    let reason = reliable_finish_failure_reason(error)?;
+    Some(known_flow_disposition(
+        flow_id,
+        reason,
+        flow_control.registry().registered_flow(flow_id).is_some(),
+        false,
+    ))
+}
+
 pub(super) fn classify_known_flow_resource_failure(
     flow_control: &FlowControl,
     flow_id: FlowId,
@@ -581,6 +596,16 @@ const fn reliable_send_failure_reason(error: &SendError) -> FlowTerminateReason 
     }
 }
 
+const fn reliable_finish_failure_reason(error: &SendError) -> Option<FlowTerminateReason> {
+    match error {
+        SendError::PendingData
+        | SendError::AlreadyFinishing
+        | SendError::Terminal
+        | SendError::Core(DeliveryOperationError::UnknownFlow) => None,
+        _ => Some(reliable_send_failure_reason(error)),
+    }
+}
+
 const fn reliable_receive_failure_reason(error: &ReceiveError) -> FlowTerminateReason {
     match error {
         ReceiveError::Framing(
@@ -768,6 +793,49 @@ mod tests {
                 ReceiveOutcome::TerminalReliableFailure,
             )),
             FlowTerminateReason::ReliableDeliveryFailure
+        );
+    }
+
+    #[test]
+    fn reliable_finish_rejections_do_not_become_flow_failures() {
+        assert_eq!(
+            reliable_finish_failure_reason(&SendError::PendingData),
+            None
+        );
+        assert_eq!(
+            reliable_finish_failure_reason(&SendError::AlreadyFinishing),
+            None
+        );
+        assert_eq!(reliable_finish_failure_reason(&SendError::Terminal), None);
+        assert_eq!(
+            reliable_finish_failure_reason(&SendError::Core(DeliveryOperationError::UnknownFlow,)),
+            None
+        );
+    }
+
+    #[test]
+    fn reliable_finish_failures_reuse_existing_reason_and_liveness_rules() {
+        let flow_id = flow(8);
+        let delivery_reason = reliable_finish_failure_reason(&SendError::Io(IoFailure::Write));
+        assert_eq!(
+            delivery_reason,
+            Some(FlowTerminateReason::ReliableDeliveryFailure)
+        );
+        assert_eq!(
+            reliable_finish_failure_reason(&SendError::AcceptedIndexExhausted),
+            Some(FlowTerminateReason::ProtocolFailure)
+        );
+        assert_ne!(delivery_reason, Some(FlowTerminateReason::Normal));
+        assert_eq!(
+            known_flow_disposition(flow_id, delivery_reason.unwrap(), true, false),
+            EstablishedDataFailureDisposition::TerminateAndReport {
+                flow_id,
+                reason: FlowTerminateReason::ReliableDeliveryFailure,
+            }
+        );
+        assert_eq!(
+            known_flow_disposition(flow_id, delivery_reason.unwrap(), false, false),
+            EstablishedDataFailureDisposition::CleanupOnly { flow_id }
         );
     }
 
