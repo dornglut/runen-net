@@ -370,11 +370,12 @@ async fn run_known_flow_datagram_isolation_scenario() {
             .is_some()
     );
 
-    send_unreliable_and_expect(
+    send_unreliable_and_expect_index(
         &mut client_side,
         &mut server_side,
         survivor,
         b"survivor-after-malformed".to_vec(),
+        1,
     )
     .await;
 
@@ -1621,18 +1622,28 @@ async fn send_unreliable_and_expect(
     flow: LiveFlow,
     payload: Vec<u8>,
 ) {
+    send_unreliable_and_expect_index(sender, receiver, flow, payload, 0).await;
+}
+
+async fn send_unreliable_and_expect_index(
+    sender: &mut LiveSide,
+    receiver: &mut LiveSide,
+    flow: LiveFlow,
+    payload: Vec<u8>,
+    expected_index: u64,
+) {
     assert!(matches!(
         sender
             .driver
             .submit_unreliable(&mut sender.host.delivery, flow.flow_id, payload.clone(),),
         Ok(DatagramSubmitOutcome::Submitted(
             DatagramSubmissionOutcome::Accepted {
-                accepted_index: 0,
+                accepted_index,
                 local_pressure_drops: 0,
             }
-        ))
+        )) if accepted_index == expected_index
     ));
-    drive_until_exposed(sender, receiver, flow.inbound, &payload).await;
+    drive_until_exposed_index(sender, receiver, flow.inbound, &payload, expected_index).await;
 }
 
 async fn drive_until_buffered_without_exposure(
@@ -1661,9 +1672,19 @@ async fn drive_until_exposed(
     inbound: DeliveryFlowKey,
     expected: &[u8],
 ) {
+    drive_until_exposed_index(sender, receiver, inbound, expected, 0).await;
+}
+
+async fn drive_until_exposed_index(
+    sender: &mut LiveSide,
+    receiver: &mut LiveSide,
+    inbound: DeliveryFlowKey,
+    expected: &[u8],
+    expected_index: u64,
+) {
     loop {
         if let Some(message) = receiver.host.delivery.poll_exposure(inbound).unwrap() {
-            assert_eq!(message.accepted_index(), 0);
+            assert_eq!(message.accepted_index(), expected_index);
             assert_eq!(message.payload(), expected);
             return;
         }
