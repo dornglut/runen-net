@@ -35,7 +35,7 @@ use crate::{
         ConnectionDriverError, ConnectionDriverStateError, DatagramSubmitOutcome,
         EstablishedConnectionDriver, EstablishedConnectionProgress, OutboundFinishOutcome,
     },
-    control::{LocalControlLimits, SemanticRole, ValidatedControlProfile},
+    control::{LocalControlLimits, ProfileBootstrapError, SemanticRole, ValidatedControlProfile},
     datagram::DatagramSubmissionOutcome,
     endpoint::{
         ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,
@@ -44,8 +44,8 @@ use crate::{
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
         AdmittedProfileReadyConnection, EstablishedNegotiatedConnection, NegotiationSendCompletion,
-        NegotiationTransition, PendingNegotiationSend, accept_profile_ready, begin_negotiation,
-        connect_profile_ready,
+        NegotiationTransition, PendingNegotiationSend, ProfileConnectionError,
+        accept_profile_ready, begin_negotiation, connect_profile_ready,
     },
     quinn_binding::{ReceiveProgress, SendProgress},
     wire::{FlowId, WireSide},
@@ -113,6 +113,77 @@ fn replacement_connection_restarts_fresh_connection_scoped_state() {
             .await
             .expect("live QUIC replacement-state conformance scenario timed out");
     });
+}
+
+#[test]
+fn live_settings_role_mismatch_rejects_profile_and_releases_admission() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_role_mismatch_scenario())
+            .await
+            .expect("live SETTINGS role-mismatch conformance scenario timed out");
+    });
+}
+
+async fn run_role_mismatch_scenario() {
+    let resources = resources_with_max_connections(1);
+    let (client, server) = configured_endpoints_with_resources(resources);
+    let server_address = server.endpoint().local_addr().unwrap();
+
+    let (client_failure, server_failure) = join2(
+        connect_profile_ready(
+            &client,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        accept_profile_ready(&server, profile(resources, SemanticRole::Authority)),
+    )
+    .await;
+
+    let client_mismatch = bootstrap_role_mismatch(client_failure.unwrap_err());
+    let server_mismatch = bootstrap_role_mismatch(server_failure.unwrap_err());
+    assert!(
+        client_mismatch || server_mismatch,
+        "neither production bootstrap observed the SETTINGS semantic-role mismatch"
+    );
+
+    let (client_ready, server_ready) = join2(
+        connect_profile_ready(
+            &client,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        accept_profile_ready(&server, profile(resources, SemanticRole::NonAuthority)),
+    )
+    .await;
+    let client_ready =
+        client_ready.expect("capacity-1 client permit leaked after bootstrap failure");
+    let server_ready = server_ready
+        .expect("capacity-1 server permit leaked after bootstrap failure")
+        .expect("server endpoint remained open for corrected retry");
+
+    drop(client_ready);
+    drop(server_ready);
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"role-mismatch test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"role-mismatch test complete");
+    join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
+}
+
+fn bootstrap_role_mismatch(error: ProfileConnectionError) -> bool {
+    match error {
+        ProfileConnectionError::Bootstrap(ProfileBootstrapError::PeerRoleMismatch {
+            expected: SemanticRole::NonAuthority,
+            received: SemanticRole::Authority,
+        }) => true,
+        ProfileConnectionError::Bootstrap(_) => false,
+        other => panic!("role-mismatch connection failed outside bootstrap: {other:?}"),
+    }
 }
 
 async fn run_successful_scenario(authority_side: AuthoritySide) {
@@ -254,7 +325,12 @@ async fn run_successful_scenario(authority_side: AuthoritySide) {
 }
 
 fn configured_endpoints() -> (ConfiguredEndpoint, ConfiguredEndpoint) {
-    let resources = resources();
+    configured_endpoints_with_resources(resources())
+}
+
+fn configured_endpoints_with_resources(
+    resources: ValidatedEndpointResources,
+) -> (ConfiguredEndpoint, ConfiguredEndpoint) {
     let (certificate, private_key, roots) = ephemeral_identity();
     let server = bind_server_endpoint(
         loopback_ephemeral(),
@@ -698,8 +774,12 @@ async fn assert_driver_terminal(side: &mut LiveSide) {
 }
 
 fn resources() -> ValidatedEndpointResources {
+    resources_with_max_connections(4)
+}
+
+fn resources_with_max_connections(max_connections: usize) -> ValidatedEndpointResources {
     EndpointResourceLimits {
-        max_connections: 4,
+        max_connections,
         max_active_incoming_flows: 16,
         udp_payload_ceiling: 1_452,
         stream_receive_window: 64 * 1024,
