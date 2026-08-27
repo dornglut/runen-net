@@ -57,13 +57,35 @@ pub(super) enum ReliableIoStateError {
     UnknownOutboundFlow,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(super) enum ReliableFailureContext {
+    Unresolved,
+    ResolvedLive { flow_id: FlowId },
+    ResolvedDetached { flow_id: FlowId },
+}
+
 #[derive(Debug)]
 pub(super) enum ReliableIoError {
     State(ReliableIoStateError),
     Allocation(TryReserveError),
     Connection(ConnectionError),
-    OutboundBinding { flow_id: FlowId, error: SendError },
-    InboundBinding(ReceiveError),
+    OutboundFinish {
+        flow_id: FlowId,
+        error: SendError,
+    },
+    OutboundAcquisitionBinding {
+        flow_id: FlowId,
+        error: SendError,
+    },
+    OutboundActiveBinding {
+        context: ReliableFailureContext,
+        error: SendError,
+    },
+    InboundConstruction(ReceiveError),
+    InboundActiveBinding {
+        context: ReliableFailureContext,
+        error: ReceiveError,
+    },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -154,7 +176,7 @@ impl ReliableConnectionIo {
             OutboundFinishTarget::Active(index) => self.active_outbound[index]
                 .binding
                 .request_finish_normal(endpoint)
-                .map_err(|error| ReliableIoError::OutboundBinding { flow_id, error }),
+                .map_err(|error| ReliableIoError::OutboundFinish { flow_id, error }),
             OutboundFinishTarget::Unknown => Err(ReliableIoError::State(
                 ReliableIoStateError::UnknownOutboundFlow,
             )),
@@ -252,7 +274,10 @@ impl ReliableConnectionIo {
                         cursor_after_remove(index, self.pending_outbound.len());
                     let binding =
                         OutboundReliable::bind_quinn(flow_control.registry_mut(), flow_id, stream)
-                            .map_err(|error| ReliableIoError::OutboundBinding { flow_id, error })?;
+                            .map_err(|error| ReliableIoError::OutboundAcquisitionBinding {
+                                flow_id,
+                                error,
+                            })?;
                     self.active_outbound
                         .push(ActiveOutbound { flow_id, binding });
                     return Poll::Ready(Ok(OutboundAcquisitionProgress::Bound { flow_id }));
@@ -290,7 +315,7 @@ impl ReliableConnectionIo {
                     self.receive.scratch_bytes,
                     self.receive.max_staging_bytes,
                 )
-                .map_err(ReliableIoError::InboundBinding)?;
+                .map_err(ReliableIoError::InboundConstruction)?;
                 self.active_inbound.push(binding);
                 Poll::Ready(Ok(()))
             }
@@ -311,6 +336,10 @@ impl ReliableConnectionIo {
         for offset in 0..len {
             let index = (start + offset) % len;
             let flow_id = self.active_outbound[index].flow_id;
+            let context = resolved_failure_context(
+                flow_id,
+                flow_control.registry().registered_flow(flow_id).is_some(),
+            );
             match self.active_outbound[index].binding.poll_step(
                 cx,
                 endpoint,
@@ -329,7 +358,10 @@ impl ReliableConnectionIo {
                 Poll::Ready(Err(error)) => {
                     let _ = self.active_outbound.swap_remove(index);
                     self.outbound_cursor = cursor_after_remove(index, self.active_outbound.len());
-                    return Poll::Ready(Err(ReliableIoError::OutboundBinding { flow_id, error }));
+                    return Poll::Ready(Err(ReliableIoError::OutboundActiveBinding {
+                        context,
+                        error,
+                    }));
                 }
             }
         }
@@ -350,6 +382,10 @@ impl ReliableConnectionIo {
         let start = self.inbound_cursor % len;
         for offset in 0..len {
             let index = (start + offset) % len;
+            let before = self.active_inbound[index].resolved_flow_id();
+            let before_registered = before.is_some_and(|flow_id| {
+                flow_control.registry().registered_flow(flow_id).is_some()
+            });
             match self.active_inbound[index].poll_step(cx, endpoint, flow_control.registry_mut()) {
                 Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining)) => {}
                 Poll::Ready(Ok(progress @ ReceiveProgress::Closed)) => {
@@ -362,9 +398,14 @@ impl ReliableConnectionIo {
                     return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress)));
                 }
                 Poll::Ready(Err(error)) => {
+                    let after = self.active_inbound[index].resolved_flow_id();
+                    let context = inbound_failure_context(before, before_registered, after);
                     let _ = self.active_inbound.swap_remove(index);
                     self.inbound_cursor = cursor_after_remove(index, self.active_inbound.len());
-                    return Poll::Ready(Err(ReliableIoError::InboundBinding(error)));
+                    return Poll::Ready(Err(ReliableIoError::InboundActiveBinding {
+                        context,
+                        error,
+                    }));
                 }
             }
         }
@@ -461,6 +502,28 @@ fn registered_outbound_is_live(flow_control: &FlowControl, flow_id: FlowId) -> b
         })
 }
 
+const fn resolved_failure_context(flow_id: FlowId, registered: bool) -> ReliableFailureContext {
+    if registered {
+        ReliableFailureContext::ResolvedLive { flow_id }
+    } else {
+        ReliableFailureContext::ResolvedDetached { flow_id }
+    }
+}
+
+const fn inbound_failure_context(
+    before: Option<FlowId>,
+    before_registered: bool,
+    after: Option<FlowId>,
+) -> ReliableFailureContext {
+    match before {
+        Some(flow_id) => resolved_failure_context(flow_id, before_registered),
+        None => match after {
+            Some(flow_id) => ReliableFailureContext::ResolvedLive { flow_id },
+            None => ReliableFailureContext::Unresolved,
+        },
+    }
+}
+
 fn contains_flow_id(
     flow_id: FlowId,
     pending: impl IntoIterator<Item = FlowId>,
@@ -525,6 +588,36 @@ mod tests {
         };
         assert_eq!(limits.scratch_bytes, nz(8));
         assert_eq!(limits.max_staging_bytes, nz(64));
+    }
+
+    #[test]
+    fn reliable_failure_context_preserves_resolution_and_liveness() {
+        let flow_id = flow(WireSide::Server, 7);
+
+        assert_eq!(
+            inbound_failure_context(None, false, None),
+            ReliableFailureContext::Unresolved
+        );
+        assert_eq!(
+            inbound_failure_context(None, false, Some(flow_id)),
+            ReliableFailureContext::ResolvedLive { flow_id }
+        );
+        assert_eq!(
+            inbound_failure_context(Some(flow_id), true, Some(flow_id)),
+            ReliableFailureContext::ResolvedLive { flow_id }
+        );
+        assert_eq!(
+            inbound_failure_context(Some(flow_id), false, Some(flow_id)),
+            ReliableFailureContext::ResolvedDetached { flow_id }
+        );
+        assert_eq!(
+            resolved_failure_context(flow_id, true),
+            ReliableFailureContext::ResolvedLive { flow_id }
+        );
+        assert_eq!(
+            resolved_failure_context(flow_id, false),
+            ReliableFailureContext::ResolvedDetached { flow_id }
+        );
     }
 
     #[test]
