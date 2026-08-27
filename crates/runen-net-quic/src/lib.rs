@@ -5,13 +5,13 @@
 //! boundary for that profile and does not own transport-independent RunenNet
 //! semantics.
 
+#[cfg(test)]
+mod conformance_tests;
 #[allow(
     dead_code,
     reason = "RN5E5A5L lands the crate-private established connection orchestrator before RN5E5 loopback conformance"
 )]
 mod connection_driver;
-#[cfg(test)]
-mod conformance_tests;
 #[allow(
     dead_code,
     reason = "RN5E3 lands crate-private profile control before RN5E4/RN5E5 wiring"

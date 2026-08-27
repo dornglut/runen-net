@@ -129,13 +129,13 @@ async fn run_successful_scenario(authority_side: AuthoritySide) {
     )
     .await;
     let client_ready = client_ready.unwrap();
-    let server_ready = server_ready.unwrap().expect("server endpoint remained open");
+    let server_ready = server_ready
+        .unwrap()
+        .expect("server endpoint remained open");
 
     let contract = contract();
-    let client_authority =
-        (authority_side == AuthoritySide::Client).then(|| contract.clone());
-    let server_authority =
-        (authority_side == AuthoritySide::Server).then(|| contract.clone());
+    let client_authority = (authority_side == AuthoritySide::Client).then(|| contract.clone());
+    let server_authority = (authority_side == AuthoritySide::Server).then(|| contract.clone());
 
     let (client_established, server_established) = join2(
         negotiate_side(client_ready, new_manager(), client_authority),
@@ -201,12 +201,48 @@ async fn run_successful_scenario(authority_side: AuthoritySide) {
 
     close_reliable_normally(&mut client_side, &mut server_side, reliable).await;
 
-    assert!(client_side.host.delivery.flow_contract(reliable.outbound).is_none());
-    assert!(server_side.host.delivery.flow_contract(reliable.inbound).is_none());
-    assert!(client_side.host.delivery.flow_contract(sequenced.outbound).is_some());
-    assert!(server_side.host.delivery.flow_contract(sequenced.inbound).is_some());
-    assert!(server_side.host.delivery.flow_contract(unordered.outbound).is_some());
-    assert!(client_side.host.delivery.flow_contract(unordered.inbound).is_some());
+    assert!(
+        client_side
+            .host
+            .delivery
+            .flow_contract(reliable.outbound)
+            .is_none()
+    );
+    assert!(
+        server_side
+            .host
+            .delivery
+            .flow_contract(reliable.inbound)
+            .is_none()
+    );
+    assert!(
+        client_side
+            .host
+            .delivery
+            .flow_contract(sequenced.outbound)
+            .is_some()
+    );
+    assert!(
+        server_side
+            .host
+            .delivery
+            .flow_contract(sequenced.inbound)
+            .is_some()
+    );
+    assert!(
+        server_side
+            .host
+            .delivery
+            .flow_contract(unordered.outbound)
+            .is_some()
+    );
+    assert!(
+        client_side
+            .host
+            .delivery
+            .flow_contract(unordered.inbound)
+            .is_some()
+    );
 
     let client_teardown = client_side.driver.teardown(
         &mut client_side.host.negotiation,
@@ -222,19 +258,27 @@ async fn run_successful_scenario(authority_side: AuthoritySide) {
     assert!(server_teardown.negotiation_cleanup_error.is_none());
     assert_eq!(client_teardown.flow_terminations.len(), 2);
     assert_eq!(server_teardown.flow_terminations.len(), 2);
-    assert!(client_teardown
-        .flow_terminations
-        .iter()
-        .all(|termination| termination.reason == FlowTerminationReason::ConnectionEnded));
-    assert!(server_teardown
-        .flow_terminations
-        .iter()
-        .all(|termination| termination.reason == FlowTerminationReason::ConnectionEnded));
+    assert!(
+        client_teardown
+            .flow_terminations
+            .iter()
+            .all(|termination| termination.reason == FlowTerminationReason::ConnectionEnded)
+    );
+    assert!(
+        server_teardown
+            .flow_terminations
+            .iter()
+            .all(|termination| termination.reason == FlowTerminationReason::ConnectionEnded)
+    );
     assert_eq!(client_side.host.delivery.active_flows(), 0);
     assert_eq!(server_side.host.delivery.active_flows(), 0);
 
-    client.endpoint().close(VarInt::from_u32(0), b"test complete");
-    server.endpoint().close(VarInt::from_u32(0), b"test complete");
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"test complete");
     join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
 }
 
@@ -365,9 +409,7 @@ async fn negotiate_side(
                     .unwrap();
                 complete_negotiation_send(pending).await
             }
-            NegotiationTransition::PendingSend(pending) => {
-                complete_negotiation_send(pending).await
-            }
+            NegotiationTransition::PendingSend(pending) => complete_negotiation_send(pending).await,
             NegotiationTransition::Established(established) => {
                 return (established, manager);
             }
@@ -375,9 +417,7 @@ async fn negotiate_side(
     }
 }
 
-async fn complete_negotiation_send(
-    mut pending: PendingNegotiationSend,
-) -> NegotiationTransition {
+async fn complete_negotiation_send(mut pending: PendingNegotiationSend) -> NegotiationTransition {
     pending.send().await.unwrap();
     match pending.complete().unwrap() {
         NegotiationSendCompletion::Negotiating(negotiating) => {
@@ -443,6 +483,8 @@ async fn establish_flow(
         .unwrap();
 
     let mut accepted_flow_id = None;
+    let mut established_flow_id = None;
+    let mut accept_send_completed = false;
     loop {
         let (sender_progress, receiver_progress) = next_pair_progress(sender, receiver).await;
         if let Some(progress) = receiver_progress {
@@ -464,6 +506,14 @@ async fn establish_flow(
                         )
                         .unwrap();
                 }
+                EstablishedConnectionProgress::ControlSendCompleted(
+                    crate::flow_driver::FlowControlSendEffect::InboundAccepted(flow),
+                ) => {
+                    assert_eq!(flow.key(), inbound);
+                    assert_eq!(flow.mode(), mode);
+                    assert_eq!(Some(flow.flow_id()), accepted_flow_id);
+                    accept_send_completed = true;
+                }
                 other => assert_non_failure_progress(&other),
             }
         }
@@ -472,16 +522,18 @@ async fn establish_flow(
                 EstablishedConnectionProgress::OutboundEstablished(flow) => {
                     assert_eq!(flow.key(), outbound);
                     assert_eq!(flow.mode(), mode);
-                    let flow_id = accepted_flow_id.expect("peer accepted before establishment");
-                    assert_eq!(flow.flow_id(), flow_id);
-                    return LiveFlow {
-                        flow_id,
-                        outbound,
-                        inbound,
-                    };
+                    assert_eq!(Some(flow.flow_id()), accepted_flow_id);
+                    established_flow_id = Some(flow.flow_id());
                 }
                 other => assert_non_failure_progress(&other),
             }
+        }
+        if accept_send_completed && let Some(flow_id) = established_flow_id {
+            return LiveFlow {
+                flow_id,
+                outbound,
+                inbound,
+            };
         }
     }
 }
@@ -509,11 +561,9 @@ async fn send_unreliable_and_expect(
     payload: Vec<u8>,
 ) {
     assert!(matches!(
-        sender.driver.submit_unreliable(
-            &mut sender.host.delivery,
-            flow.flow_id,
-            payload.clone(),
-        ),
+        sender
+            .driver
+            .submit_unreliable(&mut sender.host.delivery, flow.flow_id, payload.clone(),),
         Ok(DatagramSubmitOutcome::Submitted(
             DatagramSubmissionOutcome::Accepted {
                 accepted_index: 0,
@@ -546,16 +596,11 @@ async fn drive_until_exposed(
     }
 }
 
-async fn close_reliable_normally(
-    sender: &mut LiveSide,
-    receiver: &mut LiveSide,
-    flow: LiveFlow,
-) {
+async fn close_reliable_normally(sender: &mut LiveSide, receiver: &mut LiveSide, flow: LiveFlow) {
     assert_eq!(
-        sender.driver.request_outbound_finish_normal(
-            &mut sender.host.delivery,
-            flow.flow_id,
-        ),
+        sender
+            .driver
+            .request_outbound_finish_normal(&mut sender.host.delivery, flow.flow_id,),
         Ok(OutboundFinishOutcome::Started)
     );
 
