@@ -1,0 +1,221 @@
+name: A5U Test Patch
+
+on:
+  push:
+    branches:
+      - rn5e5a5u-known-flow-datagram
+    paths:
+      - .github/workflows/a5u-test-patch.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: rn5e5a5u-known-flow-datagram
+      - name: Add known-flow DATAGRAM isolation evidence
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          driver = Path('crates/runen-net-quic/src/connection_driver.rs')
+          text = driver.read_text()
+          anchor = "impl EstablishedConnectionDriver {\n    pub(super) fn poll_step(\n"
+          if anchor not in text:
+              raise SystemExit('EstablishedConnectionDriver anchor not found')
+          hook = "impl EstablishedConnectionDriver {\n    #[cfg(test)]\n    pub(super) fn send_raw_datagram_for_test(\n        &self,\n        datagram: Vec<u8>,\n    ) -> Result<(), quinn::SendDatagramError> {\n        self.connection.send_datagram(datagram.into())\n    }\n\n    pub(super) fn poll_step(\n"
+          text = text.replace(anchor, hook, 1)
+          driver.write_text(text)
+
+          test = Path('crates/runen-net-quic/src/conformance_tests.rs')
+          text = test.read_text()
+          old_wire = "    wire::{ApplicationErrorCode, FlowId, WireSide},\n"
+          new_wire = "    wire::{ApplicationErrorCode, FlowId, FlowTerminateReason, WireSide, encode_varint},\n"
+          if old_wire not in text:
+              raise SystemExit('wire import anchor not found')
+          text = text.replace(old_wire, new_wire, 1)
+
+          marker = "#[test]\nfn live_overlapping_connection_is_refused_at_server_capacity_and_slot_reopens() {\n"
+          if marker not in text:
+              raise SystemExit('A5S test anchor not found')
+          addition = """#[test]
+          fn live_known_flow_oversized_datagram_is_isolated_and_survivor_stays_live() {
+              let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+              runtime.block_on(async {
+                  tokio::time::timeout(SCENARIO_TIMEOUT, run_known_flow_datagram_isolation_scenario())
+                      .await
+                      .expect(\"live known-flow DATAGRAM isolation scenario timed out\");
+              });
+          }
+
+          async fn run_known_flow_datagram_isolation_scenario() {
+              let (client, server, mut client_side, mut server_side) =
+                  establish_live_pair(AuthoritySide::Client).await;
+
+              let target = establish_flow(
+                  &mut client_side,
+                  &mut server_side,
+                  DeliveryMode::UnreliableUnordered,
+                  41,
+                  141,
+              )
+              .await;
+              let survivor = establish_flow(
+                  &mut client_side,
+                  &mut server_side,
+                  DeliveryMode::UnreliableSequenced,
+                  42,
+                  142,
+              )
+              .await;
+
+              send_unreliable_and_expect(
+                  &mut client_side,
+                  &mut server_side,
+                  survivor,
+                  b\"survivor-before-malformed\".to_vec(),
+              )
+              .await;
+
+              let flow_prefix = encode_varint(target.flow_id.value()).unwrap();
+              let mut malformed = flow_prefix.as_slice().to_vec();
+              malformed.resize(malformed.len() + MAX_MESSAGE_BYTES + 1, 0xa5);
+              client_side
+                  .driver
+                  .send_raw_datagram_for_test(malformed)
+                  .expect(\"raw oversized DATAGRAM injection failed\");
+
+              let mut receiver_failure_handled = false;
+              let mut receiver_report_sent = false;
+              let mut sender_remote_terminated = false;
+              while !(receiver_failure_handled && receiver_report_sent && sender_remote_terminated) {
+                  let (client_progress, server_progress) =
+                      next_pair_progress(&mut client_side, &mut server_side).await;
+
+                  if let Some(progress) = server_progress {
+                      match progress {
+                          EstablishedConnectionProgress::FlowFailureHandled { flow_id } => {
+                              assert_eq!(flow_id, target.flow_id);
+                              receiver_failure_handled = true;
+                          }
+                          EstablishedConnectionProgress::ControlSendCompleted(
+                              crate::flow_driver::FlowControlSendEffect::LocalTerminated {
+                                  flow,
+                                  reason,
+                                  termination,
+                              },
+                          ) => {
+                              assert_eq!(flow.flow_id(), target.flow_id);
+                              assert_eq!(flow.key(), target.inbound);
+                              assert_eq!(reason, FlowTerminateReason::ProtocolFailure);
+                              assert_eq!(termination.key, target.inbound);
+                              assert_eq!(termination.reason, FlowTerminationReason::Requested);
+                              receiver_report_sent = true;
+                          }
+                          other => assert_non_failure_progress(&other),
+                      }
+                  }
+
+                  if let Some(progress) = client_progress {
+                      match progress {
+                          EstablishedConnectionProgress::RemoteTerminated {
+                              flow,
+                              reason,
+                              termination,
+                          } => {
+                              assert_eq!(flow.flow_id(), target.flow_id);
+                              assert_eq!(flow.key(), target.outbound);
+                              assert_eq!(reason, FlowTerminateReason::ProtocolFailure);
+                              assert_eq!(termination.key, target.outbound);
+                              assert_eq!(termination.reason, FlowTerminationReason::Requested);
+                              sender_remote_terminated = true;
+                          }
+                          other => assert_non_failure_progress(&other),
+                      }
+                  }
+              }
+
+              assert!(
+                  client_side
+                      .host
+                      .delivery
+                      .flow_contract(target.outbound)
+                      .is_none()
+              );
+              assert!(
+                  server_side
+                      .host
+                      .delivery
+                      .flow_contract(target.inbound)
+                      .is_none()
+              );
+              assert!(
+                  client_side
+                      .host
+                      .delivery
+                      .flow_contract(survivor.outbound)
+                      .is_some()
+              );
+              assert!(
+                  server_side
+                      .host
+                      .delivery
+                      .flow_contract(survivor.inbound)
+                      .is_some()
+              );
+
+              send_unreliable_and_expect(
+                  &mut client_side,
+                  &mut server_side,
+                  survivor,
+                  b\"survivor-after-malformed\".to_vec(),
+              )
+              .await;
+
+              let client_teardown = client_side.driver.teardown(
+                  &mut client_side.host.negotiation,
+                  &mut client_side.host.delivery,
+              );
+              let server_teardown = server_side.driver.teardown(
+                  &mut server_side.host.negotiation,
+                  &mut server_side.host.delivery,
+              );
+              for teardown in [&client_teardown, &server_teardown] {
+                  assert_eq!(teardown.connection, FIRST_CONNECTION);
+                  assert!(teardown.negotiation_cleanup_error.is_none());
+                  assert_eq!(teardown.flow_terminations.len(), 1);
+                  assert_eq!(
+                      teardown.flow_terminations[0].reason,
+                      FlowTerminationReason::ConnectionEnded
+                  );
+              }
+              assert_eq!(client_side.host.delivery.active_flows(), 0);
+              assert_eq!(server_side.host.delivery.active_flows(), 0);
+
+              client
+                  .endpoint()
+                  .close(VarInt::from_u32(0), b\"known-flow DATAGRAM test complete\");
+              server
+                  .endpoint()
+                  .close(VarInt::from_u32(0), b\"known-flow DATAGRAM test complete\");
+              join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
+          }
+
+          """
+          test.write_text(text.replace(marker, addition + marker, 1))
+          PY
+          cargo +stable fmt --all
+      - name: Commit test-only evidence
+        run: |
+          if git diff --quiet -- crates/runen-net-quic/src/connection_driver.rs crates/runen-net-quic/src/conformance_tests.rs; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/runen-net-quic/src/connection_driver.rs crates/runen-net-quic/src/conformance_tests.rs
+          git commit -m "RN5E5A5U: prove known-flow DATAGRAM isolation"
+          git push origin HEAD:rn5e5a5u-known-flow-datagram
