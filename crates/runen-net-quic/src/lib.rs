@@ -17,6 +17,11 @@ mod control;
 mod datagram;
 #[allow(
     dead_code,
+    reason = "RN5E5A5F lands crate-private DATAGRAM scheduling/read ownership before the unified RN5E5 connection poll loop"
+)]
+mod datagram_driver;
+#[allow(
+    dead_code,
     reason = "RN5E2 lands crate-private endpoint configuration before later RN5E control/lifecycle wiring"
 )]
 mod endpoint;
