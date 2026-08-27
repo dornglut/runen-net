@@ -1,7 +1,6 @@
 use std::{
     collections::TryReserveError,
     fmt,
-    future::Future,
     task::{Context, Poll},
 };
 
@@ -235,7 +234,7 @@ fn registered_outbound_unreliable_is_live(flow_control: &FlowControl, flow_id: F
         })
 }
 
-const fn is_outbound_unreliable(direction: FlowDirection, mode: DeliveryMode) -> bool {
+fn is_outbound_unreliable(direction: FlowDirection, mode: DeliveryMode) -> bool {
     direction == FlowDirection::Outbound && mode != DeliveryMode::ReliableOrdered
 }
 
