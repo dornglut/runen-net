@@ -38,8 +38,8 @@ use crate::{
     control::{LocalControlLimits, SemanticRole, ValidatedControlProfile},
     datagram::DatagramSubmissionOutcome,
     endpoint::{
-        ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,
-        bind_client_endpoint, bind_server_endpoint,
+        EndpointResourceLimits, ValidatedEndpointResources, bind_client_endpoint,
+        bind_server_endpoint,
     },
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
@@ -597,12 +597,12 @@ async fn drive_until_exposed(
 }
 
 async fn close_reliable_normally(sender: &mut LiveSide, receiver: &mut LiveSide, flow: LiveFlow) {
-    assert_eq!(
+    assert!(matches!(
         sender
             .driver
             .request_outbound_finish_normal(&mut sender.host.delivery, flow.flow_id,),
         Ok(OutboundFinishOutcome::Started)
-    );
+    ));
 
     let mut sender_closed = false;
     let mut receiver_closed = false;
