@@ -158,9 +158,7 @@ impl From<InternalEndpointResourceError> for EndpointResourceError {
             InternalEndpointResourceError::DatagramReceiveBufferBelowUdpCeiling => {
                 Self::DatagramReceiveBufferBelowUdpCeiling
             }
-            InternalEndpointResourceError::ZeroDatagramSendBuffer => {
-                Self::ZeroDatagramSendBuffer
-            }
+            InternalEndpointResourceError::ZeroDatagramSendBuffer => Self::ZeroDatagramSendBuffer,
             InternalEndpointResourceError::DatagramSendBufferBelowUdpCeiling => {
                 Self::DatagramSendBufferBelowUdpCeiling
             }
@@ -172,7 +170,10 @@ impl From<InternalEndpointResourceError> for EndpointResourceError {
 
 impl fmt::Display for EndpointResourceError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "invalid RunenNet QUIC endpoint resources: {self:?}")
+        write!(
+            formatter,
+            "invalid RunenNet QUIC endpoint resources: {self:?}"
+        )
     }
 }
 
@@ -247,7 +248,9 @@ impl From<InternalProfileConfigError> for ProfileConfigError {
             InternalProfileConfigError::NegotiationFrameOutOfRange => {
                 Self::NegotiationFrameOutOfRange
             }
-            InternalProfileConfigError::NegotiationExceedsControl => Self::NegotiationExceedsControl,
+            InternalProfileConfigError::NegotiationExceedsControl => {
+                Self::NegotiationExceedsControl
+            }
             InternalProfileConfigError::ZeroIncomingMessageBytes => Self::ZeroIncomingMessageBytes,
             InternalProfileConfigError::IncomingMessageBytesOutOfRange => {
                 Self::IncomingMessageBytesOutOfRange
@@ -354,7 +357,9 @@ impl From<InternalEndpointBuildError> for EndpointBindError {
 impl fmt::Display for EndpointBindError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TrustCertificateRejected => formatter.write_str("client trust certificate rejected"),
+            Self::TrustCertificateRejected => {
+                formatter.write_str("client trust certificate rejected")
+            }
             Self::TlsConfigurationRejected => formatter.write_str("TLS configuration rejected"),
             Self::TransportConfigurationRejected => {
                 formatter.write_str("QUIC transport configuration rejected")
@@ -434,7 +439,10 @@ impl From<InternalProfileConnectionError> for ProfileConnectionError {
 
 impl fmt::Display for ProfileConnectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "RunenNet ProfileReady connection failed: {self:?}")
+        write!(
+            formatter,
+            "RunenNet ProfileReady connection failed: {self:?}"
+        )
     }
 }
 
@@ -470,7 +478,9 @@ pub struct ClientEndpoint {
 
 impl fmt::Debug for ClientEndpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("ClientEndpoint").finish_non_exhaustive()
+        formatter
+            .debug_struct("ClientEndpoint")
+            .finish_non_exhaustive()
     }
 }
 
@@ -523,7 +533,9 @@ pub struct ServerEndpoint {
 
 impl fmt::Debug for ServerEndpoint {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("ServerEndpoint").finish_non_exhaustive()
+        formatter
+            .debug_struct("ServerEndpoint")
+            .finish_non_exhaustive()
     }
 }
 
