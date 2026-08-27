@@ -39,7 +39,8 @@ use crate::{
     datagram::DatagramSubmissionOutcome,
     endpoint::{
         ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,
-        bind_client_endpoint, bind_server_endpoint, bind_server_endpoint_without_datagrams,
+        bind_client_endpoint, bind_server_endpoint, bind_server_endpoint_with_incompatible_alpn,
+        bind_server_endpoint_without_datagrams,
     },
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
@@ -123,6 +124,95 @@ fn live_settings_role_mismatch_rejects_profile_and_releases_admission() {
             .await
             .expect("live SETTINGS role-mismatch conformance scenario timed out");
     });
+}
+
+#[test]
+fn live_incompatible_alpn_is_rejected_at_handshake_and_releases_admission() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_incompatible_alpn_scenario())
+            .await
+            .expect("live incompatible-ALPN conformance scenario timed out");
+    });
+}
+
+async fn run_incompatible_alpn_scenario() {
+    let resources = resources_with_max_connections(1);
+    let (certificate, private_key, roots) = ephemeral_identity();
+    let client = bind_client_endpoint(loopback_ephemeral(), resources, roots).unwrap();
+    let incompatible_server = bind_server_endpoint_with_incompatible_alpn(
+        loopback_ephemeral(),
+        resources,
+        vec![certificate.clone()],
+        private_key.clone_key(),
+    )
+    .unwrap();
+    let incompatible_address = incompatible_server.local_addr().unwrap();
+
+    let negative_peer = async {
+        let incoming = incompatible_server
+            .accept()
+            .await
+            .expect("incompatible-ALPN endpoint closed before handshake attempt");
+        let connecting = incoming
+            .accept()
+            .expect("incompatible-ALPN peer rejected QUIC admission before TLS handshake");
+        assert!(
+            connecting.await.is_err(),
+            "incompatible ALPN unexpectedly produced a QUIC Connection"
+        );
+    };
+    let (client_failure, ()) = join2(
+        connect_profile_ready(
+            &client,
+            incompatible_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        negative_peer,
+    )
+    .await;
+    assert!(matches!(
+        client_failure,
+        Err(ProfileConnectionError::Handshake(_))
+    ));
+
+    incompatible_server.close(VarInt::from_u32(0), b"incompatible ALPN test complete");
+    incompatible_server.wait_idle().await;
+
+    let server = bind_server_endpoint(
+        loopback_ephemeral(),
+        resources,
+        vec![certificate],
+        private_key,
+    )
+    .unwrap();
+    let server_address = server.endpoint().local_addr().unwrap();
+    let (client_ready, server_ready) = join2(
+        connect_profile_ready(
+            &client,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        accept_profile_ready(&server, profile(resources, SemanticRole::NonAuthority)),
+    )
+    .await;
+    let client_ready =
+        client_ready.expect("capacity-1 client permit leaked after ALPN handshake failure");
+    let server_ready = server_ready
+        .expect("conforming retry server failed after ALPN handshake failure")
+        .expect("conforming retry server endpoint closed unexpectedly");
+
+    drop(client_ready);
+    drop(server_ready);
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"incompatible-ALPN test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"incompatible-ALPN test complete");
+    join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
 }
 
 #[test]
