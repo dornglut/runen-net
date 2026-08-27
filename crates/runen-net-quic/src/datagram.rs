@@ -439,21 +439,25 @@ pub(super) enum DatagramReceiveError {
     Core(DeliveryOperationError),
 }
 
-impl From<VarIntDecodeError> for DatagramReceiveError {
-    fn from(error: VarIntDecodeError) -> Self {
-        Self::VarInt(error)
-    }
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct DatagramReceiveFailure {
+    pub(super) flow_id: Option<FlowId>,
+    pub(super) error: DatagramReceiveError,
 }
 
-impl From<FlowIdError> for DatagramReceiveError {
-    fn from(error: FlowIdError) -> Self {
-        Self::FlowId(error)
+impl DatagramReceiveFailure {
+    const fn unresolved(error: DatagramReceiveError) -> Self {
+        Self {
+            flow_id: None,
+            error,
+        }
     }
-}
 
-impl From<DeliveryOperationError> for DatagramReceiveError {
-    fn from(error: DeliveryOperationError) -> Self {
-        Self::Core(error)
+    const fn resolved(flow_id: FlowId, error: DatagramReceiveError) -> Self {
+        Self {
+            flow_id: Some(flow_id),
+            error,
+        }
     }
 }
 
@@ -461,38 +465,60 @@ pub(super) fn receive_datagram(
     endpoint: &mut DeliveryEndpoint,
     registry: &AcceptedFlowRegistry,
     datagram: &[u8],
-) -> Result<DatagramReceiveOutcome, DatagramReceiveError> {
-    let (flow_value, flow_bytes) = decode_varint(datagram)?;
-    let flow_id = FlowId::from_wire(flow_value)?;
+) -> Result<DatagramReceiveOutcome, DatagramReceiveFailure> {
+    let (flow_value, flow_bytes) = decode_varint(datagram)
+        .map_err(|error| DatagramReceiveFailure::unresolved(DatagramReceiveError::VarInt(error)))?;
+    let flow_id = FlowId::from_wire(flow_value)
+        .map_err(|error| DatagramReceiveFailure::unresolved(DatagramReceiveError::FlowId(error)))?;
     let Some(flow) = registry.registered_flow(flow_id) else {
         return Ok(DatagramReceiveOutcome::DiscardedUnknownFlow);
     };
     if flow.key().direction() != FlowDirection::Inbound {
-        return Err(DatagramReceiveError::WrongDirection);
+        return Err(DatagramReceiveFailure::resolved(
+            flow_id,
+            DatagramReceiveError::WrongDirection,
+        ));
     }
     if flow.mode() == DeliveryMode::ReliableOrdered {
-        return Err(DatagramReceiveError::ReliableFlow);
+        return Err(DatagramReceiveFailure::resolved(
+            flow_id,
+            DatagramReceiveError::ReliableFlow,
+        ));
     }
 
     let (accepted_index, payload_offset) = match flow.mode() {
         DeliveryMode::UnreliableUnordered => (UNORDERED_INGRESS_INDEX, flow_bytes),
         DeliveryMode::UnreliableSequenced => {
-            let (sequence, sequence_bytes) = decode_varint(&datagram[flow_bytes..])?;
+            let (sequence, sequence_bytes) = decode_varint(&datagram[flow_bytes..]).map_err(|error| {
+                DatagramReceiveFailure::resolved(flow_id, DatagramReceiveError::VarInt(error))
+            })?;
             (sequence, flow_bytes + sequence_bytes)
         }
-        DeliveryMode::ReliableOrdered => return Err(DatagramReceiveError::ReliableFlow),
+        DeliveryMode::ReliableOrdered => {
+            return Err(DatagramReceiveFailure::resolved(
+                flow_id,
+                DatagramReceiveError::ReliableFlow,
+            ));
+        }
     };
     let payload = &datagram[payload_offset..];
     if payload.len() > flow.max_message_bytes() {
-        return Err(DatagramReceiveError::PayloadExceedsProfile);
+        return Err(DatagramReceiveFailure::resolved(
+            flow_id,
+            DatagramReceiveError::PayloadExceedsProfile,
+        ));
     }
 
     let mut owned = Vec::new();
-    owned
-        .try_reserve_exact(payload.len())
-        .map_err(|_| DatagramReceiveError::AllocationFailed)?;
+    owned.try_reserve_exact(payload.len()).map_err(|_| {
+        DatagramReceiveFailure::resolved(flow_id, DatagramReceiveError::AllocationFailed)
+    })?;
     owned.extend_from_slice(payload);
-    let outcome = endpoint.receive_transport_payload(flow.key(), accepted_index, owned)?;
+    let outcome = endpoint
+        .receive_transport_payload(flow.key(), accepted_index, owned)
+        .map_err(|error| {
+            DatagramReceiveFailure::resolved(flow_id, DatagramReceiveError::Core(error))
+        })?;
     Ok(DatagramReceiveOutcome::Core(outcome))
 }
 
@@ -928,7 +954,10 @@ mod tests {
         datagram.extend_from_slice(&[0x40, 0x01, b'x']);
         assert_eq!(
             receive_datagram(&mut endpoint, &registry, &datagram),
-            Err(DatagramReceiveError::VarInt(VarIntDecodeError::NonMinimal))
+            Err(DatagramReceiveFailure {
+                flow_id: Some(flow_id),
+                error: DatagramReceiveError::VarInt(VarIntDecodeError::NonMinimal),
+            })
         );
         assert_eq!(endpoint.pending_messages(), 0);
     }
@@ -952,7 +981,10 @@ mod tests {
         );
         assert_eq!(
             receive_datagram(&mut reliable_endpoint, &reliable_registry, &[5, b'x']),
-            Err(DatagramReceiveError::ReliableFlow)
+            Err(DatagramReceiveFailure {
+                flow_id: Some(reliable_flow),
+                error: DatagramReceiveError::ReliableFlow,
+            })
         );
 
         let outbound_flow = FlowId::new(WireSide::Client, 3).unwrap();
@@ -972,12 +1004,18 @@ mod tests {
         );
         assert_eq!(
             receive_datagram(&mut outbound_endpoint, &outbound_registry, &[6, b'x']),
-            Err(DatagramReceiveError::WrongDirection)
+            Err(DatagramReceiveFailure {
+                flow_id: Some(outbound_flow),
+                error: DatagramReceiveError::WrongDirection,
+            })
         );
 
         assert!(matches!(
             receive_datagram(&mut outbound_endpoint, &outbound_registry, &[0x40, 0x06]),
-            Err(DatagramReceiveError::VarInt(VarIntDecodeError::NonMinimal))
+            Err(DatagramReceiveFailure {
+                flow_id: None,
+                error: DatagramReceiveError::VarInt(VarIntDecodeError::NonMinimal),
+            })
         ));
 
         let inbound_flow = FlowId::new(WireSide::Server, 4).unwrap();
@@ -997,7 +1035,10 @@ mod tests {
         );
         assert_eq!(
             receive_datagram(&mut inbound_endpoint, &inbound_registry, &[9, 1, 2, 3]),
-            Err(DatagramReceiveError::PayloadExceedsProfile)
+            Err(DatagramReceiveFailure {
+                flow_id: Some(inbound_flow),
+                error: DatagramReceiveError::PayloadExceedsProfile,
+            })
         );
 
         let unknown_flow = FlowId::new(WireSide::Server, 7).unwrap();
