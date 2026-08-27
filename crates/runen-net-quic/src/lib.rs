@@ -60,12 +60,12 @@ mod lifecycle;
     reason = "RN5E4A2B lands crate-private compatibility negotiation control before RN5E4B/RN5E5 wiring"
 )]
 mod negotiation;
-// RN5C2B wires the accepted RN5C1 primitives to Quinn while the connection
-// bootstrap/control owner remains deferred to RN5E. Keep the realization
-// crate-private until RN6 justifies a public standalone facade.
+// RN5C2B wires the accepted reliable primitives to Quinn. RN6 keeps this
+// low-level realization private behind the deliberate public facade rather
+// than making transport mechanics part of the standalone application API.
 #[allow(
     dead_code,
-    reason = "RN5C2B lands crate-private reliable realization before RN5E/RN6 wiring"
+    reason = "low-level reliable realization remains crate-private behind the RN6 facade"
 )]
 mod quinn_binding;
 #[allow(
