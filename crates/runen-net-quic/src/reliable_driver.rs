@@ -15,7 +15,9 @@ use runen_net::{
 
 use crate::{
     flow_control::{EstablishedFlow, FlowControl},
-    lifecycle::{ConnectionTeardown, FlowControlDriverParts, FlowControlledConnection},
+    lifecycle::{
+        ConnectionTeardown, EstablishedIoParts, FlowControlDriverParts, FlowControlledConnection,
+    },
     quinn_binding::{
         InboundReliable, OutboundReliable, ReceiveError, ReceiveProgress, SendError, SendProgress,
     },
@@ -345,6 +347,13 @@ pub(super) struct ReliableFlowControlledConnection {
     reliable: ReliableConnectionIo,
 }
 
+#[must_use = "reliable established I/O ownership must be driven or synchronously torn down"]
+#[derive(Debug)]
+pub(super) struct ReliableEstablishedIoParts {
+    pub(super) established: EstablishedIoParts,
+    pub(super) reliable: ReliableConnectionIo,
+}
+
 #[must_use = "reliable driver parts borrow one connection-local reliable I/O owner"]
 #[derive(Debug)]
 pub(super) struct ReliableFlowDriverParts<'a> {
@@ -374,6 +383,17 @@ impl ReliableFlowControlledConnection {
         ReliableFlowDriverParts {
             flow: self.flow_controlled.driver_parts(),
             reliable: &mut self.reliable,
+        }
+    }
+
+    pub(super) fn into_established_io(self) -> ReliableEstablishedIoParts {
+        let Self {
+            flow_controlled,
+            reliable,
+        } = self;
+        ReliableEstablishedIoParts {
+            established: flow_controlled.into_established_io(),
+            reliable,
         }
     }
 
@@ -437,11 +457,17 @@ mod tests {
     }
 
     fn assert_owned_send<T: Send + 'static>() {}
+    fn assert_static<T: 'static>() {}
 
     #[test]
     fn acquisition_future_types_are_owned_and_send() {
         assert_owned_send::<OpenUniFuture>();
         assert_owned_send::<AcceptUniFuture>();
+    }
+
+    #[test]
+    fn established_handoff_is_move_owned() {
+        assert_static::<ReliableEstablishedIoParts>();
     }
 
     #[test]

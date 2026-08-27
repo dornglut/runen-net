@@ -106,6 +106,24 @@ pub(super) struct FlowControlledConnection {
     flow_control: FlowControl,
 }
 
+#[must_use = "established I/O ownership must be driven or synchronously torn down"]
+#[derive(Debug)]
+pub(super) struct EstablishedIoParts {
+    pub(super) connection: Connection,
+    pub(super) sender: ControlSender,
+    pub(super) receiver: ControlReceiver,
+    pub(super) flow_control: FlowControl,
+    pub(super) teardown: EstablishedTeardown,
+}
+
+#[must_use = "established teardown ownership must be synchronously consumed"]
+#[derive(Debug)]
+pub(super) struct EstablishedTeardown {
+    connection: ConnectionHandle,
+    exchange: NegotiationExchange,
+    connection_permit: ConnectionSlotPermit,
+}
+
 #[must_use = "driver parts borrow the live connection and independent control directions"]
 #[derive(Debug)]
 pub(super) struct FlowControlDriverParts<'a> {
@@ -222,18 +240,92 @@ impl PendingControlSend {
 
 impl NegotiationCore {
     fn teardown(
-        mut self,
+        self,
         manager: &mut NegotiationManager,
         delivery: &mut DeliveryEndpoint,
     ) -> ConnectionTeardown {
-        let connection = self.connection;
-        let flow_terminations = delivery.terminate_connection(connection);
-        let negotiation_cleanup_error = self.exchange.abort(manager).err();
-        ConnectionTeardown {
+        let Self {
             connection,
-            flow_terminations,
-            negotiation_cleanup_error,
+            profile: _profile,
+            connection_permit: _connection_permit,
+            exchange,
+        } = self;
+        teardown_connection(connection, exchange, manager, delivery)
+    }
+
+    fn into_established_io(self, flow_control: FlowControl) -> EstablishedIoParts {
+        let Self {
+            connection: core_connection,
+            profile,
+            connection_permit,
+            exchange,
+        } = self;
+        let ProfileReadyParts {
+            connection,
+            side: _,
+            profile: _,
+            peer_settings: _,
+            sender,
+            receiver,
+        } = profile;
+        EstablishedIoParts {
+            connection,
+            sender,
+            receiver,
+            flow_control,
+            teardown: EstablishedTeardown {
+                connection: core_connection,
+                exchange,
+                connection_permit,
+            },
         }
+    }
+}
+
+impl EstablishedTeardown {
+    pub(super) fn teardown(
+        self,
+        manager: &mut NegotiationManager,
+        delivery: &mut DeliveryEndpoint,
+    ) -> ConnectionTeardown {
+        let Self {
+            connection,
+            exchange,
+            connection_permit: _connection_permit,
+        } = self;
+        teardown_connection(connection, exchange, manager, delivery)
+    }
+}
+
+impl EstablishedIoParts {
+    pub(super) fn teardown(
+        self,
+        manager: &mut NegotiationManager,
+        delivery: &mut DeliveryEndpoint,
+    ) -> ConnectionTeardown {
+        let Self {
+            connection: _connection,
+            sender: _sender,
+            receiver: _receiver,
+            flow_control: _flow_control,
+            teardown,
+        } = self;
+        teardown.teardown(manager, delivery)
+    }
+}
+
+fn teardown_connection(
+    connection: ConnectionHandle,
+    mut exchange: NegotiationExchange,
+    manager: &mut NegotiationManager,
+    delivery: &mut DeliveryEndpoint,
+) -> ConnectionTeardown {
+    let flow_terminations = delivery.terminate_connection(connection);
+    let negotiation_cleanup_error = exchange.abort(manager).err();
+    ConnectionTeardown {
+        connection,
+        flow_terminations,
+        negotiation_cleanup_error,
     }
 }
 
@@ -515,16 +607,17 @@ impl FlowControlledConnection {
         }
     }
 
+    pub(super) fn into_established_io(self) -> EstablishedIoParts {
+        let Self { core, flow_control } = self;
+        core.into_established_io(flow_control)
+    }
+
     pub(super) fn teardown(
         self,
         manager: &mut NegotiationManager,
         delivery: &mut DeliveryEndpoint,
     ) -> ConnectionTeardown {
-        let Self {
-            core,
-            flow_control: _flow_control,
-        } = self;
-        core.teardown(manager, delivery)
+        self.into_established_io().teardown(manager, delivery)
     }
 }
 
@@ -895,6 +988,14 @@ mod tests {
         }
         .validate(resources)
         .unwrap()
+    }
+
+    fn assert_static<T: 'static>() {}
+
+    #[test]
+    fn established_io_ownership_is_move_owned() {
+        assert_static::<EstablishedIoParts>();
+        assert_static::<EstablishedTeardown>();
     }
 
     #[test]
