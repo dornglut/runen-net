@@ -11,7 +11,8 @@ use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowD
 use crate::{
     datagram::{
         DatagramReceiveError, DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress,
-        DatagramSender, OwnedDatagramReadFuture, read_quinn_datagram_owned, receive_datagram,
+        DatagramSender, DatagramSubmissionError, DatagramSubmissionOutcome, OwnedDatagramReadFuture,
+        read_quinn_datagram_owned, receive_datagram,
     },
     flow_control::{EstablishedFlow, FlowControl},
     wire::FlowId,
@@ -82,6 +83,17 @@ impl DatagramConnectionIo {
 
     pub(super) const fn outbound_transport_drops(&self) -> usize {
         self.sender.outbound_transport_drops()
+    }
+
+    pub(super) fn submit(
+        &mut self,
+        endpoint: &mut DeliveryEndpoint,
+        flow_control: &FlowControl,
+        flow_id: FlowId,
+        payload: Vec<u8>,
+    ) -> Result<DatagramSubmissionOutcome, DatagramSubmissionError> {
+        self.sender
+            .submit(endpoint, flow_control.registry(), flow_id, payload)
     }
 
     pub(super) fn register_outbound(
