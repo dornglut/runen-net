@@ -1,4 +1,6 @@
-use quinn::{Connection, ConnectionError, SendDatagramError};
+use std::{future::Future, pin::Pin};
+
+use quinn::{Connection, ReadDatagram, SendDatagramError};
 use runen_net::delivery::{
     CustodyCommitError, DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
     FlowDirection, ReceiveOutcome, SubmissionOutcome,
@@ -11,6 +13,10 @@ use crate::wire::{
 };
 
 const UNORDERED_INGRESS_INDEX: u64 = 0;
+
+pub(super) type DatagramReadResult = <ReadDatagram<'static> as Future>::Output;
+pub(super) type OwnedDatagramReadFuture =
+    Pin<Box<dyn Future<Output = DatagramReadResult> + Send + 'static>>;
 
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
 pub(super) struct DatagramSenderDiagnostics {
@@ -490,10 +496,8 @@ pub(super) fn receive_datagram(
     Ok(DatagramReceiveOutcome::Core(outcome))
 }
 
-pub(super) async fn read_quinn_datagram(
-    connection: &Connection,
-) -> Result<impl AsRef<[u8]>, ConnectionError> {
-    connection.read_datagram().await
+pub(super) fn read_quinn_datagram_owned(connection: Connection) -> OwnedDatagramReadFuture {
+    Box::pin(async move { connection.read_datagram().await })
 }
 
 #[cfg(test)]
@@ -597,6 +601,13 @@ mod tests {
             self.sent.push(datagram);
             Ok(())
         }
+    }
+
+    fn assert_owned_send<T: Send + 'static>() {}
+
+    #[test]
+    fn owned_datagram_read_future_is_send_and_static() {
+        assert_owned_send::<OwnedDatagramReadFuture>();
     }
 
     #[test]

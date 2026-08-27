@@ -1,10 +1,10 @@
-use std::num::NonZeroUsize;
+use std::{future::Future, num::NonZeroUsize, pin::Pin};
 
 use quinn::Connection;
 use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowTermination};
 
 use crate::{
-    control::{ControlFrame, ControlSender, ProfileBootstrapError},
+    control::{ControlFrame, ControlReceiver, ControlSender, ProfileBootstrapError},
     flow_control::{
         EstablishedFlow, FlowControl, FlowControlError, FlowControlProgress, InboundAdmission,
         InboundAdmissionError, InboundOpenRequest, InboundResolution, LocalTermination,
@@ -12,6 +12,25 @@ use crate::{
     },
     wire::{FlowId, FlowRejectReason, FlowTerminateReason},
 };
+
+pub(super) type OwnedControlReceiveFuture =
+    Pin<Box<dyn Future<Output = ControlReceiveCompletion> + Send + 'static>>;
+pub(super) type OwnedFlowControlSendFuture =
+    Pin<Box<dyn Future<Output = FlowControlSendCompletion> + Send + 'static>>;
+
+#[must_use = "completed control receive returns the sole receiver direction"]
+#[derive(Debug)]
+pub(super) struct ControlReceiveCompletion {
+    pub(super) receiver: ControlReceiver,
+    pub(super) result: Result<ControlFrame, ProfileBootstrapError>,
+}
+
+#[must_use = "completed flow-control send returns the sole sender direction"]
+#[derive(Debug)]
+pub(super) struct FlowControlSendCompletion {
+    pub(super) sender: ControlSender,
+    pub(super) result: Result<FlowControlSendEffect, Box<FlowControlSendError>>,
+}
 
 #[must_use = "pending flow-control reporting must be sent or the connection torn down"]
 #[derive(Debug, PartialEq, Eq)]
@@ -80,6 +99,20 @@ impl PendingFlowControlSend {
             Err(error) => Err(Box::new(FlowControlSendError { error, effect })),
         }
     }
+
+    pub(super) fn into_owned_send(self, mut sender: ControlSender) -> OwnedFlowControlSendFuture {
+        Box::pin(async move {
+            let result = self.send(&mut sender).await;
+            FlowControlSendCompletion { sender, result }
+        })
+    }
+}
+
+pub(super) fn receive_control_owned(mut receiver: ControlReceiver) -> OwnedControlReceiveFuture {
+    Box::pin(async move {
+        let result = receiver.receive_frame().await;
+        ControlReceiveCompletion { receiver, result }
+    })
 }
 
 pub(super) fn prepare_outbound_open(
@@ -234,6 +267,14 @@ mod tests {
 
     fn nz(value: usize) -> NonZeroUsize {
         NonZeroUsize::new(value).unwrap()
+    }
+
+    fn assert_owned_send<T: Send + 'static>() {}
+
+    #[test]
+    fn owned_control_operation_futures_are_send_and_static() {
+        assert_owned_send::<OwnedControlReceiveFuture>();
+        assert_owned_send::<OwnedFlowControlSendFuture>();
     }
 
     #[test]
