@@ -11,8 +11,8 @@ use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowD
 use crate::{
     datagram::{
         DatagramReceiveError, DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress,
-        DatagramSender, DatagramSubmissionError, DatagramSubmissionOutcome, OwnedDatagramReadFuture,
-        read_quinn_datagram_owned, receive_datagram,
+        DatagramSender, DatagramSubmissionError, DatagramSubmissionOutcome,
+        OwnedDatagramReadFuture, read_quinn_datagram_owned, receive_datagram,
     },
     flow_control::{EstablishedFlow, FlowControl},
     wire::FlowId,
@@ -101,16 +101,17 @@ impl DatagramConnectionIo {
         flow_control: &FlowControl,
         flow: EstablishedFlow,
     ) -> Result<(), DatagramIoError> {
-        let registered = flow_control
-            .registry()
-            .registered_flow(flow.flow_id())
-            .map(|registered| {
-                (
-                    registered.key(),
-                    registered.mode(),
-                    registered.max_message_bytes(),
-                )
-            });
+        let registered =
+            flow_control
+                .registry()
+                .registered_flow(flow.flow_id())
+                .map(|registered| {
+                    (
+                        registered.key(),
+                        registered.mode(),
+                        registered.max_message_bytes(),
+                    )
+                });
         validate_outbound_registration(
             flow.key(),
             flow.mode(),
@@ -154,10 +155,7 @@ impl DatagramConnectionIo {
                 Ok(DatagramSendProgress::Idle) => {}
                 Ok(progress) => {
                     self.outbound_cursor = (index + 1) % len;
-                    return Ok(Some(DatagramOutboundProgress::Driven {
-                        flow_id,
-                        progress,
-                    }));
+                    return Ok(Some(DatagramOutboundProgress::Driven { flow_id, progress }));
                 }
                 Err(error) => {
                     self.outbound_cursor = (index + 1) % len;
@@ -178,9 +176,10 @@ impl DatagramConnectionIo {
         flow_control: &FlowControl,
     ) -> Poll<Result<DatagramReceiveOutcome, DatagramIoError>> {
         let polled = {
-            let receive = self.receive.as_mut().ok_or(DatagramIoError::State(
-                DatagramIoStateError::ReadTerminated,
-            ))?;
+            let receive = self
+                .receive
+                .as_mut()
+                .ok_or(DatagramIoError::State(DatagramIoStateError::ReadTerminated))?;
             receive.as_mut().poll(cx)
         };
 
@@ -223,10 +222,7 @@ fn validate_outbound_registration(
     Ok(())
 }
 
-fn registered_outbound_unreliable_is_live(
-    flow_control: &FlowControl,
-    flow_id: FlowId,
-) -> bool {
+fn registered_outbound_unreliable_is_live(flow_control: &FlowControl, flow_id: FlowId) -> bool {
     flow_control
         .registry()
         .registered_flow(flow_id)
@@ -245,10 +241,7 @@ const fn cursor_after_remove(index: usize, new_len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use runen_net::{
-        delivery::DeliveryFlowHandle,
-        identity::ConnectionHandle,
-    };
+    use runen_net::{delivery::DeliveryFlowHandle, identity::ConnectionHandle};
 
     use super::*;
 
