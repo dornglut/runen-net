@@ -511,6 +511,14 @@ async fn run_replacement_scenario() {
     )
     .await;
 
+    send_reliable_and_expect(
+        &mut first_client,
+        &mut first_server,
+        first_reliable,
+        b"first-connection-reliable".to_vec(),
+    )
+    .await;
+
     let buffered_payload = b"first-connection-buffered-custody".to_vec();
     assert!(matches!(
         first_server.driver.submit_unreliable(
