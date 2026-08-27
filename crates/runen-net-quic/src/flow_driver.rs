@@ -311,8 +311,11 @@ pub(super) fn classify_outbound_reliable_active_failure(
     context: ReliableFailureContext,
     error: &SendError,
 ) -> EstablishedDataFailureDisposition {
-    let reason = reliable_send_failure_reason(error);
-    classify_reliable_active_context(flow_control, context, reason, None)
+    classify_reliable_active_context(
+        flow_control,
+        context,
+        reliable_send_failure_reason(error),
+    )
 }
 
 pub(super) fn classify_inbound_reliable_active_failure(
@@ -323,8 +326,11 @@ pub(super) fn classify_inbound_reliable_active_failure(
     if context == ReliableFailureContext::Unresolved {
         return classify_unresolved_reliable_receive(error);
     }
-    let reason = reliable_receive_failure_reason(error);
-    classify_reliable_active_context(flow_control, context, reason, None)
+    classify_reliable_active_context(
+        flow_control,
+        context,
+        reliable_receive_failure_reason(error),
+    )
 }
 
 pub(super) fn classify_inbound_reliable_construction_failure(
@@ -367,31 +373,14 @@ pub(super) fn classify_datagram_receive_failure(
     flow_control: &FlowControl,
     failure: &DatagramReceiveFailure,
 ) -> EstablishedDataFailureDisposition {
-    let Some(flow_id) = failure.flow_id else {
-        let code = match failure.error {
-            DatagramReceiveError::VarInt(_) | DatagramReceiveError::FlowId(_) => {
-                Some(ApplicationErrorCode::ProfileProtocolError)
-            }
-            DatagramReceiveError::AllocationFailed => {
-                Some(ApplicationErrorCode::ResourceLimitError)
-            }
-            DatagramReceiveError::WrongDirection
-            | DatagramReceiveError::ReliableFlow
-            | DatagramReceiveError::PayloadExceedsProfile
-            | DatagramReceiveError::Core(_) => None,
+    let Some(reason) = datagram_receive_failure_reason(failure) else {
+        return EstablishedDataFailureDisposition::ConnectionTerminal {
+            code: unresolved_datagram_receive_close_code(&failure.error),
         };
-        return EstablishedDataFailureDisposition::ConnectionTerminal { code };
     };
-
-    let reason = match failure.error {
-        DatagramReceiveError::AllocationFailed => FlowTerminateReason::ResourceFailure,
-        DatagramReceiveError::VarInt(_)
-        | DatagramReceiveError::FlowId(_)
-        | DatagramReceiveError::WrongDirection
-        | DatagramReceiveError::ReliableFlow
-        | DatagramReceiveError::PayloadExceedsProfile
-        | DatagramReceiveError::Core(_) => FlowTerminateReason::ProtocolFailure,
-    };
+    let flow_id = failure
+        .flow_id
+        .expect("known-flow receive reason requires resolved FlowId");
     known_flow_disposition(
         flow_id,
         reason,
@@ -415,10 +404,9 @@ pub(super) fn classify_datagram_send_failure(
             flow_control.registry().registered_flow(flow_id).is_some(),
             false,
         ),
-        DatagramSendError::SequenceExhausted => classify_datagram_sequence_exhaustion(
-            flow_control,
-            flow_id,
-        ),
+        DatagramSendError::SequenceExhausted => {
+            classify_datagram_sequence_exhaustion(flow_control, flow_id)
+        }
         DatagramSendError::UnknownFlowId
         | DatagramSendError::WrongDirection
         | DatagramSendError::ReliableFlow
@@ -459,38 +447,67 @@ fn classify_datagram_sequence_exhaustion(
     flow_control: &FlowControl,
     flow_id: FlowId,
 ) -> EstablishedDataFailureDisposition {
-    let Some(flow) = flow_control.registry().registered_flow(flow_id) else {
-        return EstablishedDataFailureDisposition::CleanupOnly { flow_id };
-    };
-    let reason = if flow.mode() == DeliveryMode::UnreliableSequenced {
-        FlowTerminateReason::Normal
-    } else {
-        FlowTerminateReason::ProtocolFailure
-    };
-    EstablishedDataFailureDisposition::TerminateAndReport { flow_id, reason }
+    sequence_exhaustion_disposition(
+        flow_id,
+        flow_control
+            .registry()
+            .registered_flow(flow_id)
+            .map(|flow| flow.mode()),
+    )
+}
+
+const fn sequence_exhaustion_disposition(
+    flow_id: FlowId,
+    mode: Option<DeliveryMode>,
+) -> EstablishedDataFailureDisposition {
+    match mode {
+        None => EstablishedDataFailureDisposition::CleanupOnly { flow_id },
+        Some(DeliveryMode::UnreliableSequenced) => {
+            EstablishedDataFailureDisposition::TerminateAndReport {
+                flow_id,
+                reason: FlowTerminateReason::Normal,
+            }
+        }
+        Some(DeliveryMode::ReliableOrdered | DeliveryMode::UnreliableUnordered) => {
+            EstablishedDataFailureDisposition::TerminateAndReport {
+                flow_id,
+                reason: FlowTerminateReason::ProtocolFailure,
+            }
+        }
+    }
 }
 
 fn classify_reliable_active_context(
     flow_control: &FlowControl,
     context: ReliableFailureContext,
     reason: FlowTerminateReason,
-    unresolved_code: Option<ApplicationErrorCode>,
+) -> EstablishedDataFailureDisposition {
+    let live_now = match context {
+        ReliableFailureContext::ResolvedLive { flow_id } => {
+            flow_control.registry().registered_flow(flow_id).is_some()
+        }
+        ReliableFailureContext::Unresolved | ReliableFailureContext::ResolvedDetached { .. } => {
+            false
+        }
+    };
+    reliable_active_context_disposition(context, reason, live_now)
+}
+
+const fn reliable_active_context_disposition(
+    context: ReliableFailureContext,
+    reason: FlowTerminateReason,
+    live_now: bool,
 ) -> EstablishedDataFailureDisposition {
     match context {
         ReliableFailureContext::Unresolved => {
-            EstablishedDataFailureDisposition::ConnectionTerminal {
-                code: unresolved_code,
-            }
+            EstablishedDataFailureDisposition::ConnectionTerminal { code: None }
         }
         ReliableFailureContext::ResolvedDetached { flow_id } => {
             EstablishedDataFailureDisposition::CleanupOnly { flow_id }
         }
-        ReliableFailureContext::ResolvedLive { flow_id } => known_flow_disposition(
-            flow_id,
-            reason,
-            flow_control.registry().registered_flow(flow_id).is_some(),
-            true,
-        ),
+        ReliableFailureContext::ResolvedLive { flow_id } => {
+            known_flow_disposition(flow_id, reason, live_now, true)
+        }
     }
 }
 
@@ -527,6 +544,36 @@ fn classify_unresolved_reliable_receive(
         | ReceiveError::Terminal => None,
     };
     EstablishedDataFailureDisposition::ConnectionTerminal { code }
+}
+
+fn datagram_receive_failure_reason(
+    failure: &DatagramReceiveFailure,
+) -> Option<FlowTerminateReason> {
+    failure.flow_id?;
+    Some(match &failure.error {
+        DatagramReceiveError::AllocationFailed => FlowTerminateReason::ResourceFailure,
+        DatagramReceiveError::VarInt(_)
+        | DatagramReceiveError::FlowId(_)
+        | DatagramReceiveError::WrongDirection
+        | DatagramReceiveError::ReliableFlow
+        | DatagramReceiveError::PayloadExceedsProfile
+        | DatagramReceiveError::Core(_) => FlowTerminateReason::ProtocolFailure,
+    })
+}
+
+const fn unresolved_datagram_receive_close_code(
+    error: &DatagramReceiveError,
+) -> Option<ApplicationErrorCode> {
+    match error {
+        DatagramReceiveError::VarInt(_) | DatagramReceiveError::FlowId(_) => {
+            Some(ApplicationErrorCode::ProfileProtocolError)
+        }
+        DatagramReceiveError::AllocationFailed => Some(ApplicationErrorCode::ResourceLimitError),
+        DatagramReceiveError::WrongDirection
+        | DatagramReceiveError::ReliableFlow
+        | DatagramReceiveError::PayloadExceedsProfile
+        | DatagramReceiveError::Core(_) => None,
+    }
 }
 
 const fn reliable_send_failure_reason(error: &SendError) -> FlowTerminateReason {
@@ -671,26 +718,25 @@ mod tests {
     }
 
     #[test]
-    fn known_failure_disposition_distinguishes_cleanup_and_reporting() {
+    fn reliable_active_context_uses_post_failure_liveness() {
         let flow_id = flow(7);
+        let context = ReliableFailureContext::ResolvedLive { flow_id };
         assert_eq!(
-            known_flow_disposition(
-                flow_id,
-                FlowTerminateReason::ProtocolFailure,
-                true,
+            reliable_active_context_disposition(
+                context,
+                FlowTerminateReason::ReliableDeliveryFailure,
                 true,
             ),
             EstablishedDataFailureDisposition::TerminateAndReport {
                 flow_id,
-                reason: FlowTerminateReason::ProtocolFailure,
+                reason: FlowTerminateReason::ReliableDeliveryFailure,
             }
         );
         assert_eq!(
-            known_flow_disposition(
-                flow_id,
+            reliable_active_context_disposition(
+                context,
                 FlowTerminateReason::ReliableDeliveryFailure,
                 false,
-                true,
             ),
             EstablishedDataFailureDisposition::ReportOnly {
                 flow_id,
@@ -698,25 +744,10 @@ mod tests {
             }
         );
         assert_eq!(
-            known_flow_disposition(
-                flow_id,
-                FlowTerminateReason::ProtocolFailure,
-                false,
-                false,
-            ),
-            EstablishedDataFailureDisposition::CleanupOnly { flow_id }
-        );
-    }
-
-    #[test]
-    fn detached_reliable_failure_is_cleanup_only() {
-        let flow_id = flow(8);
-        assert_eq!(
-            classify_reliable_active_context(
-                unsafe_flow_control_placeholder(),
+            reliable_active_context_disposition(
                 ReliableFailureContext::ResolvedDetached { flow_id },
-                FlowTerminateReason::ReliableDeliveryFailure,
-                None,
+                FlowTerminateReason::ProtocolFailure,
+                true,
             ),
             EstablishedDataFailureDisposition::CleanupOnly { flow_id }
         );
@@ -808,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn datagram_receive_reason_is_protocol_or_resource_only_after_identity() {
+    fn datagram_receive_reason_exists_only_after_identity() {
         let flow_id = flow(10);
         let protocol = DatagramReceiveFailure {
             flow_id: Some(flow_id),
@@ -818,48 +849,51 @@ mod tests {
             flow_id: Some(flow_id),
             error: DatagramReceiveError::AllocationFailed,
         };
-        assert_eq!(
-            datagram_receive_reason(&protocol),
-            Some(FlowTerminateReason::ProtocolFailure)
-        );
-        assert_eq!(
-            datagram_receive_reason(&allocation),
-            Some(FlowTerminateReason::ResourceFailure)
-        );
         let unresolved = DatagramReceiveFailure {
             flow_id: None,
             error: DatagramReceiveError::VarInt(VarIntDecodeError::NonMinimal),
         };
-        assert_eq!(datagram_receive_reason(&unresolved), None);
+        assert_eq!(
+            datagram_receive_failure_reason(&protocol),
+            Some(FlowTerminateReason::ProtocolFailure)
+        );
+        assert_eq!(
+            datagram_receive_failure_reason(&allocation),
+            Some(FlowTerminateReason::ResourceFailure)
+        );
+        assert_eq!(datagram_receive_failure_reason(&unresolved), None);
+        assert_eq!(
+            unresolved_datagram_receive_close_code(&unresolved.error),
+            Some(ApplicationErrorCode::ProfileProtocolError)
+        );
     }
 
     #[test]
-    fn only_datagram_sequence_error_authorizes_normal_termination() {
-        assert!(matches!(
-            DatagramSubmissionError::SequenceExhausted,
-            DatagramSubmissionError::SequenceExhausted
-        ));
-        assert!(!matches!(
-            DatagramSubmissionError::LengthOverflow,
-            DatagramSubmissionError::SequenceExhausted
-        ));
-    }
-
-    fn unsafe_flow_control_placeholder() -> &'static FlowControl {
-        panic!("detached context must not inspect FlowControl")
-    }
-
-    fn datagram_receive_reason(
-        failure: &DatagramReceiveFailure,
-    ) -> Option<FlowTerminateReason> {
-        failure.flow_id.map(|_| match failure.error {
-            DatagramReceiveError::AllocationFailed => FlowTerminateReason::ResourceFailure,
-            DatagramReceiveError::VarInt(_)
-            | DatagramReceiveError::FlowId(_)
-            | DatagramReceiveError::WrongDirection
-            | DatagramReceiveError::ReliableFlow
-            | DatagramReceiveError::PayloadExceedsProfile
-            | DatagramReceiveError::Core(_) => FlowTerminateReason::ProtocolFailure,
-        })
+    fn sequence_exhaustion_is_normal_only_for_live_sequenced_flow() {
+        let flow_id = flow(11);
+        assert_eq!(
+            sequence_exhaustion_disposition(
+                flow_id,
+                Some(DeliveryMode::UnreliableSequenced),
+            ),
+            EstablishedDataFailureDisposition::TerminateAndReport {
+                flow_id,
+                reason: FlowTerminateReason::Normal,
+            }
+        );
+        assert_eq!(
+            sequence_exhaustion_disposition(
+                flow_id,
+                Some(DeliveryMode::UnreliableUnordered),
+            ),
+            EstablishedDataFailureDisposition::TerminateAndReport {
+                flow_id,
+                reason: FlowTerminateReason::ProtocolFailure,
+            }
+        );
+        assert_eq!(
+            sequence_exhaustion_disposition(flow_id, None),
+            EstablishedDataFailureDisposition::CleanupOnly { flow_id }
+        );
     }
 }
