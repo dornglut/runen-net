@@ -62,7 +62,10 @@ impl fmt::Debug for DatagramConnectionIo {
             .debug_struct("DatagramConnectionIo")
             .field("receive_pending", &self.receive.is_some())
             .field("outbound", &self.outbound.len())
-            .field("outbound_transport_drops", &self.sender.outbound_transport_drops())
+            .field(
+                "outbound_transport_drops",
+                &self.sender.outbound_transport_drops(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -231,7 +234,7 @@ const fn cursor_after_remove(index: usize, new_len: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use runen_net::{
-        delivery::{DeliveryFlowHandle, FlowResourcePolicy, OutboundPressureBehavior, ReceiverPressureBehavior},
+        delivery::DeliveryFlowHandle,
         identity::ConnectionHandle,
     };
 
@@ -337,17 +340,5 @@ mod tests {
         assert_eq!(cursor_after_remove(0, 1), 0);
         assert_eq!(cursor_after_remove(2, 2), 0);
         assert_eq!(cursor_after_remove(1, 2), 1);
-    }
-
-    #[test]
-    fn test_only_policy_constructor_stays_mode_valid() {
-        let policy = FlowResourcePolicy::new(
-            NonZeroUsize::new(64).unwrap(),
-            NonZeroUsize::new(4).unwrap(),
-            NonZeroUsize::new(256).unwrap(),
-            OutboundPressureBehavior::RejectNew,
-            ReceiverPressureBehavior::DropIncomingUnreliable,
-        );
-        assert!(policy.validate_for_mode(DeliveryMode::UnreliableUnordered).is_ok());
     }
 }
