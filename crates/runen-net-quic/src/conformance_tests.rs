@@ -32,14 +32,14 @@ use tokio::runtime::Builder;
 
 use crate::{
     connection_driver::{
-        DatagramSubmitOutcome, EstablishedConnectionDriver, EstablishedConnectionProgress,
-        OutboundFinishOutcome,
+        ConnectionDriverError, ConnectionDriverStateError, DatagramSubmitOutcome,
+        EstablishedConnectionDriver, EstablishedConnectionProgress, OutboundFinishOutcome,
     },
     control::{LocalControlLimits, SemanticRole, ValidatedControlProfile},
     datagram::DatagramSubmissionOutcome,
     endpoint::{
-        EndpointResourceLimits, ValidatedEndpointResources, bind_client_endpoint,
-        bind_server_endpoint,
+        ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,
+        bind_client_endpoint, bind_server_endpoint,
     },
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
@@ -93,60 +93,19 @@ fn successful_live_quic_path_operates_with_authority_on_either_quic_side() {
     });
 }
 
+#[test]
+fn live_quic_connection_close_is_terminal_and_teardown_cleans_connection_state() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_connection_loss_scenario())
+            .await
+            .expect("live QUIC connection-loss conformance scenario timed out");
+    });
+}
+
 async fn run_successful_scenario(authority_side: AuthoritySide) {
-    let resources = resources();
-    let (certificate, private_key, roots) = ephemeral_identity();
-    let server = bind_server_endpoint(
-        loopback_ephemeral(),
-        resources,
-        vec![certificate],
-        private_key,
-    )
-    .unwrap();
-    let client = bind_client_endpoint(loopback_ephemeral(), resources, roots).unwrap();
-    let server_address = server.endpoint().local_addr().unwrap();
-
-    let client_profile = profile(
-        resources,
-        if authority_side == AuthoritySide::Client {
-            SemanticRole::Authority
-        } else {
-            SemanticRole::NonAuthority
-        },
-    );
-    let server_profile = profile(
-        resources,
-        if authority_side == AuthoritySide::Server {
-            SemanticRole::Authority
-        } else {
-            SemanticRole::NonAuthority
-        },
-    );
-
-    let (client_ready, server_ready) = join2(
-        connect_profile_ready(&client, server_address, "localhost", client_profile),
-        accept_profile_ready(&server, server_profile),
-    )
-    .await;
-    let client_ready = client_ready.unwrap();
-    let server_ready = server_ready
-        .unwrap()
-        .expect("server endpoint remained open");
-
-    let contract = contract();
-    let client_authority = (authority_side == AuthoritySide::Client).then(|| contract.clone());
-    let server_authority = (authority_side == AuthoritySide::Server).then(|| contract.clone());
-
-    let (client_established, server_established) = join2(
-        negotiate_side(client_ready, new_manager(), client_authority),
-        negotiate_side(server_ready, new_manager(), server_authority),
-    )
-    .await;
-
-    let (client_negotiated, client_manager) = client_established;
-    let (server_negotiated, server_manager) = server_established;
-    let mut client_side = activate(client_negotiated, client_manager);
-    let mut server_side = activate(server_negotiated, server_manager);
+    let (client, server, mut client_side, mut server_side) =
+        establish_live_pair(authority_side).await;
 
     let reliable = establish_flow(
         &mut client_side,
@@ -280,6 +239,191 @@ async fn run_successful_scenario(authority_side: AuthoritySide) {
         .endpoint()
         .close(VarInt::from_u32(0), b"test complete");
     join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
+}
+
+async fn establish_live_pair(
+    authority_side: AuthoritySide,
+) -> (ConfiguredEndpoint, ConfiguredEndpoint, LiveSide, LiveSide) {
+    let resources = resources();
+    let (certificate, private_key, roots) = ephemeral_identity();
+    let server = bind_server_endpoint(
+        loopback_ephemeral(),
+        resources,
+        vec![certificate],
+        private_key,
+    )
+    .unwrap();
+    let client = bind_client_endpoint(loopback_ephemeral(), resources, roots).unwrap();
+    let server_address = server.endpoint().local_addr().unwrap();
+
+    let client_profile = profile(
+        resources,
+        if authority_side == AuthoritySide::Client {
+            SemanticRole::Authority
+        } else {
+            SemanticRole::NonAuthority
+        },
+    );
+    let server_profile = profile(
+        resources,
+        if authority_side == AuthoritySide::Server {
+            SemanticRole::Authority
+        } else {
+            SemanticRole::NonAuthority
+        },
+    );
+
+    let (client_ready, server_ready) = join2(
+        connect_profile_ready(&client, server_address, "localhost", client_profile),
+        accept_profile_ready(&server, server_profile),
+    )
+    .await;
+    let client_ready = client_ready.unwrap();
+    let server_ready = server_ready
+        .unwrap()
+        .expect("server endpoint remained open");
+
+    let contract = contract();
+    let client_authority = (authority_side == AuthoritySide::Client).then(|| contract.clone());
+    let server_authority = (authority_side == AuthoritySide::Server).then(|| contract.clone());
+
+    let (client_established, server_established) = join2(
+        negotiate_side(client_ready, new_manager(), client_authority),
+        negotiate_side(server_ready, new_manager(), server_authority),
+    )
+    .await;
+
+    let (client_negotiated, client_manager) = client_established;
+    let (server_negotiated, server_manager) = server_established;
+    let client_side = activate(client_negotiated, client_manager);
+    let server_side = activate(server_negotiated, server_manager);
+
+    (client, server, client_side, server_side)
+}
+
+async fn run_connection_loss_scenario() {
+    let (client, server, mut client_side, mut server_side) =
+        establish_live_pair(AuthoritySide::Server).await;
+
+    let reliable = establish_flow(
+        &mut client_side,
+        &mut server_side,
+        DeliveryMode::ReliableOrdered,
+        11,
+        111,
+    )
+    .await;
+    let datagram = establish_flow(
+        &mut server_side,
+        &mut client_side,
+        DeliveryMode::UnreliableSequenced,
+        12,
+        112,
+    )
+    .await;
+
+    assert!(
+        client_side
+            .host
+            .delivery
+            .flow_contract(reliable.outbound)
+            .is_some()
+    );
+    assert!(
+        server_side
+            .host
+            .delivery
+            .flow_contract(reliable.inbound)
+            .is_some()
+    );
+    assert!(
+        server_side
+            .host
+            .delivery
+            .flow_contract(datagram.outbound)
+            .is_some()
+    );
+    assert!(
+        client_side
+            .host
+            .delivery
+            .flow_contract(datagram.inbound)
+            .is_some()
+    );
+
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"forced connection-close conformance");
+
+    let error = wait_for_connection_terminal_error(&mut client_side).await;
+    assert_connection_loss_driver_error(&error);
+    assert_driver_terminal(&mut client_side).await;
+
+    let client_teardown = client_side.driver.teardown(
+        &mut client_side.host.negotiation,
+        &mut client_side.host.delivery,
+    );
+    let server_teardown = server_side.driver.teardown(
+        &mut server_side.host.negotiation,
+        &mut server_side.host.delivery,
+    );
+
+    for teardown in [&client_teardown, &server_teardown] {
+        assert_eq!(teardown.connection, CONNECTION);
+        assert!(teardown.negotiation_cleanup_error.is_none());
+        assert_eq!(teardown.flow_terminations.len(), 2);
+        assert!(
+            teardown.flow_terminations.iter().all(|termination| {
+                termination.reason == FlowTerminationReason::ConnectionEnded
+            })
+        );
+    }
+    assert_eq!(client_side.host.delivery.active_flows(), 0);
+    assert_eq!(server_side.host.delivery.active_flows(), 0);
+
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"connection-loss test complete");
+    join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
+}
+
+async fn wait_for_connection_terminal_error(side: &mut LiveSide) -> ConnectionDriverError {
+    poll_fn(
+        |cx| match side.driver.poll_step(cx, &mut side.host.delivery) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(error),
+            Poll::Ready(Ok(progress)) => {
+                assert_non_failure_progress(&progress);
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        },
+    )
+    .await
+}
+
+fn assert_connection_loss_driver_error(error: &ConnectionDriverError) {
+    assert!(
+        matches!(
+            error,
+            ConnectionDriverError::ControlReceive(_)
+                | ConnectionDriverError::Reliable(_)
+                | ConnectionDriverError::Datagram(_)
+        ),
+        "connection close surfaced non-transport driver error: {error:?}"
+    );
+}
+
+async fn assert_driver_terminal(side: &mut LiveSide) {
+    poll_fn(
+        |cx| match side.driver.poll_step(cx, &mut side.host.delivery) {
+            Poll::Ready(Err(ConnectionDriverError::State(
+                ConnectionDriverStateError::Terminal,
+            ))) => Poll::Ready(()),
+            other => panic!("connection-loss driver did not remain terminal: {other:?}"),
+        },
+    )
+    .await;
 }
 
 fn resources() -> ValidatedEndpointResources {
