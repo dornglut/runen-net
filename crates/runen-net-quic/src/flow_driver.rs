@@ -798,16 +798,17 @@ mod tests {
 
     #[test]
     fn reliable_finish_rejections_do_not_become_flow_failures() {
-        assert_eq!(reliable_finish_failure_reason(&SendError::PendingData), None);
+        assert_eq!(
+            reliable_finish_failure_reason(&SendError::PendingData),
+            None
+        );
         assert_eq!(
             reliable_finish_failure_reason(&SendError::AlreadyFinishing),
             None
         );
         assert_eq!(reliable_finish_failure_reason(&SendError::Terminal), None);
         assert_eq!(
-            reliable_finish_failure_reason(&SendError::Core(
-                DeliveryOperationError::UnknownFlow,
-            )),
+            reliable_finish_failure_reason(&SendError::Core(DeliveryOperationError::UnknownFlow,)),
             None
         );
     }
