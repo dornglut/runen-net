@@ -1,0 +1,58 @@
+name: A5M Compile Fix
+
+on:
+  push:
+    branches:
+      - rn5e5a5m-live-loopback-success
+    paths:
+      - .github/workflows/a5m-compile-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: rn5e5a5m-live-loopback-success
+      - name: Install rustfmt
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Apply proven compile corrections
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/runen-net-quic/src/conformance_tests.rs')
+          text = path.read_text()
+          text = text.replace(
+              '        ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,\n',
+              '        EndpointResourceLimits, ValidatedEndpointResources,\n',
+          )
+          old = '''    assert_eq!(
+              sender
+                  .driver
+                  .request_outbound_finish_normal(&mut sender.host.delivery, flow.flow_id,),
+              Ok(OutboundFinishOutcome::Started)
+          );'''
+          new = '''    assert!(matches!(
+              sender
+                  .driver
+                  .request_outbound_finish_normal(&mut sender.host.delivery, flow.flow_id,),
+              Ok(OutboundFinishOutcome::Started)
+          ));'''
+          if old not in text:
+              raise SystemExit('expected finish assertion not found')
+          path.write_text(text.replace(old, new))
+          PY
+          cargo +stable fmt --all
+      - name: Commit corrections
+        run: |
+          if git diff --quiet -- crates/runen-net-quic/src/conformance_tests.rs; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/runen-net-quic/src/conformance_tests.rs
+          git commit -m "RN5E5A5M: fix test compile assertions"
+          git push origin HEAD:rn5e5a5m-live-loopback-success
