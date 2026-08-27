@@ -511,10 +511,37 @@ async fn run_replacement_scenario() {
     )
     .await;
 
+    let buffered_payload = b"first-connection-buffered-custody".to_vec();
+    assert!(matches!(
+        first_server.driver.submit_unreliable(
+            &mut first_server.host.delivery,
+            first_sequenced.flow_id,
+            buffered_payload.clone(),
+        ),
+        Ok(DatagramSubmitOutcome::Submitted(
+            DatagramSubmissionOutcome::Accepted {
+                accepted_index: 1,
+                local_pressure_drops: 0,
+            }
+        ))
+    ));
+    drive_until_buffered_without_exposure(
+        &mut first_server,
+        &mut first_client,
+        first_sequenced.inbound,
+        buffered_payload.len(),
+    )
+    .await;
+    assert_eq!(first_client.host.delivery.pending_messages(), 1);
+    assert_eq!(
+        first_client.host.delivery.pending_payload_bytes(),
+        buffered_payload.len()
+    );
+
     let first_reliable_flow_id = first_reliable.flow_id;
     let first_sequenced_flow_id = first_sequenced.flow_id;
-    let client_host = teardown_live_side(first_client, 2);
-    let server_host = teardown_live_side(first_server, 2);
+    let client_host = teardown_live_side(first_client, 2, 1);
+    let server_host = teardown_live_side(first_server, 2, 0);
 
     let (mut replacement_client, mut replacement_server) = establish_connection_on_endpoints(
         &client,
@@ -528,6 +555,10 @@ async fn run_replacement_scenario() {
 
     assert_eq!(replacement_client.host.delivery.active_flows(), 0);
     assert_eq!(replacement_server.host.delivery.active_flows(), 0);
+    assert_eq!(replacement_client.host.delivery.pending_messages(), 0);
+    assert_eq!(replacement_server.host.delivery.pending_messages(), 0);
+    assert_eq!(replacement_client.host.delivery.pending_payload_bytes(), 0);
+    assert_eq!(replacement_server.host.delivery.pending_payload_bytes(), 0);
 
     let replacement_reliable = establish_flow(
         &mut replacement_client,
@@ -575,8 +606,8 @@ async fn run_replacement_scenario() {
     )
     .await;
 
-    let _client_host = teardown_live_side(replacement_client, 2);
-    let _server_host = teardown_live_side(replacement_server, 2);
+    let _client_host = teardown_live_side(replacement_client, 2, 0);
+    let _server_host = teardown_live_side(replacement_server, 2, 0);
 
     client
         .endpoint()
@@ -587,7 +618,11 @@ async fn run_replacement_scenario() {
     join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
 }
 
-fn teardown_live_side(mut side: LiveSide, expected_flows: usize) -> HostState {
+fn teardown_live_side(
+    mut side: LiveSide,
+    expected_flows: usize,
+    expected_pending_messages: usize,
+) -> HostState {
     let connection = side.connection;
     let teardown = side
         .driver
@@ -599,9 +634,19 @@ fn teardown_live_side(mut side: LiveSide, expected_flows: usize) -> HostState {
         teardown
             .flow_terminations
             .iter()
-            .all(|termination| { termination.reason == FlowTerminationReason::ConnectionEnded })
+            .all(|termination| termination.reason == FlowTerminationReason::ConnectionEnded)
+    );
+    assert_eq!(
+        teardown
+            .flow_terminations
+            .iter()
+            .map(|termination| termination.pending_messages)
+            .sum::<usize>(),
+        expected_pending_messages
     );
     assert_eq!(side.host.delivery.active_flows(), 0);
+    assert_eq!(side.host.delivery.pending_messages(), 0);
+    assert_eq!(side.host.delivery.pending_payload_bytes(), 0);
     side.host
 }
 
@@ -940,6 +985,26 @@ async fn send_unreliable_and_expect(
         ))
     ));
     drive_until_exposed(sender, receiver, flow.inbound, &payload).await;
+}
+
+async fn drive_until_buffered_without_exposure(
+    sender: &mut LiveSide,
+    receiver: &mut LiveSide,
+    inbound: DeliveryFlowKey,
+    expected_payload_bytes: usize,
+) {
+    loop {
+        if receiver.host.delivery.flow_pending_usage(inbound) == Some((1, expected_payload_bytes)) {
+            return;
+        }
+        let (sender_progress, receiver_progress) = next_pair_progress(sender, receiver).await;
+        if let Some(progress) = sender_progress.as_ref() {
+            assert_non_failure_progress(progress);
+        }
+        if let Some(progress) = receiver_progress.as_ref() {
+            assert_non_failure_progress(progress);
+        }
+    }
 }
 
 async fn drive_until_exposed(
