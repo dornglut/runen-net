@@ -52,7 +52,8 @@ use crate::{
 };
 
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(20);
-const CONNECTION: ConnectionHandle = ConnectionHandle::new(1);
+const FIRST_CONNECTION: ConnectionHandle = ConnectionHandle::new(1);
+const REPLACEMENT_CONNECTION: ConnectionHandle = ConnectionHandle::new(2);
 const MAX_MESSAGE_BYTES: usize = 512;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -69,6 +70,7 @@ struct HostState {
 
 #[derive(Debug)]
 struct LiveSide {
+    connection: ConnectionHandle,
     driver: EstablishedConnectionDriver,
     host: HostState,
 }
@@ -100,6 +102,16 @@ fn live_quic_connection_close_is_terminal_and_teardown_cleans_connection_state()
         tokio::time::timeout(SCENARIO_TIMEOUT, run_connection_loss_scenario())
             .await
             .expect("live QUIC connection-loss conformance scenario timed out");
+    });
+}
+
+#[test]
+fn replacement_connection_restarts_fresh_connection_scoped_state() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_replacement_scenario())
+            .await
+            .expect("live QUIC replacement-state conformance scenario timed out");
     });
 }
 
@@ -211,8 +223,8 @@ async fn run_successful_scenario(authority_side: AuthoritySide) {
         &mut server_side.host.negotiation,
         &mut server_side.host.delivery,
     );
-    assert_eq!(client_teardown.connection, CONNECTION);
-    assert_eq!(server_teardown.connection, CONNECTION);
+    assert_eq!(client_teardown.connection, FIRST_CONNECTION);
+    assert_eq!(server_teardown.connection, FIRST_CONNECTION);
     assert!(client_teardown.negotiation_cleanup_error.is_none());
     assert!(server_teardown.negotiation_cleanup_error.is_none());
     assert_eq!(client_teardown.flow_terminations.len(), 2);
@@ -241,9 +253,7 @@ async fn run_successful_scenario(authority_side: AuthoritySide) {
     join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
 }
 
-async fn establish_live_pair(
-    authority_side: AuthoritySide,
-) -> (ConfiguredEndpoint, ConfiguredEndpoint, LiveSide, LiveSide) {
+fn configured_endpoints() -> (ConfiguredEndpoint, ConfiguredEndpoint) {
     let resources = resources();
     let (certificate, private_key, roots) = ephemeral_identity();
     let server = bind_server_endpoint(
@@ -254,6 +264,41 @@ async fn establish_live_pair(
     )
     .unwrap();
     let client = bind_client_endpoint(loopback_ephemeral(), resources, roots).unwrap();
+    (client, server)
+}
+
+fn new_host() -> HostState {
+    HostState {
+        negotiation: new_manager(),
+        delivery: DeliveryEndpoint::new(aggregate_limits()),
+    }
+}
+
+async fn establish_live_pair(
+    authority_side: AuthoritySide,
+) -> (ConfiguredEndpoint, ConfiguredEndpoint, LiveSide, LiveSide) {
+    let (client, server) = configured_endpoints();
+    let (client_side, server_side) = establish_connection_on_endpoints(
+        &client,
+        &server,
+        authority_side,
+        FIRST_CONNECTION,
+        new_host(),
+        new_host(),
+    )
+    .await;
+    (client, server, client_side, server_side)
+}
+
+async fn establish_connection_on_endpoints(
+    client: &ConfiguredEndpoint,
+    server: &ConfiguredEndpoint,
+    authority_side: AuthoritySide,
+    connection: ConnectionHandle,
+    client_host: HostState,
+    server_host: HostState,
+) -> (LiveSide, LiveSide) {
+    let resources = resources();
     let server_address = server.endpoint().local_addr().unwrap();
 
     let client_profile = profile(
@@ -274,8 +319,8 @@ async fn establish_live_pair(
     );
 
     let (client_ready, server_ready) = join2(
-        connect_profile_ready(&client, server_address, "localhost", client_profile),
-        accept_profile_ready(&server, server_profile),
+        connect_profile_ready(client, server_address, "localhost", client_profile),
+        accept_profile_ready(server, server_profile),
     )
     .await;
     let client_ready = client_ready.unwrap();
@@ -287,18 +332,47 @@ async fn establish_live_pair(
     let client_authority = (authority_side == AuthoritySide::Client).then(|| contract.clone());
     let server_authority = (authority_side == AuthoritySide::Server).then(|| contract.clone());
 
+    let HostState {
+        negotiation: client_negotiation,
+        delivery: client_delivery,
+    } = client_host;
+    let HostState {
+        negotiation: server_negotiation,
+        delivery: server_delivery,
+    } = server_host;
+
     let (client_established, server_established) = join2(
-        negotiate_side(client_ready, new_manager(), client_authority),
-        negotiate_side(server_ready, new_manager(), server_authority),
+        negotiate_side(
+            client_ready,
+            connection,
+            client_negotiation,
+            client_authority,
+        ),
+        negotiate_side(
+            server_ready,
+            connection,
+            server_negotiation,
+            server_authority,
+        ),
     )
     .await;
 
     let (client_negotiated, client_manager) = client_established;
     let (server_negotiated, server_manager) = server_established;
-    let client_side = activate(client_negotiated, client_manager);
-    let server_side = activate(server_negotiated, server_manager);
+    let client_side = activate(
+        client_negotiated,
+        client_manager,
+        client_delivery,
+        connection,
+    );
+    let server_side = activate(
+        server_negotiated,
+        server_manager,
+        server_delivery,
+        connection,
+    );
 
-    (client, server, client_side, server_side)
+    (client_side, server_side)
 }
 
 async fn run_connection_loss_scenario() {
@@ -369,7 +443,7 @@ async fn run_connection_loss_scenario() {
     );
 
     for teardown in [&client_teardown, &server_teardown] {
-        assert_eq!(teardown.connection, CONNECTION);
+        assert_eq!(teardown.connection, FIRST_CONNECTION);
         assert!(teardown.negotiation_cleanup_error.is_none());
         assert_eq!(teardown.flow_terminations.len(), 2);
         assert!(
@@ -385,6 +459,150 @@ async fn run_connection_loss_scenario() {
         .endpoint()
         .close(VarInt::from_u32(0), b"connection-loss test complete");
     join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
+}
+
+async fn run_replacement_scenario() {
+    let (client, server) = configured_endpoints();
+    let (mut first_client, mut first_server) = establish_connection_on_endpoints(
+        &client,
+        &server,
+        AuthoritySide::Client,
+        FIRST_CONNECTION,
+        new_host(),
+        new_host(),
+    )
+    .await;
+
+    let first_reliable = establish_flow(
+        &mut first_client,
+        &mut first_server,
+        DeliveryMode::ReliableOrdered,
+        21,
+        121,
+    )
+    .await;
+    let first_sequenced = establish_flow(
+        &mut first_server,
+        &mut first_client,
+        DeliveryMode::UnreliableSequenced,
+        22,
+        122,
+    )
+    .await;
+
+    assert_eq!(first_reliable.flow_id.side(), WireSide::Client);
+    assert_eq!(first_reliable.flow_id.sequence(), 0);
+    assert_eq!(first_sequenced.flow_id.side(), WireSide::Server);
+    assert_eq!(first_sequenced.flow_id.sequence(), 0);
+    for key in [
+        first_reliable.outbound,
+        first_reliable.inbound,
+        first_sequenced.outbound,
+        first_sequenced.inbound,
+    ] {
+        assert_eq!(key.connection(), FIRST_CONNECTION);
+    }
+
+    send_unreliable_and_expect(
+        &mut first_server,
+        &mut first_client,
+        first_sequenced,
+        b"first-connection-sequenced".to_vec(),
+    )
+    .await;
+
+    let first_reliable_flow_id = first_reliable.flow_id;
+    let first_sequenced_flow_id = first_sequenced.flow_id;
+    let client_host = teardown_live_side(first_client, 2);
+    let server_host = teardown_live_side(first_server, 2);
+
+    let (mut replacement_client, mut replacement_server) = establish_connection_on_endpoints(
+        &client,
+        &server,
+        AuthoritySide::Client,
+        REPLACEMENT_CONNECTION,
+        client_host,
+        server_host,
+    )
+    .await;
+
+    assert_eq!(replacement_client.host.delivery.active_flows(), 0);
+    assert_eq!(replacement_server.host.delivery.active_flows(), 0);
+
+    let replacement_reliable = establish_flow(
+        &mut replacement_client,
+        &mut replacement_server,
+        DeliveryMode::ReliableOrdered,
+        21,
+        121,
+    )
+    .await;
+    let replacement_sequenced = establish_flow(
+        &mut replacement_server,
+        &mut replacement_client,
+        DeliveryMode::UnreliableSequenced,
+        22,
+        122,
+    )
+    .await;
+
+    assert_eq!(replacement_reliable.flow_id, first_reliable_flow_id);
+    assert_eq!(replacement_sequenced.flow_id, first_sequenced_flow_id);
+    assert_eq!(replacement_reliable.flow_id.sequence(), 0);
+    assert_eq!(replacement_sequenced.flow_id.sequence(), 0);
+    for key in [
+        replacement_reliable.outbound,
+        replacement_reliable.inbound,
+        replacement_sequenced.outbound,
+        replacement_sequenced.inbound,
+    ] {
+        assert_eq!(key.connection(), REPLACEMENT_CONNECTION);
+        assert_ne!(key.connection(), FIRST_CONNECTION);
+    }
+
+    send_reliable_and_expect(
+        &mut replacement_client,
+        &mut replacement_server,
+        replacement_reliable,
+        b"replacement-reliable".to_vec(),
+    )
+    .await;
+    send_unreliable_and_expect(
+        &mut replacement_server,
+        &mut replacement_client,
+        replacement_sequenced,
+        b"replacement-sequenced".to_vec(),
+    )
+    .await;
+
+    let _client_host = teardown_live_side(replacement_client, 2);
+    let _server_host = teardown_live_side(replacement_server, 2);
+
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"replacement-state test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"replacement-state test complete");
+    join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
+}
+
+fn teardown_live_side(mut side: LiveSide, expected_flows: usize) -> HostState {
+    let connection = side.connection;
+    let teardown = side
+        .driver
+        .teardown(&mut side.host.negotiation, &mut side.host.delivery);
+    assert_eq!(teardown.connection, connection);
+    assert!(teardown.negotiation_cleanup_error.is_none());
+    assert_eq!(teardown.flow_terminations.len(), expected_flows);
+    assert!(
+        teardown
+            .flow_terminations
+            .iter()
+            .all(|termination| { termination.reason == FlowTerminationReason::ConnectionEnded })
+    );
+    assert_eq!(side.host.delivery.active_flows(), 0);
+    side.host
 }
 
 async fn wait_for_connection_terminal_error(side: &mut LiveSide) -> ConnectionDriverError {
@@ -524,11 +742,12 @@ fn nz(value: usize) -> NonZeroUsize {
 
 async fn negotiate_side(
     admitted: AdmittedProfileReadyConnection,
+    connection: ConnectionHandle,
     mut manager: NegotiationManager,
     authority_contract: Option<NegotiatedContract>,
 ) -> (EstablishedNegotiatedConnection, NegotiationManager) {
     let requirements = NegotiationRequirements::default();
-    let pending = begin_negotiation(admitted, CONNECTION, &mut manager, offer()).unwrap();
+    let pending = begin_negotiation(admitted, connection, &mut manager, offer()).unwrap();
     let mut transition = complete_negotiation_send(pending).await;
 
     loop {
@@ -579,6 +798,8 @@ async fn complete_negotiation_send(mut pending: PendingNegotiationSend) -> Negot
 fn activate(
     established: EstablishedNegotiatedConnection,
     negotiation: NegotiationManager,
+    delivery: DeliveryEndpoint,
+    connection: ConnectionHandle,
 ) -> LiveSide {
     let driver = established
         .into_flow_control()
@@ -587,10 +808,11 @@ fn activate(
         .into_established_io()
         .into_connection_driver();
     LiveSide {
+        connection,
         driver,
         host: HostState {
             negotiation,
-            delivery: DeliveryEndpoint::new(aggregate_limits()),
+            delivery,
         },
     }
 }
@@ -602,13 +824,15 @@ async fn establish_flow(
     outbound_handle: u64,
     inbound_handle: u64,
 ) -> LiveFlow {
+    let connection = sender.connection;
+    assert_eq!(receiver.connection, connection);
     let outbound = DeliveryFlowKey::new(
-        CONNECTION,
+        connection,
         FlowDirection::Outbound,
         DeliveryFlowHandle::new(outbound_handle),
     );
     let inbound = DeliveryFlowKey::new(
-        CONNECTION,
+        connection,
         FlowDirection::Inbound,
         DeliveryFlowHandle::new(inbound_handle),
     );
