@@ -53,7 +53,7 @@ use crate::{
         connect_profile_ready,
     },
     quinn_binding::{ReceiveProgress, SendProgress},
-    wire::{ApplicationErrorCode, FlowId, WireSide},
+    wire::{ApplicationErrorCode, FlowId, FlowTerminateReason, WireSide, encode_varint},
 };
 
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(20);
@@ -238,6 +238,189 @@ async fn run_unknown_control_frame_scenario() {
     server
         .endpoint()
         .close(VarInt::from_u32(0), b"malformed-control test complete");
+    join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
+}
+
+#[test]
+fn live_known_flow_oversized_datagram_is_isolated_and_survivor_stays_live() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(
+            SCENARIO_TIMEOUT,
+            run_known_flow_datagram_isolation_scenario(),
+        )
+        .await
+        .expect("live known-flow DATAGRAM isolation scenario timed out");
+    });
+}
+
+async fn run_known_flow_datagram_isolation_scenario() {
+    let (client, server, mut client_side, mut server_side) =
+        establish_live_pair(AuthoritySide::Client).await;
+
+    let target = establish_flow(
+        &mut client_side,
+        &mut server_side,
+        DeliveryMode::UnreliableUnordered,
+        41,
+        141,
+    )
+    .await;
+    let survivor = establish_flow(
+        &mut client_side,
+        &mut server_side,
+        DeliveryMode::UnreliableSequenced,
+        42,
+        142,
+    )
+    .await;
+
+    send_unreliable_and_expect(
+        &mut client_side,
+        &mut server_side,
+        survivor,
+        b"survivor-before-malformed".to_vec(),
+    )
+    .await;
+
+    let flow_prefix = encode_varint(target.flow_id.value()).unwrap();
+    let mut malformed = flow_prefix.as_slice().to_vec();
+    malformed.resize(malformed.len() + MAX_MESSAGE_BYTES + 1, 0xa5);
+    client_side
+        .driver
+        .send_raw_datagram_for_test(malformed)
+        .expect("raw oversized DATAGRAM injection failed");
+
+    let mut receiver_failure_handled = false;
+    let mut receiver_report_sent = false;
+    let mut sender_remote_terminated = false;
+    while !(receiver_failure_handled && receiver_report_sent && sender_remote_terminated) {
+        let (client_progress, server_progress) =
+            next_pair_progress(&mut client_side, &mut server_side).await;
+
+        if let Some(progress) = server_progress {
+            match progress {
+                EstablishedConnectionProgress::FlowFailureHandled { flow_id } => {
+                    assert_eq!(flow_id, target.flow_id);
+                    receiver_failure_handled = true;
+                }
+                EstablishedConnectionProgress::ControlSendCompleted(
+                    crate::flow_driver::FlowControlSendEffect::LocalTerminated {
+                        flow,
+                        reason,
+                        termination,
+                    },
+                ) => {
+                    assert_eq!(flow.flow_id(), target.flow_id);
+                    assert_eq!(flow.key(), target.inbound);
+                    assert_eq!(reason, FlowTerminateReason::ProtocolFailure);
+                    assert_eq!(termination.key, target.inbound);
+                    assert_eq!(termination.reason, FlowTerminationReason::Requested);
+                    receiver_report_sent = true;
+                }
+                other => assert_non_failure_progress(&other),
+            }
+        }
+
+        if let Some(progress) = client_progress {
+            match progress {
+                EstablishedConnectionProgress::RemoteTerminated {
+                    flow,
+                    reason,
+                    termination,
+                } => {
+                    assert_eq!(flow.flow_id(), target.flow_id);
+                    assert_eq!(flow.key(), target.outbound);
+                    assert_eq!(reason, FlowTerminateReason::ProtocolFailure);
+                    assert_eq!(termination.key, target.outbound);
+                    assert_eq!(termination.reason, FlowTerminationReason::Requested);
+                    sender_remote_terminated = true;
+                }
+                other => assert_non_failure_progress(&other),
+            }
+        }
+    }
+
+    loop {
+        let (client_progress, server_progress) =
+            next_pair_progress(&mut client_side, &mut server_side).await;
+        if let Some(progress) = server_progress.as_ref() {
+            assert_non_failure_progress(progress);
+        }
+        if let Some(progress) = client_progress {
+            match progress {
+                EstablishedConnectionProgress::DatagramOutbound(
+                    crate::datagram_driver::DatagramOutboundProgress::Cancelled { flow_id },
+                ) if flow_id == target.flow_id => break,
+                other => assert_non_failure_progress(&other),
+            }
+        }
+    }
+
+    assert!(
+        client_side
+            .host
+            .delivery
+            .flow_contract(target.outbound)
+            .is_none()
+    );
+    assert!(
+        server_side
+            .host
+            .delivery
+            .flow_contract(target.inbound)
+            .is_none()
+    );
+    assert!(
+        client_side
+            .host
+            .delivery
+            .flow_contract(survivor.outbound)
+            .is_some()
+    );
+    assert!(
+        server_side
+            .host
+            .delivery
+            .flow_contract(survivor.inbound)
+            .is_some()
+    );
+
+    send_unreliable_and_expect_index(
+        &mut client_side,
+        &mut server_side,
+        survivor,
+        b"survivor-after-malformed".to_vec(),
+        1,
+    )
+    .await;
+
+    let client_teardown = client_side.driver.teardown(
+        &mut client_side.host.negotiation,
+        &mut client_side.host.delivery,
+    );
+    let server_teardown = server_side.driver.teardown(
+        &mut server_side.host.negotiation,
+        &mut server_side.host.delivery,
+    );
+    for teardown in [&client_teardown, &server_teardown] {
+        assert_eq!(teardown.connection, FIRST_CONNECTION);
+        assert!(teardown.negotiation_cleanup_error.is_none());
+        assert_eq!(teardown.flow_terminations.len(), 1);
+        assert_eq!(
+            teardown.flow_terminations[0].reason,
+            FlowTerminationReason::ConnectionEnded
+        );
+    }
+    assert_eq!(client_side.host.delivery.active_flows(), 0);
+    assert_eq!(server_side.host.delivery.active_flows(), 0);
+
+    client
+        .endpoint()
+        .close(VarInt::from_u32(0), b"known-flow DATAGRAM test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"known-flow DATAGRAM test complete");
     join2(client.endpoint().wait_idle(), server.endpoint().wait_idle()).await;
 }
 
@@ -1455,18 +1638,28 @@ async fn send_unreliable_and_expect(
     flow: LiveFlow,
     payload: Vec<u8>,
 ) {
+    send_unreliable_and_expect_index(sender, receiver, flow, payload, 0).await;
+}
+
+async fn send_unreliable_and_expect_index(
+    sender: &mut LiveSide,
+    receiver: &mut LiveSide,
+    flow: LiveFlow,
+    payload: Vec<u8>,
+    expected_index: u64,
+) {
     assert!(matches!(
         sender
             .driver
             .submit_unreliable(&mut sender.host.delivery, flow.flow_id, payload.clone(),),
         Ok(DatagramSubmitOutcome::Submitted(
             DatagramSubmissionOutcome::Accepted {
-                accepted_index: 0,
+                accepted_index,
                 local_pressure_drops: 0,
             }
-        ))
+        )) if accepted_index == expected_index
     ));
-    drive_until_exposed(sender, receiver, flow.inbound, &payload).await;
+    drive_until_exposed_index(sender, receiver, flow.inbound, &payload, expected_index).await;
 }
 
 async fn drive_until_buffered_without_exposure(
@@ -1495,9 +1688,19 @@ async fn drive_until_exposed(
     inbound: DeliveryFlowKey,
     expected: &[u8],
 ) {
+    drive_until_exposed_index(sender, receiver, inbound, expected, 0).await;
+}
+
+async fn drive_until_exposed_index(
+    sender: &mut LiveSide,
+    receiver: &mut LiveSide,
+    inbound: DeliveryFlowKey,
+    expected: &[u8],
+    expected_index: u64,
+) {
     loop {
         if let Some(message) = receiver.host.delivery.poll_exposure(inbound).unwrap() {
-            assert_eq!(message.accepted_index(), 0);
+            assert_eq!(message.accepted_index(), expected_index);
             assert_eq!(message.payload(), expected);
             return;
         }

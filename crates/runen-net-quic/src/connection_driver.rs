@@ -232,6 +232,14 @@ impl ReliableEstablishedIoParts {
 }
 
 impl EstablishedConnectionDriver {
+    #[cfg(test)]
+    pub(super) fn send_raw_datagram_for_test(
+        &self,
+        datagram: Vec<u8>,
+    ) -> Result<(), quinn::SendDatagramError> {
+        self.connection.send_datagram(datagram.into())
+    }
+
     pub(super) fn poll_step(
         &mut self,
         cx: &mut Context<'_>,
