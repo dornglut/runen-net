@@ -111,6 +111,7 @@ pub(super) enum ConnectionDriverError {
     OutboundOpen(OutboundOpenError),
     InboundAdmission(InboundAdmissionError),
     DatagramSubmission(DatagramSubmissionError),
+    DatagramProfileUnavailable,
     ControlReceive(ProfileBootstrapError),
     ControlSend(Box<FlowControlSendError>),
     ReceivedFlowControl(FlowControlError),
@@ -285,13 +286,20 @@ impl EstablishedConnectionDriver {
     ) -> Result<(), ConnectionDriverError> {
         self.require_control_send_ready()
             .map_err(ConnectionDriverError::State)?;
-        let pending = flow_driver::prepare_outbound_open(
+        let pending = match flow_driver::prepare_outbound_open(
             &self.connection,
             &mut self.flow_control,
             endpoint,
             request,
-        )
-        .map_err(ConnectionDriverError::OutboundOpen)?;
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                if outbound_open_error_is_connection_terminal(&error) {
+                    self.enter_terminal(None);
+                }
+                return Err(ConnectionDriverError::OutboundOpen(error));
+            }
+        };
         self.start_prepared_send(pending)
     }
 
@@ -304,16 +312,23 @@ impl EstablishedConnectionDriver {
         if let Err(error) = self.require_control_send_ready() {
             return Err(InboundDecisionDriverError::Unavailable { request, error });
         }
-        let pending = flow_driver::accept_inbound(
+        let pending = match flow_driver::accept_inbound(
             &mut self.flow_control,
             endpoint,
             request,
             admission,
             self.reliable.max_staging_bytes(),
-        )
-        .map_err(|error| {
-            InboundDecisionDriverError::Driver(ConnectionDriverError::InboundAdmission(error))
-        })?;
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                if inbound_admission_error_is_connection_terminal(&error) {
+                    self.enter_terminal(None);
+                }
+                return Err(InboundDecisionDriverError::Driver(
+                    ConnectionDriverError::InboundAdmission(error),
+                ));
+            }
+        };
         self.start_prepared_send(pending)
             .map_err(InboundDecisionDriverError::Driver)
     }
@@ -326,10 +341,17 @@ impl EstablishedConnectionDriver {
         if let Err(error) = self.require_control_send_ready() {
             return Err(InboundDecisionDriverError::Unavailable { request, error });
         }
-        let pending = flow_driver::reject_inbound(&mut self.flow_control, request, reason)
-            .map_err(|error| {
-                InboundDecisionDriverError::Driver(ConnectionDriverError::InboundAdmission(error))
-            })?;
+        let pending = match flow_driver::reject_inbound(&mut self.flow_control, request, reason) {
+            Ok(pending) => pending,
+            Err(error) => {
+                if inbound_admission_error_is_connection_terminal(&error) {
+                    self.enter_terminal(None);
+                }
+                return Err(InboundDecisionDriverError::Driver(
+                    ConnectionDriverError::InboundAdmission(error),
+                ));
+            }
+        };
         self.start_prepared_send(pending)
             .map_err(InboundDecisionDriverError::Driver)
     }
@@ -396,6 +418,12 @@ impl EstablishedConnectionDriver {
             .datagram
             .submit(endpoint, &self.flow_control, flow_id, payload)
         {
+            Ok(outcome) if datagram_submission_outcome_is_connection_terminal(outcome) => {
+                self.enter_terminal(None);
+                Err(DatagramSubmitDriverError::Driver(
+                    ConnectionDriverError::DatagramProfileUnavailable,
+                ))
+            }
             Ok(outcome) => Ok(DatagramSubmitOutcome::Submitted(outcome)),
             Err(error) => {
                 let disposition = flow_driver::classify_datagram_submission_error(
@@ -403,19 +431,22 @@ impl EstablishedConnectionDriver {
                     flow_id,
                     &error,
                 );
-                let Some(disposition) = disposition else {
-                    return Err(DatagramSubmitDriverError::Driver(
-                        ConnectionDriverError::DatagramSubmission(error),
-                    ));
-                };
-                let flow_id = self
-                    .apply_data_failure(
-                        endpoint,
-                        disposition,
-                        ConnectionDriverError::DatagramSubmission(error),
-                    )
-                    .map_err(DatagramSubmitDriverError::Driver)?;
-                Ok(DatagramSubmitOutcome::FlowFailureHandled { flow_id })
+                if let Some(disposition) = disposition {
+                    let flow_id = self
+                        .apply_data_failure(
+                            endpoint,
+                            disposition,
+                            ConnectionDriverError::DatagramSubmission(error),
+                        )
+                        .map_err(DatagramSubmitDriverError::Driver)?;
+                    return Ok(DatagramSubmitOutcome::FlowFailureHandled { flow_id });
+                }
+                if datagram_submission_error_is_connection_terminal(&error) {
+                    self.enter_terminal(None);
+                }
+                Err(DatagramSubmitDriverError::Driver(
+                    ConnectionDriverError::DatagramSubmission(error),
+                ))
             }
         }
     }
@@ -667,10 +698,6 @@ impl EstablishedConnectionDriver {
                     ),
                     ConnectionDriverError::Reliable(error),
                 ),
-                ReliableIoError::Connection(_) => {
-                    self.enter_terminal(None);
-                    DriverStep::Error(ConnectionDriverError::Reliable(error))
-                }
                 _ => {
                     self.enter_terminal(None);
                     DriverStep::Error(ConnectionDriverError::Reliable(error))
@@ -839,10 +866,6 @@ impl EstablishedConnectionDriver {
                     flow_driver::classify_datagram_receive_failure(&self.flow_control, failure),
                     ConnectionDriverError::Datagram(error),
                 ),
-                DatagramIoError::Connection(_) => {
-                    self.enter_terminal(None);
-                    DriverStep::Error(ConnectionDriverError::Datagram(error))
-                }
                 _ => {
                     self.enter_terminal(None);
                     DriverStep::Error(ConnectionDriverError::Datagram(error))
@@ -999,15 +1022,49 @@ const fn outbound_transport_owner(mode: DeliveryMode) -> OutboundTransportOwner 
     }
 }
 
+fn outbound_open_error_is_connection_terminal(error: &OutboundOpenError) -> bool {
+    matches!(error, OutboundOpenError::DatagramUnavailable)
+}
+
+fn inbound_admission_error_is_connection_terminal(error: &InboundAdmissionError) -> bool {
+    !matches!(error, InboundAdmissionError::RequestNotPending(_))
+}
+
+const fn datagram_submission_outcome_is_connection_terminal(
+    outcome: DatagramSubmissionOutcome,
+) -> bool {
+    matches!(
+        outcome,
+        DatagramSubmissionOutcome::RejectedTransportUnavailable
+    )
+}
+
+fn datagram_submission_error_is_connection_terminal(error: &DatagramSubmissionError) -> bool {
+    matches!(
+        error,
+        DatagramSubmissionError::Core(_)
+            | DatagramSubmissionError::Wire(_)
+            | DatagramSubmissionError::LengthOverflow
+            | DatagramSubmissionError::AcceptedIndexMismatch { .. }
+    )
+}
+
 const fn next_poll_cursor(current: usize) -> usize {
     (current + 1) % DRIVER_CATEGORY_COUNT
 }
 
 #[cfg(test)]
 mod tests {
+    use runen_net::delivery::{DeliveryOperationError, FlowDirection};
+
     use super::*;
+    use crate::wire::WireSide;
 
     fn assert_static<T: 'static>() {}
+
+    fn flow(sequence: u64) -> FlowId {
+        FlowId::new(WireSide::Client, sequence).unwrap()
+    }
 
     #[test]
     fn driver_and_control_states_are_move_owned() {
@@ -1074,6 +1131,55 @@ mod tests {
             outbound_transport_owner(DeliveryMode::UnreliableSequenced),
             OutboundTransportOwner::Datagram
         );
+    }
+
+    #[test]
+    fn post_profile_datagram_capability_loss_is_connection_terminal() {
+        assert!(outbound_open_error_is_connection_terminal(
+            &OutboundOpenError::DatagramUnavailable
+        ));
+        assert!(datagram_submission_outcome_is_connection_terminal(
+            DatagramSubmissionOutcome::RejectedTransportUnavailable
+        ));
+        assert!(!datagram_submission_outcome_is_connection_terminal(
+            DatagramSubmissionOutcome::RejectedCurrentDatagramSize
+        ));
+    }
+
+    #[test]
+    fn consumed_inbound_decision_failure_is_terminal_but_stale_request_is_not() {
+        let flow_id = flow(0);
+        assert!(!inbound_admission_error_is_connection_terminal(
+            &InboundAdmissionError::RequestNotPending(flow_id)
+        ));
+        assert!(inbound_admission_error_is_connection_terminal(
+            &InboundAdmissionError::WrongDirection(FlowDirection::Inbound)
+        ));
+    }
+
+    #[test]
+    fn unreliable_submission_distinguishes_host_misuse_from_driver_invariants() {
+        assert!(!datagram_submission_error_is_connection_terminal(
+            &DatagramSubmissionError::UnknownFlowId
+        ));
+        assert!(!datagram_submission_error_is_connection_terminal(
+            &DatagramSubmissionError::WrongDirection
+        ));
+        assert!(!datagram_submission_error_is_connection_terminal(
+            &DatagramSubmissionError::ReliableFlow
+        ));
+        assert!(datagram_submission_error_is_connection_terminal(
+            &DatagramSubmissionError::Core(DeliveryOperationError::UnknownFlow)
+        ));
+        assert!(datagram_submission_error_is_connection_terminal(
+            &DatagramSubmissionError::LengthOverflow
+        ));
+        assert!(datagram_submission_error_is_connection_terminal(
+            &DatagramSubmissionError::AcceptedIndexMismatch {
+                expected: 1,
+                accepted: 2,
+            }
+        ));
     }
 
     #[test]
