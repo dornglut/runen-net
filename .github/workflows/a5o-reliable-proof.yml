@@ -1,0 +1,69 @@
+name: A5O Reliable Proof
+
+on:
+  push:
+    branches:
+      - rn5e5a5o-fresh-replacement-state
+    paths:
+      - .github/workflows/a5o-reliable-proof.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: rn5e5a5o-fresh-replacement-state
+      - name: Install rustfmt
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Exercise first-lifetime reliable binding
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('crates/runen-net-quic/src/conformance_tests.rs')
+          text = path.read_text()
+          marker = '''    send_unreliable_and_expect(
+              &mut first_server,
+              &mut first_client,
+              first_sequenced,
+              b"first-connection-sequenced".to_vec(),
+          )
+          .await;
+          '''
+          if marker not in text:
+              marker = '''    send_unreliable_and_expect(
+                  &mut first_server,
+                  &mut first_client,
+                  first_sequenced,
+                  b"first-connection-sequenced".to_vec(),
+              )
+              .await;
+              '''
+          if marker not in text:
+              raise SystemExit('first sequenced send anchor not found')
+          reliable = '''    send_reliable_and_expect(
+              &mut first_client,
+              &mut first_server,
+              first_reliable,
+              b"first-connection-reliable".to_vec(),
+          )
+          .await;
+          '''
+          text = text.replace(marker, reliable + marker, 1)
+          path.write_text(text)
+          PY
+          cargo +stable fmt --all
+      - name: Commit strengthened evidence
+        run: |
+          if git diff --quiet -- crates/runen-net-quic/src/conformance_tests.rs; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/runen-net-quic/src/conformance_tests.rs
+          git commit -m "RN5E5A5O: exercise first-lifetime reliable binding"
+          git push origin HEAD:rn5e5a5o-fresh-replacement-state
