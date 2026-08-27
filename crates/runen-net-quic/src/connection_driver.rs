@@ -5,9 +5,7 @@ use std::{
 
 use quinn::Connection;
 use runen_net::{
-    delivery::{
-        DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowTermination,
-    },
+    delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowTermination},
     protocol::NegotiationManager,
 };
 
@@ -15,9 +13,7 @@ use crate::{
     control::{
         ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
     },
-    datagram::{
-        DatagramReceiveOutcome, DatagramSubmissionError, DatagramSubmissionOutcome,
-    },
+    datagram::{DatagramReceiveOutcome, DatagramSubmissionError, DatagramSubmissionOutcome},
     datagram_driver::{DatagramConnectionIo, DatagramIoError, DatagramOutboundProgress},
     flow_control::{
         EstablishedFlow, FlowControl, FlowControlError, InboundAdmission, InboundAdmissionError,
@@ -175,7 +171,9 @@ pub(super) enum EstablishedConnectionProgress {
     Reliable(ActiveReliableProgress),
     DatagramOutbound(DatagramOutboundProgress),
     DatagramInbound(DatagramReceiveOutcome),
-    FlowFailureHandled { flow_id: FlowId },
+    FlowFailureHandled {
+        flow_id: FlowId,
+    },
 }
 
 enum DriverStep {
@@ -250,8 +248,12 @@ impl EstablishedConnectionDriver {
             let step = match index {
                 0 => self.poll_control_send(cx),
                 1 => self.poll_control_receive(cx, endpoint),
-                2 if self.data_poll_allowed() => self.poll_reliable_outbound_acquisition(cx, endpoint),
-                3 if self.data_poll_allowed() => self.poll_reliable_inbound_acquisition(cx, endpoint),
+                2 if self.data_poll_allowed() => {
+                    self.poll_reliable_outbound_acquisition(cx, endpoint)
+                }
+                3 if self.data_poll_allowed() => {
+                    self.poll_reliable_inbound_acquisition(cx, endpoint)
+                }
                 4 if self.data_poll_allowed() => self.poll_reliable_outbound(cx, endpoint),
                 5 if self.data_poll_allowed() => self.poll_reliable_inbound(cx, endpoint),
                 6 if self.data_poll_allowed() => self.drive_datagram_outbound(endpoint),
@@ -434,7 +436,14 @@ impl EstablishedConnectionDriver {
             phase: _,
             poll_cursor: _,
         } = self;
-        drop((connection, flow_control, reliable, datagram, sender, receiver));
+        drop((
+            connection,
+            flow_control,
+            reliable,
+            datagram,
+            sender,
+            receiver,
+        ));
         teardown.teardown(manager, endpoint)
     }
 
@@ -523,7 +532,8 @@ impl EstablishedConnectionDriver {
         frame: ControlFrame,
         endpoint: &mut DeliveryEndpoint,
     ) -> DriverStep {
-        let progress = match flow_driver::process_received(&mut self.flow_control, endpoint, frame) {
+        let progress = match flow_driver::process_received(&mut self.flow_control, endpoint, frame)
+        {
             Ok(progress) => progress,
             Err(error) => {
                 close_for_received_flow_control_error(&self.connection, &error);
@@ -545,7 +555,8 @@ impl EstablishedConnectionDriver {
             FlowControlDriverProgress::InboundOpen(request) => {
                 DriverStep::Progress(EstablishedConnectionProgress::InboundOpen(request))
             }
-            FlowControlDriverProgress::PendingSend(pending) => match self.start_prepared_send(pending)
+            FlowControlDriverProgress::PendingSend(pending) => match self
+                .start_prepared_send(pending)
             {
                 Ok(()) => DriverStep::Progress(EstablishedConnectionProgress::ControlSendStarted),
                 Err(error) => DriverStep::Error(error),
@@ -681,10 +692,7 @@ impl EstablishedConnectionDriver {
         cx: &mut Context<'_>,
         endpoint: &mut DeliveryEndpoint,
     ) -> DriverStep {
-        match self
-            .reliable
-            .poll_inbound_acquisition(cx, &self.connection)
-        {
+        match self.reliable.poll_inbound_acquisition(cx, &self.connection) {
             Poll::Pending => DriverStep::None,
             Poll::Ready(Ok(())) => {
                 DriverStep::Progress(EstablishedConnectionProgress::ReliableInboundAcquired)
@@ -694,14 +702,14 @@ impl EstablishedConnectionDriver {
                     ReliableIoError::InboundConstruction(receive_error) => Some(
                         flow_driver::classify_inbound_reliable_construction_failure(receive_error),
                     ),
-                    ReliableIoError::Allocation(_) => Some(
-                        EstablishedDataFailureDisposition::ConnectionTerminal {
+                    ReliableIoError::Allocation(_) => {
+                        Some(EstablishedDataFailureDisposition::ConnectionTerminal {
                             code: Some(ApplicationErrorCode::ResourceLimitError),
-                        },
-                    ),
-                    ReliableIoError::Connection(_) => Some(
-                        EstablishedDataFailureDisposition::ConnectionTerminal { code: None },
-                    ),
+                        })
+                    }
+                    ReliableIoError::Connection(_) => {
+                        Some(EstablishedDataFailureDisposition::ConnectionTerminal { code: None })
+                    }
                     _ => None,
                 };
                 let Some(disposition) = disposition else {
@@ -809,14 +817,14 @@ impl EstablishedConnectionDriver {
                         *flow_id,
                         send_error,
                     )),
-                    DatagramIoError::Connection(_) => Some(
-                        EstablishedDataFailureDisposition::ConnectionTerminal { code: None },
-                    ),
-                    DatagramIoError::Allocation(_) => Some(
-                        EstablishedDataFailureDisposition::ConnectionTerminal {
+                    DatagramIoError::Connection(_) => {
+                        Some(EstablishedDataFailureDisposition::ConnectionTerminal { code: None })
+                    }
+                    DatagramIoError::Allocation(_) => {
+                        Some(EstablishedDataFailureDisposition::ConnectionTerminal {
                             code: Some(ApplicationErrorCode::ResourceLimitError),
-                        },
-                    ),
+                        })
+                    }
                     _ => None,
                 };
                 let Some(disposition) = disposition else {
@@ -850,14 +858,14 @@ impl EstablishedConnectionDriver {
                     DatagramIoError::Receive(failure) => Some(
                         flow_driver::classify_datagram_receive_failure(&self.flow_control, failure),
                     ),
-                    DatagramIoError::Connection(_) => Some(
-                        EstablishedDataFailureDisposition::ConnectionTerminal { code: None },
-                    ),
-                    DatagramIoError::Allocation(_) => Some(
-                        EstablishedDataFailureDisposition::ConnectionTerminal {
+                    DatagramIoError::Connection(_) => {
+                        Some(EstablishedDataFailureDisposition::ConnectionTerminal { code: None })
+                    }
+                    DatagramIoError::Allocation(_) => {
+                        Some(EstablishedDataFailureDisposition::ConnectionTerminal {
                             code: Some(ApplicationErrorCode::ResourceLimitError),
-                        },
-                    ),
+                        })
+                    }
                     _ => None,
                 };
                 let Some(disposition) = disposition else {
