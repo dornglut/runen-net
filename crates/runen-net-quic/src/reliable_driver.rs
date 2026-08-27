@@ -383,9 +383,8 @@ impl ReliableConnectionIo {
         for offset in 0..len {
             let index = (start + offset) % len;
             let before = self.active_inbound[index].resolved_flow_id();
-            let before_registered = before.is_some_and(|flow_id| {
-                flow_control.registry().registered_flow(flow_id).is_some()
-            });
+            let before_registered = before
+                .is_some_and(|flow_id| flow_control.registry().registered_flow(flow_id).is_some());
             match self.active_inbound[index].poll_step(cx, endpoint, flow_control.registry_mut()) {
                 Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining)) => {}
                 Poll::Ready(Ok(progress @ ReceiveProgress::Closed)) => {
