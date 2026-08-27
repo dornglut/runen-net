@@ -38,9 +38,9 @@ use crate::{
     control::{LocalControlLimits, ProfileBootstrapError, SemanticRole, ValidatedControlProfile},
     datagram::DatagramSubmissionOutcome,
     endpoint::{
-        ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,
-        bind_client_endpoint, bind_server_endpoint, bind_server_endpoint_with_incompatible_alpn,
-        bind_server_endpoint_without_datagrams,
+        ConfiguredEndpoint, ConnectionAdmissionError, EndpointResourceLimits,
+        ValidatedEndpointResources, bind_client_endpoint, bind_server_endpoint,
+        bind_server_endpoint_with_incompatible_alpn, bind_server_endpoint_without_datagrams,
     },
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
@@ -124,6 +124,102 @@ fn live_settings_role_mismatch_rejects_profile_and_releases_admission() {
             .await
             .expect("live SETTINGS role-mismatch conformance scenario timed out");
     });
+}
+
+#[test]
+fn live_overlapping_connection_is_refused_at_server_capacity_and_slot_reopens() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_overlapping_admission_scenario())
+            .await
+            .expect("live overlapping-admission conformance scenario timed out");
+    });
+}
+
+async fn run_overlapping_admission_scenario() {
+    let resources = resources_with_max_connections(1);
+    let (certificate, private_key, roots) = ephemeral_identity();
+    let client_a =
+        bind_client_endpoint(loopback_ephemeral(), resources, Arc::clone(&roots)).unwrap();
+    let client_b = bind_client_endpoint(loopback_ephemeral(), resources, roots).unwrap();
+    let server = bind_server_endpoint(
+        loopback_ephemeral(),
+        resources,
+        vec![certificate],
+        private_key,
+    )
+    .unwrap();
+    let server_address = server.endpoint().local_addr().unwrap();
+
+    let (client_a_ready, server_a_ready) = join2(
+        connect_profile_ready(
+            &client_a,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        accept_profile_ready(&server, profile(resources, SemanticRole::NonAuthority)),
+    )
+    .await;
+    let client_a_ready = client_a_ready.expect("first capacity-1 client failed ProfileReady");
+    let server_a_ready = server_a_ready
+        .expect("first capacity-1 server failed ProfileReady")
+        .expect("capacity-1 server endpoint closed before first ProfileReady");
+
+    let (client_b_failure, server_rejection) = join2(
+        connect_profile_ready(
+            &client_b,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        accept_profile_ready(&server, profile(resources, SemanticRole::NonAuthority)),
+    )
+    .await;
+    assert!(matches!(
+        server_rejection,
+        Err(ProfileConnectionError::Admission(
+            ConnectionAdmissionError::AtCapacity
+        ))
+    ));
+    assert!(matches!(
+        client_b_failure,
+        Err(ProfileConnectionError::Handshake(_))
+    ));
+
+    drop(client_a_ready);
+    drop(server_a_ready);
+
+    let (client_b_ready, server_b_ready) = join2(
+        connect_profile_ready(
+            &client_b,
+            server_address,
+            "localhost",
+            profile(resources, SemanticRole::Authority),
+        ),
+        accept_profile_ready(&server, profile(resources, SemanticRole::NonAuthority)),
+    )
+    .await;
+    let client_b_ready =
+        client_b_ready.expect("client-B admission permit leaked after refused overlap");
+    let server_b_ready = server_b_ready
+        .expect("server slot did not reopen after first admitted connection was released")
+        .expect("server endpoint closed before post-overlap retry");
+
+    drop(client_b_ready);
+    drop(server_b_ready);
+    client_a
+        .endpoint()
+        .close(VarInt::from_u32(0), b"overlapping admission test complete");
+    client_b
+        .endpoint()
+        .close(VarInt::from_u32(0), b"overlapping admission test complete");
+    server
+        .endpoint()
+        .close(VarInt::from_u32(0), b"overlapping admission test complete");
+    client_a.endpoint().wait_idle().await;
+    client_b.endpoint().wait_idle().await;
+    server.endpoint().wait_idle().await;
 }
 
 #[test]
