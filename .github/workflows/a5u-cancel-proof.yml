@@ -1,0 +1,43 @@
+name: A5U Cancellation Proof
+
+on:
+  push:
+    branches:
+      - rn5e5a5u-known-flow-datagram
+    paths:
+      - .github/workflows/a5u-cancel-proof.yml
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: rn5e5a5u-known-flow-datagram
+      - name: Add explicit stale transport retirement evidence
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('crates/runen-net-quic/src/conformance_tests.rs')
+          text = path.read_text()
+          marker = '    assert!(\n        client_side\n            .host\n            .delivery\n            .flow_contract(target.outbound)\n            .is_none()\n    );'
+          addition = '    loop {\n        let (client_progress, server_progress) =\n            next_pair_progress(&mut client_side, &mut server_side).await;\n        if let Some(progress) = server_progress.as_ref() {\n            assert_non_failure_progress(progress);\n        }\n        if let Some(progress) = client_progress {\n            match progress {\n                EstablishedConnectionProgress::DatagramOutbound(\n                    crate::datagram_driver::DatagramOutboundProgress::Cancelled { flow_id },\n                ) if flow_id == target.flow_id => break,\n                other => assert_non_failure_progress(&other),\n            }\n        }\n    }\n\n'
+          if marker not in text:
+              raise SystemExit('target contract assertion anchor not found')
+          text = text.replace(marker, addition + marker, 1)
+          path.write_text(text)
+          PY
+          cargo +stable fmt --all
+      - name: Commit explicit transport retirement evidence
+        run: |
+          if git diff --quiet -- crates/runen-net-quic/src/conformance_tests.rs; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/runen-net-quic/src/conformance_tests.rs
+          git commit -m "RN5E5A5U: prove stale DATAGRAM owner retirement"
+          git push origin HEAD:rn5e5a5u-known-flow-datagram
