@@ -295,8 +295,8 @@ async fn establish_live_pair(
 
     let (client_negotiated, client_manager) = client_established;
     let (server_negotiated, server_manager) = server_established;
-    let mut client_side = activate(client_negotiated, client_manager);
-    let mut server_side = activate(server_negotiated, server_manager);
+    let client_side = activate(client_negotiated, client_manager);
+    let server_side = activate(server_negotiated, server_manager);
 
     (client, server, client_side, server_side)
 }
