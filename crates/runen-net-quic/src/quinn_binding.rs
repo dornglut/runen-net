@@ -813,6 +813,10 @@ impl InboundReliable<RecvStream> {
 }
 
 impl<R: PollReadReliable> InboundReliable<R> {
+    pub(super) const fn resolved_flow_id(&self) -> Option<FlowId> {
+        self.flow_id
+    }
+
     fn new(
         mut reader: R,
         scratch_bytes: NonZeroUsize,
