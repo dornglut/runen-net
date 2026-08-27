@@ -654,36 +654,28 @@ impl EstablishedConnectionDriver {
             Poll::Ready(Ok(progress)) => DriverStep::Progress(
                 EstablishedConnectionProgress::ReliableOutboundAcquisition(progress),
             ),
-            Poll::Ready(Err(error)) => {
-                let disposition = match &error {
-                    ReliableIoError::OutboundAcquisitionBinding {
-                        flow_id,
-                        error: send_error,
-                    } => Some(flow_driver::classify_outbound_reliable_acquisition_failure(
+            Poll::Ready(Err(error)) => match &error {
+                ReliableIoError::OutboundAcquisitionBinding {
+                    flow_id,
+                    error: send_error,
+                } => self.finish_data_failure(
+                    endpoint,
+                    flow_driver::classify_outbound_reliable_acquisition_failure(
                         &self.flow_control,
                         *flow_id,
                         send_error,
-                    )),
-                    ReliableIoError::Allocation(_) => {
-                        self.enter_terminal(Some(ApplicationErrorCode::ResourceLimitError));
-                        return DriverStep::Error(ConnectionDriverError::Reliable(error));
-                    }
-                    ReliableIoError::Connection(_) => {
-                        self.enter_terminal(None);
-                        return DriverStep::Error(ConnectionDriverError::Reliable(error));
-                    }
-                    _ => None,
-                };
-                let Some(disposition) = disposition else {
-                    self.enter_terminal(None);
-                    return DriverStep::Error(ConnectionDriverError::Reliable(error));
-                };
-                self.finish_data_failure(
-                    endpoint,
-                    disposition,
+                    ),
                     ConnectionDriverError::Reliable(error),
-                )
-            }
+                ),
+                ReliableIoError::Connection(_) => {
+                    self.enter_terminal(None);
+                    DriverStep::Error(ConnectionDriverError::Reliable(error))
+                }
+                _ => {
+                    self.enter_terminal(None);
+                    DriverStep::Error(ConnectionDriverError::Reliable(error))
+                }
+            },
         }
     }
 
@@ -807,36 +799,24 @@ impl EstablishedConnectionDriver {
             Ok(Some(progress)) => {
                 DriverStep::Progress(EstablishedConnectionProgress::DatagramOutbound(progress))
             }
-            Err(error) => {
-                let disposition = match &error {
-                    DatagramIoError::Send {
-                        flow_id,
-                        error: send_error,
-                    } => Some(flow_driver::classify_datagram_send_failure(
+            Err(error) => match &error {
+                DatagramIoError::Send {
+                    flow_id,
+                    error: send_error,
+                } => self.finish_data_failure(
+                    endpoint,
+                    flow_driver::classify_datagram_send_failure(
                         &self.flow_control,
                         *flow_id,
                         send_error,
-                    )),
-                    DatagramIoError::Connection(_) => {
-                        Some(EstablishedDataFailureDisposition::ConnectionTerminal { code: None })
-                    }
-                    DatagramIoError::Allocation(_) => {
-                        Some(EstablishedDataFailureDisposition::ConnectionTerminal {
-                            code: Some(ApplicationErrorCode::ResourceLimitError),
-                        })
-                    }
-                    _ => None,
-                };
-                let Some(disposition) = disposition else {
-                    self.enter_terminal(None);
-                    return DriverStep::Error(ConnectionDriverError::Datagram(error));
-                };
-                self.finish_data_failure(
-                    endpoint,
-                    disposition,
+                    ),
                     ConnectionDriverError::Datagram(error),
-                )
-            }
+                ),
+                _ => {
+                    self.enter_terminal(None);
+                    DriverStep::Error(ConnectionDriverError::Datagram(error))
+                }
+            },
         }
     }
 
@@ -853,31 +833,21 @@ impl EstablishedConnectionDriver {
             Poll::Ready(Ok(outcome)) => {
                 DriverStep::Progress(EstablishedConnectionProgress::DatagramInbound(outcome))
             }
-            Poll::Ready(Err(error)) => {
-                let disposition = match &error {
-                    DatagramIoError::Receive(failure) => Some(
-                        flow_driver::classify_datagram_receive_failure(&self.flow_control, failure),
-                    ),
-                    DatagramIoError::Connection(_) => {
-                        Some(EstablishedDataFailureDisposition::ConnectionTerminal { code: None })
-                    }
-                    DatagramIoError::Allocation(_) => {
-                        Some(EstablishedDataFailureDisposition::ConnectionTerminal {
-                            code: Some(ApplicationErrorCode::ResourceLimitError),
-                        })
-                    }
-                    _ => None,
-                };
-                let Some(disposition) = disposition else {
-                    self.enter_terminal(None);
-                    return DriverStep::Error(ConnectionDriverError::Datagram(error));
-                };
-                self.finish_data_failure(
+            Poll::Ready(Err(error)) => match &error {
+                DatagramIoError::Receive(failure) => self.finish_data_failure(
                     endpoint,
-                    disposition,
+                    flow_driver::classify_datagram_receive_failure(&self.flow_control, failure),
                     ConnectionDriverError::Datagram(error),
-                )
-            }
+                ),
+                DatagramIoError::Connection(_) => {
+                    self.enter_terminal(None);
+                    DriverStep::Error(ConnectionDriverError::Datagram(error))
+                }
+                _ => {
+                    self.enter_terminal(None);
+                    DriverStep::Error(ConnectionDriverError::Datagram(error))
+                }
+            },
         }
     }
 
@@ -1016,7 +986,7 @@ const fn should_defer_received_frame(
     pending_inbound: bool,
     sender: ControlSendPhase,
 ) -> bool {
-    sender != ControlSendPhase::Ready
+    !matches!(sender, ControlSendPhase::Ready)
         || (pending_inbound && matches!(frame_type, ControlFrameType::OpenFlow))
 }
 
