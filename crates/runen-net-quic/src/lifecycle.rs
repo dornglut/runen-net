@@ -240,18 +240,17 @@ impl PendingControlSend {
 
 impl NegotiationCore {
     fn teardown(
-        mut self,
+        self,
         manager: &mut NegotiationManager,
         delivery: &mut DeliveryEndpoint,
     ) -> ConnectionTeardown {
-        let connection = self.connection;
-        let flow_terminations = delivery.terminate_connection(connection);
-        let negotiation_cleanup_error = self.exchange.abort(manager).err();
-        ConnectionTeardown {
+        let Self {
             connection,
-            flow_terminations,
-            negotiation_cleanup_error,
-        }
+            profile: _profile,
+            connection_permit: _connection_permit,
+            exchange,
+        } = self;
+        teardown_connection(connection, exchange, manager, delivery)
     }
 
     fn into_established_io(self, flow_control: FlowControl) -> EstablishedIoParts {
@@ -285,18 +284,16 @@ impl NegotiationCore {
 
 impl EstablishedTeardown {
     pub(super) fn teardown(
-        mut self,
+        self,
         manager: &mut NegotiationManager,
         delivery: &mut DeliveryEndpoint,
     ) -> ConnectionTeardown {
-        let connection = self.connection;
-        let flow_terminations = delivery.terminate_connection(connection);
-        let negotiation_cleanup_error = self.exchange.abort(manager).err();
-        ConnectionTeardown {
+        let Self {
             connection,
-            flow_terminations,
-            negotiation_cleanup_error,
-        }
+            exchange,
+            connection_permit: _connection_permit,
+        } = self;
+        teardown_connection(connection, exchange, manager, delivery)
     }
 }
 
@@ -314,6 +311,21 @@ impl EstablishedIoParts {
             teardown,
         } = self;
         teardown.teardown(manager, delivery)
+    }
+}
+
+fn teardown_connection(
+    connection: ConnectionHandle,
+    mut exchange: NegotiationExchange,
+    manager: &mut NegotiationManager,
+    delivery: &mut DeliveryEndpoint,
+) -> ConnectionTeardown {
+    let flow_terminations = delivery.terminate_connection(connection);
+    let negotiation_cleanup_error = exchange.abort(manager).err();
+    ConnectionTeardown {
+        connection,
+        flow_terminations,
+        negotiation_cleanup_error,
     }
 }
 
