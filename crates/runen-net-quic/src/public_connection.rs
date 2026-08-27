@@ -703,13 +703,7 @@ fn transition_from_controller(
         }
         Ok(NegotiationProgress::Send(frame)) => {
             let disposition = controller_send_disposition(frame.frame_type);
-            DriverTransition::State(sending_state(
-                core,
-                sender,
-                receiver,
-                frame,
-                disposition,
-            ))
+            DriverTransition::State(sending_state(core, sender, receiver, frame, disposition))
         }
         Ok(NegotiationProgress::Established) => {
             let connection = core.connection;
