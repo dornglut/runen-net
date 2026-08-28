@@ -495,6 +495,16 @@ async fn run_public_admission_contracts() {
             None => {}
         }
     }
+    submit_and_expect_public_payload(
+        &mut client_connection,
+        &mut client_host,
+        &mut server_connection,
+        &mut server_host,
+        outbound,
+        inbound,
+        b"capability-retry",
+    )
+    .await;
     finish_and_expect_normal_termination(
         &mut client_connection,
         &mut client_host,
