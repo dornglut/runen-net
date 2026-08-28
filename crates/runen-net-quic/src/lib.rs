@@ -19,7 +19,8 @@ pub use public_connection::{
 };
 mod public_flow;
 pub use public_flow::{
-    FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin, OutboundFlowConfig,
+    FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin, IncomingFlowRequest,
+    OutboundFlowConfig, SubmitOutcome,
 };
 
 #[cfg(test)]
