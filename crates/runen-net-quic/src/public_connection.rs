@@ -535,9 +535,8 @@ impl Connection {
                             }));
                         }
                         Err(established) => {
-                            self.state = ConnectionState::EstablishedActivationFailed {
-                                established,
-                            };
+                            self.state =
+                                ConnectionState::EstablishedActivationFailed { established };
                             return Poll::Ready(Err(ConnectionError::EstablishedActivation));
                         }
                     }
@@ -770,11 +769,11 @@ fn transition_from_controller(
             let disposition = controller_send_disposition(frame.frame_type);
             DriverTransition::State(sending_state(core, sender, receiver, frame, disposition))
         }
-        Ok(NegotiationProgress::Established) => DriverTransition::State(
-            ConnectionState::NegotiatedEstablished {
+        Ok(NegotiationProgress::Established) => {
+            DriverTransition::State(ConnectionState::NegotiatedEstablished {
                 established: core.into_established(sender, receiver),
-            },
-        ),
+            })
+        }
         Ok(NegotiationProgress::RemoteFailed(outcome)) => {
             close_negotiation_failed(&core.profile.connection);
             DriverTransition::Error(
