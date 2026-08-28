@@ -145,6 +145,8 @@ A participant endpoint MAY locally apply its own participant input speculatively
 
 Such application is **local prediction**. It does not change protocol authority and does not make the locally predicted state an authoritative replication state image.
 
+A host MUST enable RunenNet-tracked prediction only for state that it can re-establish from the participant lineage's committed authoritative replication state and then advance again using the retained pending-input timeline. If the committed lineage state is insufficient to restore the prediction-relevant host state, that host state is not eligible for this prediction contract.
+
 A participant input batch MUST NOT be applied as tracked RunenNet prediction unless the endpoint has first admitted that batch into its bounded pending-prediction state.
 
 If pending-prediction resource admission fails, the endpoint MUST NOT apply the batch as RunenNet-tracked prediction and then forget the information required to reconcile it later.
@@ -211,11 +213,15 @@ This document does not change replication acknowledgement meaning. A replication
 
 ## Replay semantics
 
-**Replay** means asking the host to apply a still-pending local participant input batch again as speculative input on top of the newly committed authoritative state.
+**Replay** is the host operation that advances speculative prediction again from the newly committed authoritative state using the still-pending local participant input timeline.
 
-RunenNet defines the required batch identity, eligibility, and order. The host owns the gameplay operation that applies the opaque batch.
+RunenNet defines which batches remain eligible and the ascending target-tick order in which they are presented to the host. The host owns the simulation mechanics required to realize that replay, including application of the opaque input, execution of any required intervening simulation steps, and reconstruction of other host-local prediction state.
+
+RunenNet does not require replay to be implemented as direct command reapplication, ECS mutation, saved-world rollback, or any particular simulation algorithm.
 
 The host MUST begin replay from state semantically consistent with the newly committed authoritative target, not from a partially retained pre-correction predicted state.
+
+For every pending batch presented for replay, the host MUST preserve that batch's target-tick meaning. A batch targeted at a later tick MUST NOT be applied as though it belonged to an earlier simulation step merely to simplify replay implementation.
 
 A replayed batch remains pending after successful replay. It is retired only when a later authoritative reconciliation frontier reaches its target tick or prediction continuity is invalidated.
 
@@ -223,7 +229,7 @@ A replayed batch remains pending after successful replay. It is retired only whe
 
 Replay of all required still-pending batches is one prediction-reconciliation operation.
 
-If replay of any required batch fails, the participant MUST NOT report the predicted host state as successfully reconciled.
+If replay of any required batch or required intervening prediction step fails, the participant MUST NOT report the predicted host state as successfully reconciled.
 
 The host integration MUST provide staging, restoration, re-establishment from the committed authoritative state, or another mechanism sufficient to prevent a partially replayed predicted state from being treated as valid current prediction.
 
@@ -342,9 +348,9 @@ A realization claiming this semantic area MUST be testable for at least the foll
 5. input/resource saturation fails explicitly without unbounded growth or silent key reuse;
 6. a locally predicted batch cannot be applied as tracked prediction when pending-prediction admission failed;
 7. authoritative commit at tick T retires all pending predicted batches at ticks less than or equal to T;
-8. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order;
+8. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order with their target-tick meaning preserved;
 9. an authoritative candidate that fails before commit does not retire or replay pending prediction;
-10. replay failure leaves the authoritative commit valid but invalidates prediction continuity and does not expose a partially replayed state as valid prediction;
+10. replay or intervening prediction-step failure leaves the authoritative commit valid but invalidates prediction continuity and does not expose a partially replayed state as valid prediction;
 11. entering FullSnapshotRequired invalidates and clears pre-recovery replay eligibility;
 12. authorized connection replacement does not replay pre-replacement pending prediction after the required replacement full baseline;
 13. participant removal and session close prevent old input/prediction state from becoming applicable to a later participant/session lifetime.
