@@ -63,6 +63,7 @@ pub(super) enum FlowControlSendEffect {
         flow_id: FlowId,
         key: DeliveryFlowKey,
         reason: FlowTerminateReason,
+        termination: Option<FlowTermination>,
     },
     LocalTerminated {
         flow: EstablishedFlow,
@@ -208,6 +209,7 @@ pub(super) fn process_received(
             flow_id,
             key,
             reason,
+            termination,
             frame,
         } => FlowControlDriverProgress::PendingSend(PendingFlowControlSend::new(
             frame,
@@ -215,6 +217,7 @@ pub(super) fn process_received(
                 flow_id,
                 key,
                 reason,
+                termination,
             },
         )),
         FlowControlProgress::RemoteTerminated {
