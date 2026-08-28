@@ -55,12 +55,8 @@ async fn run() {
 
     // QUIC client/server side and semantic Authority are independent. This example deliberately
     // makes the QUIC server the RunenNet Authority.
-    let (client_ready, server_ready) = profile_ready_pair(
-        &client_endpoint,
-        &server_endpoint,
-        endpoint_config,
-    )
-    .await;
+    let (client_ready, server_ready) =
+        profile_ready_pair(&client_endpoint, &server_endpoint, endpoint_config).await;
     let (mut client, mut server) = activate_pair(
         client_ready,
         server_ready,
@@ -68,23 +64,12 @@ async fn run() {
         &mut server_host,
     );
 
-    drive_until_authority_selection(
-        &mut client,
-        &mut client_host,
-        &mut server,
-        &mut server_host,
-    )
-    .await;
+    drive_until_authority_selection(&mut client, &mut client_host, &mut server, &mut server_host)
+        .await;
     server
         .select_authority(&mut server_host.negotiation, negotiated_contract())
         .unwrap();
-    drive_until_established(
-        &mut client,
-        &mut client_host,
-        &mut server,
-        &mut server_host,
-    )
-    .await;
+    drive_until_established(&mut client, &mut client_host, &mut server, &mut server_host).await;
 
     run_flow(
         &mut client,
@@ -109,10 +94,8 @@ async fn run() {
     )
     .await;
 
-    let client_teardown =
-        client.teardown(&mut client_host.negotiation, &mut client_host.delivery);
-    let server_teardown =
-        server.teardown(&mut server_host.negotiation, &mut server_host.delivery);
+    let client_teardown = client.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+    let server_teardown = server.teardown(&mut server_host.negotiation, &mut server_host.delivery);
     assert!(client_teardown.cleanup_error().is_none());
     assert!(server_teardown.cleanup_error().is_none());
     assert!(client_teardown.flow_terminations().is_empty());
@@ -397,18 +380,18 @@ async fn next_pair_event(
     server_host: &mut HostState,
 ) -> (Option<ConnectionEvent>, Option<ConnectionEvent>) {
     poll_fn(|cx| {
-        let client_event = match client.poll(cx, &mut client_host.negotiation, &mut client_host.delivery)
-        {
-            Poll::Pending => None,
-            Poll::Ready(Ok(event)) => Some(event),
-            Poll::Ready(Err(error)) => panic!("client connection failed: {error:?}"),
-        };
-        let server_event = match server.poll(cx, &mut server_host.negotiation, &mut server_host.delivery)
-        {
-            Poll::Pending => None,
-            Poll::Ready(Ok(event)) => Some(event),
-            Poll::Ready(Err(error)) => panic!("server connection failed: {error:?}"),
-        };
+        let client_event =
+            match client.poll(cx, &mut client_host.negotiation, &mut client_host.delivery) {
+                Poll::Pending => None,
+                Poll::Ready(Ok(event)) => Some(event),
+                Poll::Ready(Err(error)) => panic!("client connection failed: {error:?}"),
+            };
+        let server_event =
+            match server.poll(cx, &mut server_host.negotiation, &mut server_host.delivery) {
+                Poll::Pending => None,
+                Poll::Ready(Ok(event)) => Some(event),
+                Poll::Ready(Err(error)) => panic!("server connection failed: {error:?}"),
+            };
         if client_event.is_some() || server_event.is_some() {
             Poll::Ready((client_event, server_event))
         } else {
@@ -444,11 +427,7 @@ fn host_state() -> HostState {
             NegotiationManagerLimits::default(),
         )
         .unwrap(),
-        delivery: DeliveryEndpoint::new(DeliveryScopeLimits::new(
-            nz(64),
-            nz(128),
-            nz(1024 * 1024),
-        )),
+        delivery: DeliveryEndpoint::new(DeliveryScopeLimits::new(nz(64), nz(128), nz(1024 * 1024))),
     }
 }
 
