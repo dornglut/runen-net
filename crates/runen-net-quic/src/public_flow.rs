@@ -216,6 +216,14 @@ impl From<FlowTerminateReason> for FlowTerminationCause {
     }
 }
 
+/// Application-facing reason an unreliable inbound transfer was dropped before exposure.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum UnreliableReceiveDropReason {
+    Pressure,
+    TooLarge,
+    StaleSequenced,
+}
+
 /// Result of one public Core-keyed message submission.
 ///
 /// Core acceptance/rejection is preserved directly. Unreliable submission may additionally
