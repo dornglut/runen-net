@@ -647,9 +647,9 @@ impl Connection {
                     Err(KeyedDatagramSubmitError::UnknownFlow { .. }) => {
                         Err(SubmissionError::Failed(FlowCommandError::UnknownFlow))
                     }
-                    Err(KeyedDatagramSubmitError::Driver(error)) => {
-                        Err(SubmissionError::Failed(map_flow_command_driver_error(error)))
-                    }
+                    Err(KeyedDatagramSubmitError::Driver(error)) => Err(SubmissionError::Failed(
+                        map_flow_command_driver_error(error),
+                    )),
                 }
             }
         }
