@@ -26,7 +26,9 @@ use crate::{
     },
     endpoint::ConnectionSlotPermit,
     facade::{ProfileBootstrapFailure, ProfileReadyConnection},
-    flow_control::{InboundAdmission, InboundAdmissionError, OutboundOpenError, OutboundOpenRequest},
+    flow_control::{
+        InboundAdmission, InboundAdmissionError, OutboundOpenError, OutboundOpenRequest,
+    },
     lifecycle::{
         AdmittedProfileReadyConnection, EstablishedNegotiatedConnection,
         close_for_post_profile_control_error, close_negotiation_failed,
@@ -511,11 +513,9 @@ impl Connection {
                     Err(IncomingFlowDecisionError::Failed(reason))
                 }
             }
-            Err(InboundDecisionDriverError::Driver(error)) => {
-                Err(IncomingFlowDecisionError::Failed(
-                    map_inbound_decision_driver_error(&error),
-                ))
-            }
+            Err(InboundDecisionDriverError::Driver(error)) => Err(
+                IncomingFlowDecisionError::Failed(map_inbound_decision_driver_error(&error)),
+            ),
         }
     }
 
@@ -568,11 +568,9 @@ impl Connection {
                     Err(IncomingFlowDecisionError::Failed(reason))
                 }
             }
-            Err(InboundDecisionDriverError::Driver(error)) => {
-                Err(IncomingFlowDecisionError::Failed(
-                    map_inbound_decision_driver_error(&error),
-                ))
-            }
+            Err(InboundDecisionDriverError::Driver(error)) => Err(
+                IncomingFlowDecisionError::Failed(map_inbound_decision_driver_error(&error)),
+            ),
         }
     }
 
