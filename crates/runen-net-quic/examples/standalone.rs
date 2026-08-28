@@ -38,6 +38,13 @@ struct HostState {
     delivery: DeliveryEndpoint,
 }
 
+struct FlowExample {
+    mode: DeliveryMode,
+    outbound_handle: u64,
+    inbound_handle: u64,
+    payload: &'static [u8],
+}
+
 fn main() {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
@@ -76,10 +83,12 @@ async fn run() {
         &mut client_host,
         &mut server,
         &mut server_host,
-        DeliveryMode::ReliableOrdered,
-        1,
-        101,
-        b"reliable hello",
+        FlowExample {
+            mode: DeliveryMode::ReliableOrdered,
+            outbound_handle: 1,
+            inbound_handle: 101,
+            payload: b"reliable hello",
+        },
     )
     .await;
     run_flow(
@@ -87,10 +96,12 @@ async fn run() {
         &mut client_host,
         &mut server,
         &mut server_host,
-        DeliveryMode::UnreliableUnordered,
-        2,
-        102,
-        b"unreliable hello",
+        FlowExample {
+            mode: DeliveryMode::UnreliableUnordered,
+            outbound_handle: 2,
+            inbound_handle: 102,
+            payload: b"unreliable hello",
+        },
     )
     .await;
 
@@ -113,11 +124,14 @@ async fn run_flow(
     client_host: &mut HostState,
     server: &mut Connection,
     server_host: &mut HostState,
-    mode: DeliveryMode,
-    outbound_handle: u64,
-    inbound_handle: u64,
-    payload: &[u8],
+    flow: FlowExample,
 ) {
+    let FlowExample {
+        mode,
+        outbound_handle,
+        inbound_handle,
+        payload,
+    } = flow;
     let outbound = DeliveryFlowKey::new(
         CLIENT_CONNECTION,
         FlowDirection::Outbound,
