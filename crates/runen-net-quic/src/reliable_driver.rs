@@ -259,7 +259,10 @@ impl ReliableConnectionIo {
             flow_id: flow.flow_id(),
             future: open_uni_owned(connection.clone()),
         });
-        debug_assert_eq!(self.outbound_flow_id(flow_control, flow.key()), Some(flow.flow_id()));
+        debug_assert_eq!(
+            self.outbound_flow_id(flow_control, flow.key()),
+            Some(flow.flow_id())
+        );
         Ok(())
     }
 
@@ -416,7 +419,7 @@ impl ReliableConnectionIo {
                 }
                 Poll::Ready(Ok(progress)) => {
                     self.inbound_cursor = (index + 1) % len;
-                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress)));
+                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress));
                 }
                 Poll::Ready(Err(error)) => {
                     let after = self.active_inbound[index].resolved_flow_id();
