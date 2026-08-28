@@ -622,9 +622,10 @@ impl Connection {
         }
     }
 
+    #[cfg(test)]
     pub(super) fn into_established_internal(
         self,
-    ) -> Result<(EstablishedNegotiatedConnection, ReliableReceiveLimits), Self> {
+    ) -> Result<(EstablishedNegotiatedConnection, ReliableReceiveLimits), Box<Self>> {
         let Self {
             connection,
             reliable_receive,
@@ -632,11 +633,11 @@ impl Connection {
         } = self;
         match state {
             ConnectionState::Established { established } => Ok((established, reliable_receive)),
-            state => Err(Self {
+            state => Err(Box::new(Self {
                 connection,
                 reliable_receive,
                 state,
-            }),
+            })),
         }
     }
 }
