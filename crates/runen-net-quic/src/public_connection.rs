@@ -22,6 +22,7 @@ use crate::{
     connection_driver::{
         ConnectionDriverError, ConnectionDriverStateError, DatagramSubmitOutcome,
         EstablishedConnectionDriver, InboundDecisionDriverError, KeyedDatagramSubmitError,
+        KeyedFinishError, OutboundFinishOutcome,
     },
     control::{
         ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
@@ -31,7 +32,8 @@ use crate::{
     endpoint::ConnectionSlotPermit,
     facade::{ProfileBootstrapFailure, ProfileReadyConnection},
     flow_control::{
-        InboundAdmission, InboundAdmissionError, OutboundOpenError, OutboundOpenRequest,
+        FlowControlError, InboundAdmission, InboundAdmissionError, OutboundOpenError,
+        OutboundOpenRequest,
     },
     lifecycle::{
         AdmittedProfileReadyConnection, EstablishedNegotiatedConnection,
@@ -45,6 +47,8 @@ use crate::{
         FlowCommandError, FlowRejectionReason, InboundFlowConfig, IncomingFlowDecisionError,
         IncomingFlowRequest, OutboundFlowConfig, SubmissionError, SubmitOutcome,
     },
+    quinn_binding::SendError,
+    reliable_driver::{ReliableIoError, ReliableIoStateError},
     wire::WireSide,
 };
 
@@ -660,6 +664,46 @@ impl Connection {
         }
     }
 
+    /// Request the accepted normal sender finish for one established outbound flow.
+    pub fn finish_outbound_flow_normal(
+        &mut self,
+        delivery: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+    ) -> Result<(), FlowCommandError> {
+        if key.connection() != self.connection {
+            return Err(FlowCommandError::WrongConnection);
+        }
+        if key.direction() != FlowDirection::Outbound {
+            return Err(FlowCommandError::WrongDirection);
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(FlowCommandError::NotEstablished);
+            }
+        };
+
+        let Some((mode, _)) = delivery.flow_contract(key) else {
+            return Err(FlowCommandError::UnknownFlow);
+        };
+        match driver.request_outbound_finish_normal_by_key(delivery, key, mode) {
+            Ok(OutboundFinishOutcome::Started) => Ok(()),
+            Ok(OutboundFinishOutcome::FlowFailureHandled { .. }) => {
+                Err(FlowCommandError::FlowTerminated)
+            }
+            Err(KeyedFinishError::State(error)) => Err(map_driver_state_error(error)),
+            Err(KeyedFinishError::UnknownFlow) => Err(FlowCommandError::UnknownFlow),
+            Err(KeyedFinishError::Driver(error)) => Err(map_finish_driver_error(error)),
+        }
+    }
+
     /// Drive at most a finite amount of post-ProfileReady connection work.
     ///
     /// Aggregate Core authorities are borrowed only for this synchronous call.
@@ -1006,6 +1050,37 @@ fn map_core_submission_error(error: DeliveryOperationError) -> FlowCommandError 
     }
 }
 
+fn map_finish_driver_error(error: ConnectionDriverError) -> FlowCommandError {
+    match error {
+        ConnectionDriverError::State(error) => map_driver_state_error(error),
+        ConnectionDriverError::Reliable(ReliableIoError::State(
+            ReliableIoStateError::OutboundAcquisitionPending,
+        )) => FlowCommandError::Pending,
+        ConnectionDriverError::Reliable(ReliableIoError::State(
+            ReliableIoStateError::UnknownOutboundFlow,
+        )) => FlowCommandError::UnknownFlow,
+        ConnectionDriverError::Reliable(ReliableIoError::OutboundFinish {
+            error: SendError::PendingData | SendError::AlreadyFinishing,
+            ..
+        }) => FlowCommandError::Pending,
+        ConnectionDriverError::Reliable(ReliableIoError::OutboundFinish {
+            error:
+                SendError::Terminal
+                | SendError::Core(DeliveryOperationError::UnknownFlow),
+            ..
+        }) => FlowCommandError::FlowTerminated,
+        ConnectionDriverError::FailurePreparation(FlowControlError::Allocation(_)) => {
+            FlowCommandError::ResourceLimit
+        }
+        ConnectionDriverError::FailurePreparation(
+            FlowControlError::UnknownActiveFlow(_)
+            | FlowControlError::CoreState(DeliveryOperationError::UnknownFlow),
+        ) => FlowCommandError::FlowTerminated,
+        ConnectionDriverError::FailurePreparation(_) => FlowCommandError::ProtocolFailure,
+        _ => FlowCommandError::ConnectionFailure,
+    }
+}
+
 fn map_datagram_submit_outcome(
     outcome: DatagramSubmitOutcome,
 ) -> Result<SubmitOutcome, FlowCommandError> {
@@ -1287,6 +1362,35 @@ mod tests {
                 flow_id: crate::wire::FlowId::new(WireSide::Client, 0).unwrap(),
             }),
             Err(FlowCommandError::FlowTerminated)
+        );
+    }
+
+    #[test]
+    fn finish_mapping_preserves_pending_and_terminal_flow_categories() {
+        let flow_id = crate::wire::FlowId::new(WireSide::Client, 0).unwrap();
+        assert_eq!(
+            map_finish_driver_error(ConnectionDriverError::Reliable(ReliableIoError::State(
+                ReliableIoStateError::OutboundAcquisitionPending,
+            ))),
+            FlowCommandError::Pending
+        );
+        assert_eq!(
+            map_finish_driver_error(ConnectionDriverError::Reliable(
+                ReliableIoError::OutboundFinish {
+                    flow_id,
+                    error: SendError::PendingData,
+                },
+            )),
+            FlowCommandError::Pending
+        );
+        assert_eq!(
+            map_finish_driver_error(ConnectionDriverError::Reliable(
+                ReliableIoError::OutboundFinish {
+                    flow_id,
+                    error: SendError::Terminal,
+                },
+            )),
+            FlowCommandError::FlowTerminated
         );
     }
 }
