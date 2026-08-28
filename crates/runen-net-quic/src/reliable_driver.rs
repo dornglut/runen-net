@@ -419,7 +419,7 @@ impl ReliableConnectionIo {
                 }
                 Poll::Ready(Ok(progress)) => {
                     self.inbound_cursor = (index + 1) % len;
-                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress));
+                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress)));
                 }
                 Poll::Ready(Err(error)) => {
                     let after = self.active_inbound[index].resolved_flow_id();
