@@ -279,7 +279,7 @@ enum ConnectionState {
         established: EstablishedNegotiatedConnection,
     },
     Established {
-        driver: EstablishedConnectionDriver,
+        driver: Box<EstablishedConnectionDriver>,
     },
     EstablishedActivationFailed {
         established: EstablishedNegotiatedConnection,
@@ -529,14 +529,17 @@ impl Connection {
                 ConnectionState::NegotiatedEstablished { established } => {
                     match activate_established_driver(established, self.reliable_receive) {
                         Ok(driver) => {
-                            self.state = ConnectionState::Established { driver };
+                            self.state = ConnectionState::Established {
+                                driver: Box::new(driver),
+                            };
                             return Poll::Ready(Ok(ConnectionEvent::Established {
                                 connection: self.connection,
                             }));
                         }
                         Err(established) => {
-                            self.state =
-                                ConnectionState::EstablishedActivationFailed { established };
+                            self.state = ConnectionState::EstablishedActivationFailed {
+                                established: *established,
+                            };
                             return Poll::Ready(Err(ConnectionError::EstablishedActivation));
                         }
                     }
@@ -646,7 +649,9 @@ impl Connection {
             | ConnectionState::EstablishedActivationFailed { established } => {
                 established.teardown(manager, delivery).into()
             }
-            ConnectionState::Established { driver } => driver.teardown(manager, delivery).into(),
+            ConnectionState::Established { driver } => {
+                (*driver).teardown(manager, delivery).into()
+            }
             ConnectionState::Failed { core } => core.teardown(manager, delivery, false),
             ConnectionState::Transitioning => unreachable!("transition state never escapes a call"),
         }
@@ -662,7 +667,7 @@ impl Connection {
             state,
         } = self;
         match state {
-            ConnectionState::Established { driver } => Ok((driver, reliable_receive)),
+            ConnectionState::Established { driver } => Ok((*driver, reliable_receive)),
             state => Err(Box::new(Self {
                 connection,
                 reliable_receive,
@@ -675,10 +680,10 @@ impl Connection {
 fn activate_established_driver(
     established: EstablishedNegotiatedConnection,
     reliable_receive: ReliableReceiveLimits,
-) -> Result<EstablishedConnectionDriver, EstablishedNegotiatedConnection> {
+) -> Result<EstablishedConnectionDriver, Box<EstablishedNegotiatedConnection>> {
     let flow_controlled = match established.into_flow_control() {
         Ok(flow_controlled) => flow_controlled,
-        Err(error) => return Err(*error.established),
+        Err(error) => return Err(error.established),
     };
     Ok(flow_controlled
         .into_reliable_io(
