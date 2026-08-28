@@ -1312,7 +1312,14 @@ mod tests {
         assert_eq!(endpoint.flow_contract(requested), None);
         assert_eq!(endpoint.flow_contract(occupied_key).is_some(), true);
         assert_eq!(control.registry().registered_flow(flow_id), None);
-        assert_eq!(control.registry().registered_flow(occupied_flow).unwrap().key(), occupied_key);
+        assert_eq!(
+            control
+                .registry()
+                .registered_flow(occupied_flow)
+                .unwrap()
+                .key(),
+            occupied_key
+        );
     }
 
     #[test]
