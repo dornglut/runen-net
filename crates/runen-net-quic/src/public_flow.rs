@@ -82,10 +82,12 @@ pub enum FlowCommandError {
     InvalidConfiguration,
     AlreadyExists,
     Pending,
+    UnknownFlow,
     StaleRequest,
     MessageLimit,
     ResourceLimit,
     DatagramTooSmall,
+    FlowTerminated,
     ProtocolFailure,
     ConnectionFailure,
 }
@@ -110,6 +112,49 @@ impl IncomingFlowDecisionError {
     pub fn into_request(self) -> Option<IncomingFlowRequest> {
         match self {
             Self::Retryable { request, .. } => Some(request),
+            Self::Failed(_) => None,
+        }
+    }
+}
+
+/// Message submission failure.
+///
+/// Retryable state or identity failures return the original owned payload so the host can
+/// retry explicitly. RunenNet never installs a hidden retry queue.
+#[derive(Debug)]
+pub enum SubmissionError {
+    Retryable {
+        key: DeliveryFlowKey,
+        payload: Vec<u8>,
+        reason: FlowCommandError,
+    },
+    Failed(FlowCommandError),
+}
+
+impl SubmissionError {
+    pub const fn reason(&self) -> FlowCommandError {
+        match self {
+            Self::Retryable { reason, .. } | Self::Failed(reason) => *reason,
+        }
+    }
+
+    pub const fn key(&self) -> Option<DeliveryFlowKey> {
+        match self {
+            Self::Retryable { key, .. } => Some(*key),
+            Self::Failed(_) => None,
+        }
+    }
+
+    pub fn payload(&self) -> Option<&[u8]> {
+        match self {
+            Self::Retryable { payload, .. } => Some(payload.as_slice()),
+            Self::Failed(_) => None,
+        }
+    }
+
+    pub fn into_payload(self) -> Option<Vec<u8>> {
+        match self {
+            Self::Retryable { payload, .. } => Some(payload),
             Self::Failed(_) => None,
         }
     }
@@ -254,5 +299,23 @@ mod tests {
             SubmitOutcome::from(SubmissionOutcome::RejectedPressure),
             SubmitOutcome::RejectedPressure
         );
+    }
+
+    #[test]
+    fn retryable_submission_preserves_owned_payload() {
+        let key = DeliveryFlowKey::new(
+            ConnectionHandle::new(1),
+            runen_net::delivery::FlowDirection::Outbound,
+            runen_net::delivery::DeliveryFlowHandle::new(2),
+        );
+        let error = SubmissionError::Retryable {
+            key,
+            payload: b"retry".to_vec(),
+            reason: FlowCommandError::Busy,
+        };
+        assert_eq!(error.reason(), FlowCommandError::Busy);
+        assert_eq!(error.key(), Some(key));
+        assert_eq!(error.payload(), Some(b"retry".as_slice()));
+        assert_eq!(error.into_payload(), Some(b"retry".to_vec()));
     }
 }
