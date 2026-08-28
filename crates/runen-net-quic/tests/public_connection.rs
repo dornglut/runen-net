@@ -181,19 +181,25 @@ fn invalid_authority_selection_preserves_local_and_remote_semantic_failure_categ
                 .select_authority(&mut client_host.negotiation, invalid_contract())
                 .expect("semantic failure report must remain asynchronously sendable");
 
+            let mut client_error = None;
+            let mut server_error = None;
             let (client_error, server_error) = poll_fn(|cx| {
-                let client_error = poll_error(
-                    &mut client_connection,
-                    &mut client_host,
-                    cx,
-                    CLIENT_CONNECTION,
-                );
-                let server_error = poll_error(
-                    &mut server_connection,
-                    &mut server_host,
-                    cx,
-                    SERVER_CONNECTION,
-                );
+                if client_error.is_none() {
+                    client_error = poll_error(
+                        &mut client_connection,
+                        &mut client_host,
+                        cx,
+                        CLIENT_CONNECTION,
+                    );
+                }
+                if server_error.is_none() {
+                    server_error = poll_error(
+                        &mut server_connection,
+                        &mut server_host,
+                        cx,
+                        SERVER_CONNECTION,
+                    );
+                }
                 match (client_error, server_error) {
                     (Some(client_error), Some(server_error)) => {
                         Poll::Ready((client_error, server_error))
