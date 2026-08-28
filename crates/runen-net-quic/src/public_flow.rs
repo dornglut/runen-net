@@ -26,6 +26,14 @@ pub struct OutboundFlowConfig {
     pub stable_max_message_bytes: NonZeroUsize,
 }
 
+/// Explicit host-owned Core admission configuration for one incoming flow request.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct InboundFlowConfig {
+    pub key: DeliveryFlowKey,
+    pub policy: FlowResourcePolicy,
+    pub connection_limits: DeliveryScopeLimits,
+}
+
 /// Move-only capability for one pending peer `OPEN_FLOW` decision.
 ///
 /// The private wire flow identity never crosses this boundary. The host-visible
@@ -58,6 +66,52 @@ impl IncomingFlowRequest {
 
     pub const fn max_message_bytes(&self) -> u64 {
         self.inner.max_message_bytes()
+    }
+}
+
+/// Stable application-facing failure categories for established flow commands.
+///
+/// Private driver, wire, and transport error topology deliberately remains behind this boundary.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FlowCommandError {
+    NotEstablished,
+    Busy,
+    Terminal,
+    WrongConnection,
+    WrongDirection,
+    InvalidConfiguration,
+    AlreadyExists,
+    Pending,
+    StaleRequest,
+    MessageLimit,
+    ResourceLimit,
+    DatagramTooSmall,
+    ProtocolFailure,
+    ConnectionFailure,
+}
+
+/// Incoming decision failure that preserves the move-only request whenever retry is legal.
+#[derive(Debug)]
+pub enum IncomingFlowDecisionError {
+    Retryable {
+        request: IncomingFlowRequest,
+        reason: FlowCommandError,
+    },
+    Failed(FlowCommandError),
+}
+
+impl IncomingFlowDecisionError {
+    pub const fn reason(&self) -> FlowCommandError {
+        match self {
+            Self::Retryable { reason, .. } | Self::Failed(reason) => *reason,
+        }
+    }
+
+    pub fn into_request(self) -> Option<IncomingFlowRequest> {
+        match self {
+            Self::Retryable { request, .. } => Some(request),
+            Self::Failed(_) => None,
+        }
     }
 }
 
