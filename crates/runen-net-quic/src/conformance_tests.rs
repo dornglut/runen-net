@@ -1695,7 +1695,7 @@ async fn close_reliable_normally(sender: &mut LiveSide, receiver: &mut LiveSide,
                 EstablishedConnectionProgress::Reliable(
                     crate::reliable_driver::ActiveReliableProgress::Outbound {
                         flow_id,
-                        progress: SendProgress::Closed,
+                        progress: SendProgress::Closed { .. },
                     },
                 ) => {
                     assert_eq!(flow_id, flow.flow_id);
@@ -1712,7 +1712,7 @@ async fn close_reliable_normally(sender: &mut LiveSide, receiver: &mut LiveSide,
             match progress {
                 EstablishedConnectionProgress::Reliable(
                     crate::reliable_driver::ActiveReliableProgress::Inbound(
-                        ReceiveProgress::Closed,
+                        ReceiveProgress::Closed { .. },
                     ),
                 ) => receiver_closed = true,
                 EstablishedConnectionProgress::RemoteTerminated { .. }
