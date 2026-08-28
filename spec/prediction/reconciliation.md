@@ -97,7 +97,7 @@ For one participant incarnation, both the minimum and maximum admissible target 
 
 The host MUST advance the minimum beyond a tick only after that tick is closed to ordinary participant input under this initial profile. Once a target tick becomes lower than the minimum, that target tick MUST NOT later become admissible again for the same participant incarnation.
 
-The maximum MAY advance before the minimum as the host opens additional future simulation ticks for input, but it MUST NOT move backward to revoke a tick that was already inside the acceptance window. Resource or gameplay policy that needs to stop accepting otherwise admissible input must use an explicit rejection or lifecycle mechanism rather than silently redefining a previously open tick as never having been admissible.
+The maximum MAY advance before the minimum as the host opens additional future simulation ticks for input, but it MUST NOT move backward. Previously opened ticks are closed by advancing the minimum after those ticks are closed to ordinary input, not by decreasing the maximum.
 
 For an authorized batch whose target tick is considered against the current window:
 
@@ -191,6 +191,10 @@ A newly admitted participant begins PredictionInvalidated until a valid authorit
 When that initial authoritative full state commits at `SimulationTick T`, the participant establishes its reconciliation frontier at T and may enter PredictionActive.
 
 While PredictionActive, the reconciliation frontier is the latest successfully committed authoritative `SimulationTick` for the lineage. It MUST be monotonically nondecreasing. A newer authoritative commit at the same tick leaves the frontier unchanged; a commit at a later tick advances it.
+
+Whenever prediction continuity becomes PredictionInvalidated, every batch from the invalidated continuity MUST leave RunenNet pending-prediction replay state and MUST NOT later be replayed. A host MAY retain non-operative copies for diagnostics or application purposes outside this semantic state, subject to the host's own resource policy.
+
+While PredictionInvalidated, the participant endpoint MUST NOT admit new batches into RunenNet pending-prediction state or apply them as RunenNet-tracked prediction.
 
 ## Pending predicted input
 
@@ -331,7 +335,9 @@ An authorized replacement connection does not restore the prior prediction conti
 
 The existing replication recovery specification requires a fresh qualifying full authoritative baseline after replacement. Only after that baseline is committed and the recovery barrier clears may a new PredictionActive continuity begin.
 
-Accepted/unexposed delivery messages from the old connection are not transferred to the replacement connection, as defined by the delivery specification. Pre-replacement pending predicted input MUST NOT be replayed after the replacement full baseline under this initial profile.
+Accepted/unexposed delivery messages from the old connection are not transferred to the replacement connection, as defined by the delivery specification. RunenNet MUST NOT transfer or automatically resubmit pre-replacement pending participant input through replacement delivery flows. Pre-replacement pending predicted input MUST NOT be replayed after the replacement full baseline under this initial profile.
+
+The host MAY originate new post-recovery participant input from current application intent after the recovery barrier clears. Such input is not continuity of the invalidated RunenNet pending-prediction state and remains subject to the ordinary participant/tick key, authority-window, and prediction-frontier rules.
 
 Authority-side input-window bounds and accepted-key evidence are scoped to the retained participant incarnation, not to one transport connection. Temporary unbinding or authorized replacement MUST NOT move an authority input-window bound backward or reset still-required accepted-key evidence in a way that permits a participant/tick key to become newly applicable a second time.
 
@@ -394,9 +400,9 @@ An implementation of this semantic area MUST be testable for at least the follow
 11. authoritative commit at tick T advances/establishes the frontier and retires all pending predicted batches at ticks less than or equal to T;
 12. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order with their target-tick meaning preserved;
 13. an authoritative candidate that fails before commit does not advance the frontier, retire, or replay pending prediction;
-14. replay or intervening prediction-step failure leaves the authoritative commit/frontier valid but invalidates prediction continuity and does not expose a partially replayed state as valid prediction;
+14. replay or intervening prediction-step failure leaves the authoritative commit/frontier valid but invalidates prediction continuity, clears RunenNet replay state, and does not expose a partially replayed state as valid prediction;
 15. entering FullSnapshotRequired invalidates and clears pre-recovery replay eligibility;
-16. authorized connection replacement does not replay pre-replacement pending prediction after the required replacement full baseline and does not reset authority input-window/key identity;
+16. authorized connection replacement does not transfer, automatically resubmit, or replay pre-replacement pending input after the required replacement full baseline and does not reset authority input-window/key identity;
 17. participant removal and session close prevent old input/prediction state from becoming applicable to a later participant/session lifetime.
 
 ## Open items
