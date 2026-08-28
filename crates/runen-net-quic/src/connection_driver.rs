@@ -383,6 +383,12 @@ impl EstablishedConnectionDriver {
             .map_err(InboundDecisionDriverError::Driver)
     }
 
+    pub(super) fn has_reliable_outbound_flow(&self, key: DeliveryFlowKey) -> bool {
+        self.reliable
+            .outbound_flow_id(&self.flow_control, key)
+            .is_some()
+    }
+
     pub(super) fn request_outbound_finish_normal_by_key(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
