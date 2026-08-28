@@ -139,6 +139,18 @@ pub(super) enum DatagramSubmitDriverError {
     Driver(ConnectionDriverError),
 }
 
+#[derive(Debug)]
+pub(super) enum KeyedDatagramSubmitError {
+    Unavailable {
+        payload: Vec<u8>,
+        error: ConnectionDriverStateError,
+    },
+    UnknownFlow {
+        payload: Vec<u8>,
+    },
+    Driver(ConnectionDriverError),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) enum OutboundFinishOutcome {
     Started,
@@ -405,6 +417,26 @@ impl EstablishedConnectionDriver {
             _ => {
                 self.enter_terminal(None);
                 Err(ConnectionDriverError::Reliable(error))
+            }
+        }
+    }
+
+    pub(super) fn submit_unreliable_by_key(
+        &mut self,
+        endpoint: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+        payload: Vec<u8>,
+    ) -> Result<DatagramSubmitOutcome, KeyedDatagramSubmitError> {
+        let Some(flow_id) = self.datagram.outbound_flow_id(&self.flow_control, key) else {
+            return Err(KeyedDatagramSubmitError::UnknownFlow { payload });
+        };
+        match self.submit_unreliable(endpoint, flow_id, payload) {
+            Ok(outcome) => Ok(outcome),
+            Err(DatagramSubmitDriverError::Unavailable { payload, error, .. }) => {
+                Err(KeyedDatagramSubmitError::Unavailable { payload, error })
+            }
+            Err(DatagramSubmitDriverError::Driver(error)) => {
+                Err(KeyedDatagramSubmitError::Driver(error))
             }
         }
     }
