@@ -8,7 +8,10 @@ use std::{
 
 use quinn::Connection as QuinnConnection;
 use runen_net::{
-    delivery::{DeliveryEndpoint, FlowDirection, FlowTermination},
+    delivery::{
+        DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
+        FlowTermination,
+    },
     identity::ConnectionHandle,
     protocol::{
         CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationRequirements,
@@ -17,13 +20,14 @@ use runen_net::{
 
 use crate::{
     connection_driver::{
-        ConnectionDriverError, ConnectionDriverStateError, EstablishedConnectionDriver,
-        InboundDecisionDriverError,
+        ConnectionDriverError, ConnectionDriverStateError, DatagramSubmitOutcome,
+        EstablishedConnectionDriver, InboundDecisionDriverError, KeyedDatagramSubmitError,
     },
     control::{
         ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
         ProfileReadyParts, Settings, ValidatedControlProfile,
     },
+    datagram::DatagramSubmissionOutcome,
     endpoint::ConnectionSlotPermit,
     facade::{ProfileBootstrapFailure, ProfileReadyConnection},
     flow_control::{
@@ -39,7 +43,7 @@ use crate::{
     },
     public_flow::{
         FlowCommandError, FlowRejectionReason, InboundFlowConfig, IncomingFlowDecisionError,
-        IncomingFlowRequest, OutboundFlowConfig,
+        IncomingFlowRequest, OutboundFlowConfig, SubmissionError, SubmitOutcome,
     },
     wire::WireSide,
 };
@@ -574,6 +578,83 @@ impl Connection {
         }
     }
 
+    /// Submit one owned payload to an established outbound flow using only its Core key.
+    pub fn submit(
+        &mut self,
+        delivery: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+        payload: Vec<u8>,
+    ) -> Result<SubmitOutcome, SubmissionError> {
+        if key.connection() != self.connection {
+            return Err(SubmissionError::Retryable {
+                key,
+                payload,
+                reason: FlowCommandError::WrongConnection,
+            });
+        }
+        if key.direction() != FlowDirection::Outbound {
+            return Err(SubmissionError::Retryable {
+                key,
+                payload,
+                reason: FlowCommandError::WrongDirection,
+            });
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => {
+                return Err(SubmissionError::Failed(FlowCommandError::Terminal));
+            }
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(SubmissionError::Retryable {
+                    key,
+                    payload,
+                    reason: FlowCommandError::NotEstablished,
+                });
+            }
+        };
+
+        let Some((mode, _)) = delivery.flow_contract(key) else {
+            return Err(SubmissionError::Failed(FlowCommandError::UnknownFlow));
+        };
+        match mode {
+            DeliveryMode::ReliableOrdered => delivery
+                .submit(key, payload)
+                .map(SubmitOutcome::from)
+                .map_err(|error| SubmissionError::Failed(map_core_submission_error(error))),
+            DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => {
+                match driver.submit_unreliable_by_key(delivery, key, payload) {
+                    Ok(outcome) => {
+                        map_datagram_submit_outcome(outcome).map_err(SubmissionError::Failed)
+                    }
+                    Err(KeyedDatagramSubmitError::Unavailable { payload, error }) => {
+                        let reason = map_driver_state_error(error);
+                        if reason == FlowCommandError::Busy {
+                            Err(SubmissionError::Retryable {
+                                key,
+                                payload,
+                                reason,
+                            })
+                        } else {
+                            Err(SubmissionError::Failed(reason))
+                        }
+                    }
+                    Err(KeyedDatagramSubmitError::UnknownFlow { .. }) => {
+                        Err(SubmissionError::Failed(FlowCommandError::UnknownFlow))
+                    }
+                    Err(KeyedDatagramSubmitError::Driver(error)) => {
+                        Err(SubmissionError::Failed(map_flow_command_driver_error(error)))
+                    }
+                }
+            }
+        }
+    }
+
     /// Drive at most a finite amount of post-ProfileReady connection work.
     ///
     /// Aggregate Core authorities are borrowed only for this synchronous call.
@@ -912,6 +993,42 @@ fn map_inbound_decision_driver_error(error: &ConnectionDriverError) -> FlowComma
     }
 }
 
+fn map_core_submission_error(error: DeliveryOperationError) -> FlowCommandError {
+    match error {
+        DeliveryOperationError::UnknownFlow => FlowCommandError::UnknownFlow,
+        DeliveryOperationError::WrongDirection => FlowCommandError::WrongDirection,
+        DeliveryOperationError::NotReliable => FlowCommandError::ProtocolFailure,
+    }
+}
+
+fn map_datagram_submit_outcome(
+    outcome: DatagramSubmitOutcome,
+) -> Result<SubmitOutcome, FlowCommandError> {
+    match outcome {
+        DatagramSubmitOutcome::Submitted(outcome) => match outcome {
+            DatagramSubmissionOutcome::Accepted {
+                accepted_index,
+                local_pressure_drops,
+            } => Ok(SubmitOutcome::Accepted {
+                accepted_index,
+                local_pressure_drops,
+            }),
+            DatagramSubmissionOutcome::RejectedTooLarge => Ok(SubmitOutcome::RejectedTooLarge),
+            DatagramSubmissionOutcome::RejectedPressure => Ok(SubmitOutcome::RejectedPressure),
+            DatagramSubmissionOutcome::RejectedCounterExhausted => {
+                Ok(SubmitOutcome::RejectedCounterExhausted)
+            }
+            DatagramSubmissionOutcome::RejectedCurrentDatagramSize => {
+                Ok(SubmitOutcome::RejectedCurrentDatagramSize)
+            }
+            DatagramSubmissionOutcome::RejectedTransportUnavailable => {
+                Err(FlowCommandError::ConnectionFailure)
+            }
+        },
+        DatagramSubmitOutcome::FlowFailureHandled { .. } => Err(FlowCommandError::FlowTerminated),
+    }
+}
+
 enum LocalOperationTransition {
     State(ConnectionState),
     Error(ConnectionState, ConnectionError),
@@ -1149,6 +1266,22 @@ mod tests {
         assert_eq!(
             controller_send_disposition(ControlFrameType::NegotiationEstablished),
             PendingSendDisposition::Establish
+        );
+    }
+
+    #[test]
+    fn datagram_submission_mapping_preserves_preaccept_rejection_and_flow_failure() {
+        assert_eq!(
+            map_datagram_submit_outcome(DatagramSubmitOutcome::Submitted(
+                DatagramSubmissionOutcome::RejectedCurrentDatagramSize,
+            )),
+            Ok(SubmitOutcome::RejectedCurrentDatagramSize)
+        );
+        assert_eq!(
+            map_datagram_submit_outcome(DatagramSubmitOutcome::FlowFailureHandled {
+                flow_id: crate::wire::FlowId::new(crate::wire::WireSide::Client, 0).unwrap(),
+            }),
+            Err(FlowCommandError::FlowTerminated)
         );
     }
 }
