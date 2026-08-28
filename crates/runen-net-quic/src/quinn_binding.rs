@@ -461,6 +461,7 @@ pub(super) struct OutboundReliable<W> {
     writer: W,
     state: OutboundState,
     finish_ack: Option<FinishAckFuture>,
+    failure_termination: Option<FlowTermination>,
     terminal: bool,
 }
 
@@ -489,8 +490,17 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
             writer,
             state: OutboundState::new(flow_id, flow.max_message_bytes)?,
             finish_ack: None,
+            failure_termination: None,
             terminal: false,
         })
+    }
+
+    pub(super) const fn flow_key(&self) -> DeliveryFlowKey {
+        self.key
+    }
+
+    pub(super) fn take_failure_termination(&mut self) -> Option<FlowTermination> {
+        self.failure_termination.take()
     }
 
     pub(super) fn poll_step(
@@ -629,7 +639,7 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
     ) -> Poll<Result<SendProgress, SendError>> {
         if !self.terminal {
             self.writer.reset_reliable(code);
-            let _ = endpoint.fail_reliable_custody(self.key);
+            self.failure_termination = endpoint.fail_reliable_custody(self.key).ok();
             registry.release(self.flow_id);
             self.terminal = true;
         }
@@ -812,6 +822,7 @@ pub(super) struct InboundReliable<R> {
     flow_id: Option<FlowId>,
     flow: Option<RegisteredFlow>,
     frames: Option<InboundFrames>,
+    failure_termination: Option<FlowTermination>,
     draining: bool,
     terminal: bool,
 }
@@ -829,6 +840,17 @@ impl InboundReliable<RecvStream> {
 impl<R: PollReadReliable> InboundReliable<R> {
     pub(super) const fn resolved_flow_id(&self) -> Option<FlowId> {
         self.flow_id
+    }
+
+    pub(super) const fn resolved_flow_key(&self) -> Option<DeliveryFlowKey> {
+        match self.flow {
+            Some(flow) => Some(flow.key()),
+            None => None,
+        }
+    }
+
+    pub(super) fn take_failure_termination(&mut self) -> Option<FlowTermination> {
+        self.failure_termination.take()
     }
 
     fn new(
@@ -853,6 +875,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
             flow_id: None,
             flow: None,
             frames: None,
+            failure_termination: None,
             draining: false,
             terminal: false,
         })
@@ -1013,7 +1036,7 @@ impl<R: PollReadReliable> InboundReliable<R> {
         if !self.terminal {
             self.reader.stop_reliable(code);
             if let Some(flow) = self.flow {
-                let _ = endpoint.fail_reliable_custody(flow.key);
+                self.failure_termination = endpoint.fail_reliable_custody(flow.key).ok();
             }
             if let Some(flow_id) = self.flow_id {
                 registry.release(flow_id);
@@ -1552,6 +1575,12 @@ mod tests {
             binding.poll_step(&mut cx, &mut endpoint, &mut registry),
             Poll::Ready(Err(SendError::Io(IoFailure::Write)))
         );
+        let termination = binding
+            .take_failure_termination()
+            .expect("reliable send failure discarded Core termination evidence");
+        assert_eq!(termination.key, key);
+        assert_eq!(termination.reason, FlowTerminationReason::ReliableCustodyLost);
+        assert!(termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(key), None);
         assert_eq!(registry.active_len(), 0);
         assert_eq!(binding.writer.resets, vec![6]);
@@ -1801,6 +1830,13 @@ mod tests {
                 max_staging_bytes: 32,
             }))
         );
+        assert_eq!(binding.resolved_flow_key(), Some(key));
+        let termination = binding
+            .take_failure_termination()
+            .expect("associated reliable failure discarded Core termination evidence");
+        assert_eq!(termination.key, key);
+        assert_eq!(termination.reason, FlowTerminationReason::ReliableCustodyLost);
+        assert!(termination.reliable_obligation_failed);
         assert_eq!(binding.reader.stops, vec![3]);
         assert_eq!(endpoint.flow_contract(key), None);
         assert_eq!(registry.active_len(), 0);
