@@ -533,19 +533,18 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
             return match finish_ack.as_mut().poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(None)) => {
-                    let termination = match endpoint
-                        .terminate_flow(self.key, FlowTerminationReason::Requested)
-                    {
-                        Ok(termination) => termination,
-                        Err(error) => {
-                            return self.fail(
-                                endpoint,
-                                registry,
-                                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                                SendError::Core(error),
-                            );
-                        }
-                    };
+                    let termination =
+                        match endpoint.terminate_flow(self.key, FlowTerminationReason::Requested) {
+                            Ok(termination) => termination,
+                            Err(error) => {
+                                return self.fail(
+                                    endpoint,
+                                    registry,
+                                    ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                                    SendError::Core(error),
+                                );
+                            }
+                        };
                     registry.release(self.flow_id);
                     self.finish_ack = None;
                     self.terminal = true;
@@ -785,13 +784,19 @@ impl InboundFrames {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) enum ReceiveProgress {
-    Progressed { bytes: usize },
-    Associated { flow_id: FlowId },
+    Progressed {
+        bytes: usize,
+    },
+    Associated {
+        flow_id: FlowId,
+    },
     MessagesBuffered {
         key: DeliveryFlowKey,
         count: usize,
     },
-    Draining { key: DeliveryFlowKey },
+    Draining {
+        key: DeliveryFlowKey,
+    },
     Closed {
         key: DeliveryFlowKey,
         termination: Option<FlowTermination>,
