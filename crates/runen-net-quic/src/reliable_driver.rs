@@ -9,7 +9,9 @@ use std::{
 
 use quinn::{Connection, ConnectionError, RecvStream, SendStream};
 use runen_net::{
-    delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowDirection},
+    delivery::{
+        DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowDirection, FlowTermination,
+    },
     protocol::NegotiationManager,
 };
 
@@ -60,8 +62,15 @@ pub(super) enum ReliableIoStateError {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) enum ReliableFailureContext {
     Unresolved,
-    ResolvedLive { flow_id: FlowId },
-    ResolvedDetached { flow_id: FlowId },
+    ResolvedReportable {
+        flow_id: FlowId,
+        key: DeliveryFlowKey,
+        termination: Option<FlowTermination>,
+    },
+    ResolvedDetached {
+        flow_id: FlowId,
+        key: DeliveryFlowKey,
+    },
 }
 
 #[derive(Debug)]
@@ -361,10 +370,8 @@ impl ReliableConnectionIo {
         for offset in 0..len {
             let index = (start + offset) % len;
             let flow_id = self.active_outbound[index].flow_id;
-            let context = resolved_failure_context(
-                flow_id,
-                flow_control.registry().registered_flow(flow_id).is_some(),
-            );
+            let key = self.active_outbound[index].binding.flow_key();
+            let registered_before = flow_control.registry().registered_flow(flow_id).is_some();
             match self.active_outbound[index].binding.poll_step(
                 cx,
                 endpoint,
@@ -381,6 +388,15 @@ impl ReliableConnectionIo {
                     return Poll::Ready(Ok(ActiveReliableProgress::Outbound { flow_id, progress }));
                 }
                 Poll::Ready(Err(error)) => {
+                    let termination = self.active_outbound[index]
+                        .binding
+                        .take_failure_termination();
+                    let context = resolved_failure_context(
+                        flow_id,
+                        key,
+                        registered_before,
+                        termination,
+                    );
                     let _ = self.active_outbound.swap_remove(index);
                     self.outbound_cursor = cursor_after_remove(index, self.active_outbound.len());
                     return Poll::Ready(Err(ReliableIoError::OutboundActiveBinding {
@@ -407,8 +423,9 @@ impl ReliableConnectionIo {
         let start = self.inbound_cursor % len;
         for offset in 0..len {
             let index = (start + offset) % len;
-            let before = self.active_inbound[index].resolved_flow_id();
-            let before_registered = before
+            let before_flow_id = self.active_inbound[index].resolved_flow_id();
+            let before_key = self.active_inbound[index].resolved_flow_key();
+            let before_registered = before_flow_id
                 .is_some_and(|flow_id| flow_control.registry().registered_flow(flow_id).is_some());
             match self.active_inbound[index].poll_step(cx, endpoint, flow_control.registry_mut()) {
                 Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining { .. })) => {}
@@ -422,8 +439,17 @@ impl ReliableConnectionIo {
                     return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress)));
                 }
                 Poll::Ready(Err(error)) => {
-                    let after = self.active_inbound[index].resolved_flow_id();
-                    let context = inbound_failure_context(before, before_registered, after);
+                    let after_flow_id = self.active_inbound[index].resolved_flow_id();
+                    let after_key = self.active_inbound[index].resolved_flow_key();
+                    let termination = self.active_inbound[index].take_failure_termination();
+                    let context = inbound_failure_context(
+                        before_flow_id,
+                        before_key,
+                        before_registered,
+                        after_flow_id,
+                        after_key,
+                        termination,
+                    );
                     let _ = self.active_inbound.swap_remove(index);
                     self.inbound_cursor = cursor_after_remove(index, self.active_inbound.len());
                     return Poll::Ready(Err(ReliableIoError::InboundActiveBinding {
@@ -526,25 +552,45 @@ fn registered_outbound_is_live(flow_control: &FlowControl, flow_id: FlowId) -> b
         })
 }
 
-const fn resolved_failure_context(flow_id: FlowId, registered: bool) -> ReliableFailureContext {
-    if registered {
-        ReliableFailureContext::ResolvedLive { flow_id }
+const fn resolved_failure_context(
+    flow_id: FlowId,
+    key: DeliveryFlowKey,
+    registered_before: bool,
+    termination: Option<FlowTermination>,
+) -> ReliableFailureContext {
+    if registered_before || termination.is_some() {
+        ReliableFailureContext::ResolvedReportable {
+            flow_id,
+            key,
+            termination,
+        }
     } else {
-        ReliableFailureContext::ResolvedDetached { flow_id }
+        ReliableFailureContext::ResolvedDetached { flow_id, key }
     }
 }
 
 const fn inbound_failure_context(
-    before: Option<FlowId>,
+    before_flow_id: Option<FlowId>,
+    before_key: Option<DeliveryFlowKey>,
     before_registered: bool,
-    after: Option<FlowId>,
+    after_flow_id: Option<FlowId>,
+    after_key: Option<DeliveryFlowKey>,
+    termination: Option<FlowTermination>,
 ) -> ReliableFailureContext {
-    match before {
-        Some(flow_id) => resolved_failure_context(flow_id, before_registered),
-        None => match after {
-            Some(flow_id) => ReliableFailureContext::ResolvedLive { flow_id },
-            None => ReliableFailureContext::Unresolved,
+    match (before_flow_id, before_key) {
+        (Some(flow_id), Some(key)) => {
+            resolved_failure_context(flow_id, key, before_registered, termination)
+        }
+        (None, None) => match (after_flow_id, after_key) {
+            (Some(flow_id), Some(key)) => ReliableFailureContext::ResolvedReportable {
+                flow_id,
+                key,
+                termination,
+            },
+            (None, None) => ReliableFailureContext::Unresolved,
+            _ => ReliableFailureContext::Unresolved,
         },
+        _ => ReliableFailureContext::Unresolved,
     }
 }
 
@@ -579,6 +625,11 @@ const fn cursor_after_remove(index: usize, new_len: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use runen_net::{
+        delivery::{DeliveryFlowHandle, FlowTerminationReason},
+        identity::ConnectionHandle,
+    };
+
     use super::*;
     use crate::wire::WireSide;
 
@@ -588,6 +639,23 @@ mod tests {
 
     fn flow(side: WireSide, sequence: u64) -> FlowId {
         FlowId::new(side, sequence).unwrap()
+    }
+
+    fn key(direction: FlowDirection, handle: u64) -> DeliveryFlowKey {
+        DeliveryFlowKey::new(
+            ConnectionHandle::new(1),
+            direction,
+            DeliveryFlowHandle::new(handle),
+        )
+    }
+
+    fn failure_termination(key: DeliveryFlowKey) -> FlowTermination {
+        FlowTermination {
+            key,
+            reason: FlowTerminationReason::ReliableCustodyLost,
+            pending_messages: 0,
+            reliable_obligation_failed: true,
+        }
     }
 
     fn assert_owned_send<T: Send + 'static>() {}
@@ -615,32 +683,68 @@ mod tests {
     }
 
     #[test]
-    fn reliable_failure_context_preserves_resolution_and_liveness() {
+    fn reliable_failure_context_preserves_key_evidence_and_reportability() {
         let flow_id = flow(WireSide::Server, 7);
+        let key = key(FlowDirection::Inbound, 7);
+        let termination = failure_termination(key);
 
         assert_eq!(
-            inbound_failure_context(None, false, None),
+            inbound_failure_context(None, None, false, None, None, None),
             ReliableFailureContext::Unresolved
         );
         assert_eq!(
-            inbound_failure_context(None, false, Some(flow_id)),
-            ReliableFailureContext::ResolvedLive { flow_id }
+            inbound_failure_context(None, None, false, Some(flow_id), Some(key), Some(termination)),
+            ReliableFailureContext::ResolvedReportable {
+                flow_id,
+                key,
+                termination: Some(termination),
+            }
         );
         assert_eq!(
-            inbound_failure_context(Some(flow_id), true, Some(flow_id)),
-            ReliableFailureContext::ResolvedLive { flow_id }
+            inbound_failure_context(
+                Some(flow_id),
+                Some(key),
+                true,
+                Some(flow_id),
+                Some(key),
+                Some(termination),
+            ),
+            ReliableFailureContext::ResolvedReportable {
+                flow_id,
+                key,
+                termination: Some(termination),
+            }
         );
         assert_eq!(
-            inbound_failure_context(Some(flow_id), false, Some(flow_id)),
-            ReliableFailureContext::ResolvedDetached { flow_id }
+            inbound_failure_context(
+                Some(flow_id),
+                Some(key),
+                false,
+                Some(flow_id),
+                Some(key),
+                None,
+            ),
+            ReliableFailureContext::ResolvedDetached { flow_id, key }
         );
         assert_eq!(
-            resolved_failure_context(flow_id, true),
-            ReliableFailureContext::ResolvedLive { flow_id }
+            resolved_failure_context(flow_id, key, true, None),
+            ReliableFailureContext::ResolvedReportable {
+                flow_id,
+                key,
+                termination: None,
+            }
         );
         assert_eq!(
-            resolved_failure_context(flow_id, false),
-            ReliableFailureContext::ResolvedDetached { flow_id }
+            resolved_failure_context(flow_id, key, false, Some(termination)),
+            ReliableFailureContext::ResolvedReportable {
+                flow_id,
+                key,
+                termination: Some(termination),
+            }
+        );
+        assert_eq!(
+            resolved_failure_context(flow_id, key, false, None),
+            ReliableFailureContext::ResolvedDetached { flow_id, key }
         );
     }
 
