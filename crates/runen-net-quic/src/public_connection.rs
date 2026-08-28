@@ -1064,9 +1064,7 @@ fn map_finish_driver_error(error: ConnectionDriverError) -> FlowCommandError {
             ..
         }) => FlowCommandError::Pending,
         ConnectionDriverError::Reliable(ReliableIoError::OutboundFinish {
-            error:
-                SendError::Terminal
-                | SendError::Core(DeliveryOperationError::UnknownFlow),
+            error: SendError::Terminal | SendError::Core(DeliveryOperationError::UnknownFlow),
             ..
         }) => FlowCommandError::FlowTerminated,
         ConnectionDriverError::FailurePreparation(FlowControlError::Allocation(_)) => {
