@@ -8,7 +8,7 @@ use std::{
 
 use quinn::Connection as QuinnConnection;
 use runen_net::{
-    delivery::{DeliveryEndpoint, FlowTermination},
+    delivery::{DeliveryEndpoint, FlowDirection, FlowTermination},
     identity::ConnectionHandle,
     protocol::{
         CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationRequirements,
@@ -16,13 +16,17 @@ use runen_net::{
 };
 
 use crate::{
-    connection_driver::EstablishedConnectionDriver,
+    connection_driver::{
+        ConnectionDriverError, ConnectionDriverStateError, EstablishedConnectionDriver,
+        InboundDecisionDriverError,
+    },
     control::{
         ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
         ProfileReadyParts, Settings, ValidatedControlProfile,
     },
     endpoint::ConnectionSlotPermit,
     facade::{ProfileBootstrapFailure, ProfileReadyConnection},
+    flow_control::{InboundAdmission, InboundAdmissionError, OutboundOpenError, OutboundOpenRequest},
     lifecycle::{
         AdmittedProfileReadyConnection, EstablishedNegotiatedConnection,
         close_for_post_profile_control_error, close_negotiation_failed,
@@ -30,6 +34,10 @@ use crate::{
     },
     negotiation::{
         NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress,
+    },
+    public_flow::{
+        FlowCommandError, FlowRejectionReason, InboundFlowConfig, IncomingFlowDecisionError,
+        IncomingFlowRequest, OutboundFlowConfig,
     },
     wire::WireSide,
 };
@@ -401,6 +409,173 @@ impl Connection {
         self.reliable_receive
     }
 
+    /// Begin one outbound flow establishment using only the host Core flow identity.
+    pub fn open_outbound_flow(
+        &mut self,
+        delivery: &DeliveryEndpoint,
+        config: OutboundFlowConfig,
+    ) -> Result<(), FlowCommandError> {
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(FlowCommandError::NotEstablished);
+            }
+        };
+        driver
+            .open_outbound(
+                delivery,
+                OutboundOpenRequest {
+                    key: config.key,
+                    mode: config.mode,
+                    policy: config.policy,
+                    stable_max_message_bytes: config.stable_max_message_bytes,
+                    connection_limits: config.connection_limits,
+                },
+            )
+            .map_err(map_flow_command_driver_error)
+    }
+
+    /// Accept one move-only incoming request with an explicit host Core flow identity.
+    pub fn accept_incoming_flow(
+        &mut self,
+        delivery: &mut DeliveryEndpoint,
+        request: IncomingFlowRequest,
+        config: InboundFlowConfig,
+    ) -> Result<(), IncomingFlowDecisionError> {
+        if request.connection != self.connection || config.key.connection() != self.connection {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::WrongConnection,
+            });
+        }
+        if config.key.direction() != FlowDirection::Inbound {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::WrongDirection,
+            });
+        }
+        if config.policy.validate_for_mode(request.mode()).is_err() {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::InvalidConfiguration,
+            });
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => {
+                return Err(IncomingFlowDecisionError::Failed(
+                    FlowCommandError::Terminal,
+                ));
+            }
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(IncomingFlowDecisionError::Retryable {
+                    request,
+                    reason: FlowCommandError::NotEstablished,
+                });
+            }
+        };
+
+        match driver.accept_inbound(
+            delivery,
+            request.inner,
+            InboundAdmission {
+                key: config.key,
+                policy: config.policy,
+                connection_limits: config.connection_limits,
+            },
+        ) {
+            Ok(()) => Ok(()),
+            Err(InboundDecisionDriverError::Unavailable { request, error }) => {
+                let reason = map_driver_state_error(error);
+                if reason == FlowCommandError::Busy {
+                    Err(IncomingFlowDecisionError::Retryable {
+                        request: IncomingFlowRequest {
+                            connection: self.connection,
+                            inner: request,
+                        },
+                        reason,
+                    })
+                } else {
+                    Err(IncomingFlowDecisionError::Failed(reason))
+                }
+            }
+            Err(InboundDecisionDriverError::Driver(error)) => {
+                Err(IncomingFlowDecisionError::Failed(
+                    map_inbound_decision_driver_error(&error),
+                ))
+            }
+        }
+    }
+
+    /// Reject one move-only incoming request with an accepted profile rejection reason.
+    pub fn reject_incoming_flow(
+        &mut self,
+        request: IncomingFlowRequest,
+        reason: FlowRejectionReason,
+    ) -> Result<(), IncomingFlowDecisionError> {
+        if request.connection != self.connection {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::WrongConnection,
+            });
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => {
+                return Err(IncomingFlowDecisionError::Failed(
+                    FlowCommandError::Terminal,
+                ));
+            }
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(IncomingFlowDecisionError::Retryable {
+                    request,
+                    reason: FlowCommandError::NotEstablished,
+                });
+            }
+        };
+
+        match driver.reject_inbound(request.inner, reason.into()) {
+            Ok(()) => Ok(()),
+            Err(InboundDecisionDriverError::Unavailable { request, error }) => {
+                let reason = map_driver_state_error(error);
+                if reason == FlowCommandError::Busy {
+                    Err(IncomingFlowDecisionError::Retryable {
+                        request: IncomingFlowRequest {
+                            connection: self.connection,
+                            inner: request,
+                        },
+                        reason,
+                    })
+                } else {
+                    Err(IncomingFlowDecisionError::Failed(reason))
+                }
+            }
+            Err(InboundDecisionDriverError::Driver(error)) => {
+                Err(IncomingFlowDecisionError::Failed(
+                    map_inbound_decision_driver_error(&error),
+                ))
+            }
+        }
+    }
+
     /// Drive at most a finite amount of post-ProfileReady connection work.
     ///
     /// Aggregate Core authorities are borrowed only for this synchronous call.
@@ -690,6 +865,53 @@ fn activate_established_driver(
         )
         .into_established_io()
         .into_connection_driver())
+}
+
+fn map_driver_state_error(error: ConnectionDriverStateError) -> FlowCommandError {
+    match error {
+        ConnectionDriverStateError::ControlSendBusy => FlowCommandError::Busy,
+        ConnectionDriverStateError::Terminal => FlowCommandError::Terminal,
+    }
+}
+
+fn map_outbound_open_error(error: &OutboundOpenError) -> FlowCommandError {
+    match error {
+        OutboundOpenError::WrongConnection { .. } => FlowCommandError::WrongConnection,
+        OutboundOpenError::WrongDirection(_) => FlowCommandError::WrongDirection,
+        OutboundOpenError::InvalidPolicy(_)
+        | OutboundOpenError::StableMessageLimitMismatch { .. }
+        | OutboundOpenError::StableMessageLimitOutOfRange => FlowCommandError::InvalidConfiguration,
+        OutboundOpenError::CoreFlowAlreadyExists(_) => FlowCommandError::AlreadyExists,
+        OutboundOpenError::PendingCoreFlow(_) => FlowCommandError::Pending,
+        OutboundOpenError::PeerMessageLimit { .. } => FlowCommandError::MessageLimit,
+        OutboundOpenError::PeerActiveFlowLimit { .. }
+        | OutboundOpenError::FlowId(_)
+        | OutboundOpenError::Allocation(_) => FlowCommandError::ResourceLimit,
+        OutboundOpenError::DatagramTooSmall { .. } => FlowCommandError::DatagramTooSmall,
+        OutboundOpenError::DatagramUnavailable => FlowCommandError::ConnectionFailure,
+        OutboundOpenError::DatagramEnvelope(_) | OutboundOpenError::Body(_) => {
+            FlowCommandError::ProtocolFailure
+        }
+    }
+}
+
+fn map_flow_command_driver_error(error: ConnectionDriverError) -> FlowCommandError {
+    match error {
+        ConnectionDriverError::State(error) => map_driver_state_error(error),
+        ConnectionDriverError::OutboundOpen(error) => map_outbound_open_error(&error),
+        _ => FlowCommandError::ConnectionFailure,
+    }
+}
+
+fn map_inbound_decision_driver_error(error: &ConnectionDriverError) -> FlowCommandError {
+    match error {
+        ConnectionDriverError::State(error) => map_driver_state_error(*error),
+        ConnectionDriverError::InboundAdmission(InboundAdmissionError::RequestNotPending(_)) => {
+            FlowCommandError::StaleRequest
+        }
+        ConnectionDriverError::InboundAdmission(_) => FlowCommandError::ConnectionFailure,
+        _ => FlowCommandError::ConnectionFailure,
+    }
 }
 
 enum LocalOperationTransition {
