@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use quinn::{RecvStream, SendStream, VarInt};
 use runen_net::delivery::{
     CustodyCommitError, DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
-    DeliveryTransfer, FlowDirection, FlowTerminationReason, ReceiveOutcome,
+    DeliveryTransfer, FlowDirection, FlowTermination, FlowTerminationReason, ReceiveOutcome,
 };
 
 use super::reliable::{ReliableFrameDecoder, ReliableFrameError, encode_payload_length};
@@ -317,7 +317,7 @@ pub(super) enum SendProgress {
     Progressed { bytes: usize },
     Committed { accepted_index: u64 },
     Idle,
-    Closed,
+    Closed { termination: FlowTermination },
 }
 
 #[derive(Debug)]
@@ -533,20 +533,23 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
             return match finish_ack.as_mut().poll(cx) {
                 Poll::Pending => Poll::Pending,
                 Poll::Ready(Ok(None)) => {
-                    if let Err(error) =
-                        endpoint.terminate_flow(self.key, FlowTerminationReason::Requested)
+                    let termination = match endpoint
+                        .terminate_flow(self.key, FlowTerminationReason::Requested)
                     {
-                        return self.fail(
-                            endpoint,
-                            registry,
-                            ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
-                            SendError::Core(error),
-                        );
-                    }
+                        Ok(termination) => termination,
+                        Err(error) => {
+                            return self.fail(
+                                endpoint,
+                                registry,
+                                ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
+                                SendError::Core(error),
+                            );
+                        }
+                    };
                     registry.release(self.flow_id);
                     self.finish_ack = None;
                     self.terminal = true;
-                    Poll::Ready(Ok(SendProgress::Closed))
+                    Poll::Ready(Ok(SendProgress::Closed { termination }))
                 }
                 Poll::Ready(Ok(Some(_))) | Poll::Ready(Err(_)) => self.fail(
                     endpoint,
@@ -784,9 +787,15 @@ impl InboundFrames {
 pub(super) enum ReceiveProgress {
     Progressed { bytes: usize },
     Associated { flow_id: FlowId },
-    MessagesBuffered { count: usize },
-    Draining,
-    Closed,
+    MessagesBuffered {
+        key: DeliveryFlowKey,
+        count: usize,
+    },
+    Draining { key: DeliveryFlowKey },
+    Closed {
+        key: DeliveryFlowKey,
+        termination: Option<FlowTermination>,
+    },
 }
 
 #[derive(Debug)]
@@ -948,7 +957,10 @@ impl<R: PollReadReliable> InboundReliable<R> {
             flow.key,
         ) {
             Ok(0) => Poll::Ready(Ok(ReceiveProgress::Progressed { bytes: read })),
-            Ok(count) => Poll::Ready(Ok(ReceiveProgress::MessagesBuffered { count })),
+            Ok(count) => Poll::Ready(Ok(ReceiveProgress::MessagesBuffered {
+                key: flow.key,
+                count,
+            })),
             Err(error) => self.fail(endpoint, registry, receive_error_code(&error), error),
         }
     }
@@ -961,20 +973,27 @@ impl<R: PollReadReliable> InboundReliable<R> {
         let flow = self.flow.ok_or(ReceiveError::Terminal)?;
         match endpoint.flow_pending_usage(flow.key) {
             Some((0, 0)) => {
-                endpoint.terminate_flow(flow.key, FlowTerminationReason::Requested)?;
+                let termination =
+                    endpoint.terminate_flow(flow.key, FlowTerminationReason::Requested)?;
                 if let Some(flow_id) = self.flow_id {
                     registry.release(flow_id);
                 }
                 self.terminal = true;
-                Ok(ReceiveProgress::Closed)
+                Ok(ReceiveProgress::Closed {
+                    key: flow.key,
+                    termination: Some(termination),
+                })
             }
-            Some(_) => Ok(ReceiveProgress::Draining),
+            Some(_) => Ok(ReceiveProgress::Draining { key: flow.key }),
             None => {
                 if let Some(flow_id) = self.flow_id {
                     registry.release(flow_id);
                 }
                 self.terminal = true;
-                Ok(ReceiveProgress::Closed)
+                Ok(ReceiveProgress::Closed {
+                    key: flow.key,
+                    termination: None,
+                })
             }
         }
     }
@@ -1493,7 +1512,7 @@ mod tests {
                     committed.push(accepted_index);
                 }
                 Poll::Ready(Ok(SendProgress::Idle)) => break,
-                Poll::Ready(Ok(SendProgress::Closed)) => panic!("unexpected close"),
+                Poll::Ready(Ok(SendProgress::Closed { .. })) => panic!("unexpected close"),
                 Poll::Ready(Err(error)) => panic!("unexpected error: {error:?}"),
             }
         }
@@ -1592,10 +1611,14 @@ mod tests {
         ));
         assert!(endpoint.flow_contract(key).is_some());
         assert_eq!(registry.active_len(), 1);
-        assert_eq!(
-            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
-            Poll::Ready(Ok(SendProgress::Closed))
-        );
+        let progress = binding.poll_step(&mut cx, &mut endpoint, &mut registry);
+        let Poll::Ready(Ok(SendProgress::Closed { termination })) = progress else {
+            panic!("normal reliable finish did not preserve Core termination: {progress:?}");
+        };
+        assert_eq!(termination.key, key);
+        assert_eq!(termination.reason, FlowTerminationReason::Requested);
+        assert_eq!(termination.pending_messages, 0);
+        assert!(!termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(key), None);
         assert_eq!(registry.active_len(), 0);
     }
@@ -1803,12 +1826,12 @@ mod tests {
         let mut cx = context();
         assert_eq!(
             binding.poll_step(&mut cx, &mut endpoint, &mut registry),
-            Poll::Ready(Ok(ReceiveProgress::MessagesBuffered { count: 3 }))
+            Poll::Ready(Ok(ReceiveProgress::MessagesBuffered { key, count: 3 }))
         );
         assert_eq!(endpoint.pending_messages(), 3);
         assert_eq!(
             binding.poll_step(&mut cx, &mut endpoint, &mut registry),
-            Poll::Ready(Ok(ReceiveProgress::Draining))
+            Poll::Ready(Ok(ReceiveProgress::Draining { key }))
         );
         assert_eq!(
             endpoint.poll_exposure(key).unwrap().unwrap().payload(),
@@ -1819,10 +1842,19 @@ mod tests {
             endpoint.poll_exposure(key).unwrap().unwrap().payload(),
             b"ok"
         );
-        assert_eq!(
-            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
-            Poll::Ready(Ok(ReceiveProgress::Closed))
-        );
+        let progress = binding.poll_step(&mut cx, &mut endpoint, &mut registry);
+        let Poll::Ready(Ok(ReceiveProgress::Closed {
+            key: closed_key,
+            termination: Some(termination),
+        })) = progress
+        else {
+            panic!("clean reliable FIN did not preserve Core termination: {progress:?}");
+        };
+        assert_eq!(closed_key, key);
+        assert_eq!(termination.key, key);
+        assert_eq!(termination.reason, FlowTerminationReason::Requested);
+        assert_eq!(termination.pending_messages, 0);
+        assert!(!termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(key), None);
         assert_eq!(registry.active_len(), 0);
     }
