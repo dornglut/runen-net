@@ -1279,7 +1279,7 @@ mod tests {
         );
         assert_eq!(
             map_datagram_submit_outcome(DatagramSubmitOutcome::FlowFailureHandled {
-                flow_id: crate::wire::FlowId::new(crate::wire::WireSide::Client, 0).unwrap(),
+                flow_id: crate::wire::FlowId::new(WireSide::Client, 0).unwrap(),
             }),
             Err(FlowCommandError::FlowTerminated)
         );
