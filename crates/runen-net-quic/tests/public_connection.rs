@@ -100,10 +100,10 @@ fn pending_send_and_receive_teardown_release_core_and_endpoint_capacity() {
                 Poll::Pending
             ));
 
-            let client_teardown = client_connection
-                .teardown(&mut client_host.negotiation, &mut client_host.delivery);
-            let server_teardown = server_connection
-                .teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            let client_teardown =
+                client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+            let server_teardown =
+                server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
             assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
             assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
 
@@ -134,10 +134,10 @@ fn pending_send_and_receive_teardown_release_core_and_endpoint_capacity() {
             )
             .await;
 
-            let client_teardown = client_connection
-                .teardown(&mut client_host.negotiation, &mut client_host.delivery);
-            let server_teardown = server_connection
-                .teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            let client_teardown =
+                client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+            let server_teardown =
+                server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
             assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
             assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
 
@@ -221,10 +221,10 @@ fn invalid_authority_selection_preserves_local_and_remote_semantic_failure_categ
                 ConnectionError::RemoteNegotiation(NegotiationFailure::InvalidSelection)
             );
 
-            let client_teardown = client_connection
-                .teardown(&mut client_host.negotiation, &mut client_host.delivery);
-            let server_teardown = server_connection
-                .teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            let client_teardown =
+                client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+            let server_teardown =
+                server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
             assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
             assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
 
@@ -242,7 +242,8 @@ async fn run_public_success(authority: AuthoritySide) {
     let (client, server) = endpoints(config);
     let mut client_host = new_host();
     let mut server_host = new_host();
-    let (client_ready, server_ready) = profile_ready_pair(&client, &server, config, authority).await;
+    let (client_ready, server_ready) =
+        profile_ready_pair(&client, &server, config, authority).await;
     let (mut client_connection, mut server_connection) = activate_pair(
         client_ready,
         server_ready,
@@ -470,7 +471,9 @@ fn poll_error(
             panic!("semantic failure unexpectedly requested another Authority selection")
         }
         Poll::Ready(Ok(ConnectionEvent::Established { connection })) => {
-            panic!("semantic failure unexpectedly established {connection:?}; expected failure for {expected_handle:?}")
+            panic!(
+                "semantic failure unexpectedly established {connection:?}; expected failure for {expected_handle:?}"
+            )
         }
         Poll::Ready(Ok(_)) => panic!("unexpected public connection event"),
     }
@@ -549,11 +552,7 @@ fn new_host() -> HostState {
             NegotiationManagerLimits::default(),
         )
         .unwrap(),
-        delivery: DeliveryEndpoint::new(DeliveryScopeLimits::new(
-            nz(64),
-            nz(128),
-            nz(1024 * 1024),
-        )),
+        delivery: DeliveryEndpoint::new(DeliveryScopeLimits::new(nz(64), nz(128), nz(1024 * 1024))),
     }
 }
 
