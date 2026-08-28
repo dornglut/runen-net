@@ -45,6 +45,7 @@ pub(super) enum DatagramOutboundProgress {
     },
     Driven {
         flow_id: FlowId,
+        key: DeliveryFlowKey,
         progress: DatagramSendProgress,
     },
 }
@@ -82,6 +83,22 @@ impl DatagramConnectionIo {
 
     pub(super) const fn outbound_transport_drops(&self) -> usize {
         self.sender.outbound_transport_drops()
+    }
+
+    pub(super) fn outbound_flow_id(
+        &self,
+        flow_control: &FlowControl,
+        key: DeliveryFlowKey,
+    ) -> Option<FlowId> {
+        self.outbound.iter().copied().find(|flow_id| {
+            flow_control
+                .registry()
+                .registered_flow(*flow_id)
+                .is_some_and(|registered| {
+                    registered.key() == key
+                        && is_outbound_unreliable(registered.key().direction(), registered.mode())
+                })
+        })
     }
 
     pub(super) fn submit(
@@ -128,6 +145,10 @@ impl DatagramConnectionIo {
             .try_reserve(1)
             .map_err(DatagramIoError::Allocation)?;
         self.outbound.push(flow.flow_id());
+        debug_assert_eq!(
+            self.outbound_flow_id(flow_control, flow.key()),
+            Some(flow.flow_id())
+        );
         Ok(())
     }
 
@@ -150,6 +171,11 @@ impl DatagramConnectionIo {
                 self.outbound_cursor = normalize_cursor(index, self.outbound.len());
                 return Ok(Some(DatagramOutboundProgress::Cancelled { flow_id }));
             }
+            let key = flow_control
+                .registry()
+                .registered_flow(flow_id)
+                .expect("outbound DATAGRAM liveness was checked above")
+                .key();
 
             match self
                 .sender
@@ -158,7 +184,11 @@ impl DatagramConnectionIo {
                 Ok(DatagramSendProgress::Idle) => {}
                 Ok(progress) => {
                     self.outbound_cursor = (index + 1) % len;
-                    return Ok(Some(DatagramOutboundProgress::Driven { flow_id, progress }));
+                    return Ok(Some(DatagramOutboundProgress::Driven {
+                        flow_id,
+                        key,
+                        progress,
+                    }));
                 }
                 Err(error) => {
                     self.outbound_cursor = (index + 1) % len;

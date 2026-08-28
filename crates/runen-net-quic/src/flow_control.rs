@@ -207,6 +207,7 @@ pub(super) enum FlowControlProgress {
         flow_id: FlowId,
         key: DeliveryFlowKey,
         reason: FlowTerminateReason,
+        termination: Option<FlowTermination>,
         frame: ControlFrame,
     },
     RemoteTerminated {
@@ -526,7 +527,7 @@ impl FlowControl {
         ) {
             Ok(()) => {}
             Err(FlowEstablishmentError::ActiveFlowLimitExceeded(_)) => {
-                return self.outbound_resource_failure(accept.flow_id, pending.key);
+                return self.outbound_resource_failure(accept.flow_id, pending.key, None);
             }
             Err(error) => return Err(FlowControlError::LocalEstablishment(error)),
         }
@@ -544,10 +545,10 @@ impl FlowControl {
                 max_message_bytes: pending.stable_max_message_bytes.get(),
             })),
             Err(RegistryError::CapacityExceeded | RegistryError::AllocationFailed) => {
-                endpoint
+                let termination = endpoint
                     .terminate_flow(pending.key, FlowTerminationReason::Requested)
                     .map_err(FlowControlError::CoreState)?;
-                self.outbound_resource_failure(accept.flow_id, pending.key)
+                self.outbound_resource_failure(accept.flow_id, pending.key, Some(termination))
             }
             Err(error) => {
                 endpoint
@@ -562,6 +563,7 @@ impl FlowControl {
         &self,
         flow_id: FlowId,
         key: DeliveryFlowKey,
+        termination: Option<FlowTermination>,
     ) -> Result<FlowControlProgress, FlowControlError> {
         let reason = FlowTerminateReason::ResourceFailure;
         let frame = terminate_frame(flow_id, reason).map_err(FlowControlError::Allocation)?;
@@ -569,6 +571,7 @@ impl FlowControl {
             flow_id,
             key,
             reason,
+            termination,
             frame,
         })
     }
@@ -1246,6 +1249,7 @@ mod tests {
             flow_id,
             key,
             reason,
+            termination,
             frame,
         } = progress
         else {
@@ -1254,9 +1258,68 @@ mod tests {
         assert_eq!(flow_id, prepared.flow.flow_id());
         assert_eq!(key, requested);
         assert_eq!(reason, FlowTerminateReason::ResourceFailure);
+        assert_eq!(termination, None);
         assert_eq!(frame.frame_type, ControlFrameType::FlowTerminate);
         assert_eq!(endpoint.flow_contract(requested), None);
         assert_eq!(control.registry().registered_flow(flow_id), None);
+    }
+
+    #[test]
+    fn registry_failure_after_accept_preserves_core_rollback_termination() {
+        let connection = ConnectionHandle::new(18);
+        let mut control = control(connection, WireSide::Client, 4, 256, 4, 256);
+        control.registry = AcceptedFlowRegistry::new(WireSide::Client, nz(1));
+        let mut endpoint = DeliveryEndpoint::new(limits(8));
+
+        let occupied_key = key(connection, FlowDirection::Inbound, 99);
+        endpoint
+            .establish_flow(
+                occupied_key,
+                DeliveryMode::ReliableOrdered,
+                policy(DeliveryMode::ReliableOrdered, 64),
+                limits(8),
+            )
+            .unwrap();
+        let occupied_flow = FlowId::new(WireSide::Server, 0).unwrap();
+        control
+            .registry
+            .register_consumed_accepted_flow(&endpoint, occupied_flow, occupied_key, nz(64))
+            .unwrap();
+
+        let requested = key(connection, FlowDirection::Outbound, 1);
+        let prepared = prepare_reliable(&mut control, &endpoint, requested);
+        let progress = control
+            .receive(&mut endpoint, accept(prepared.flow.flow_id()))
+            .unwrap();
+        let FlowControlProgress::OutboundFailedAfterAccept {
+            flow_id,
+            key,
+            reason,
+            termination: Some(termination),
+            frame,
+        } = progress
+        else {
+            panic!("registry rollback did not preserve Core termination evidence");
+        };
+        assert_eq!(flow_id, prepared.flow.flow_id());
+        assert_eq!(key, requested);
+        assert_eq!(reason, FlowTerminateReason::ResourceFailure);
+        assert_eq!(termination.key, requested);
+        assert_eq!(termination.reason, FlowTerminationReason::Requested);
+        assert_eq!(termination.pending_messages, 0);
+        assert!(!termination.reliable_obligation_failed);
+        assert_eq!(frame.frame_type, ControlFrameType::FlowTerminate);
+        assert_eq!(endpoint.flow_contract(requested), None);
+        assert!(endpoint.flow_contract(occupied_key).is_some());
+        assert_eq!(control.registry().registered_flow(flow_id), None);
+        assert_eq!(
+            control
+                .registry()
+                .registered_flow(occupied_flow)
+                .unwrap()
+                .key(),
+            occupied_key
+        );
     }
 
     #[test]

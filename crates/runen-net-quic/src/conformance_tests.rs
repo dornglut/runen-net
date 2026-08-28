@@ -685,7 +685,7 @@ async fn run_missing_datagram_scenario() {
         client_ready.expect("capacity-1 client permit leaked after DATAGRAM rejection");
     let server_ready = server_ready
         .expect("conforming retry server failed after DATAGRAM rejection")
-        .expect("conforming retry server endpoint closed unexpectedly");
+        .expect("server endpoint closed unexpectedly");
 
     drop(client_ready);
     drop(server_ready);
@@ -1476,23 +1476,17 @@ async fn negotiate_side(
                 assert_eq!(event_connection, connection);
                 break;
             }
+            unexpected => panic!(
+                "established-flow event surfaced before public negotiation completed: {unexpected:?}"
+            ),
         }
     }
 
     assert_eq!(authority_selection_events, usize::from(expected_authority));
-    let (established, reliable_receive) = public
+    let (driver, reliable_receive) = public
         .into_established_internal()
-        .expect("Established event did not retain negotiated ownership");
+        .expect("Established event did not retain established driver ownership");
     assert_eq!(reliable_receive, reliable_receive_limits());
-    let driver = established
-        .into_flow_control()
-        .unwrap()
-        .into_reliable_io(
-            reliable_receive.scratch_bytes,
-            reliable_receive.max_staging_bytes,
-        )
-        .into_established_io()
-        .into_connection_driver();
     LiveSide {
         connection,
         driver,
@@ -1704,7 +1698,7 @@ async fn close_reliable_normally(sender: &mut LiveSide, receiver: &mut LiveSide,
                 EstablishedConnectionProgress::Reliable(
                     crate::reliable_driver::ActiveReliableProgress::Outbound {
                         flow_id,
-                        progress: SendProgress::Closed,
+                        progress: SendProgress::Closed { .. },
                     },
                 ) => {
                     assert_eq!(flow_id, flow.flow_id);
@@ -1721,7 +1715,7 @@ async fn close_reliable_normally(sender: &mut LiveSide, receiver: &mut LiveSide,
             match progress {
                 EstablishedConnectionProgress::Reliable(
                     crate::reliable_driver::ActiveReliableProgress::Inbound(
-                        ReceiveProgress::Closed,
+                        ReceiveProgress::Closed { .. },
                     ),
                 ) => receiver_closed = true,
                 EstablishedConnectionProgress::RemoteTerminated { .. }

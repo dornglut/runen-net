@@ -16,6 +16,13 @@ mod public_connection;
 pub use public_connection::{
     Connection, ConnectionCleanupError, ConnectionError, ConnectionEvent, ConnectionStateError,
     ConnectionTeardown, NegotiationFailure, NegotiationReportStatus, ReliableReceiveLimits,
+    UnreliableReceiveDropReason,
+};
+mod public_flow;
+pub use public_flow::{
+    FlowCommandError, FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin,
+    InboundFlowConfig, IncomingFlowDecisionError, IncomingFlowRequest, OutboundFlowConfig,
+    SubmissionError, SubmitOutcome,
 };
 
 #[cfg(test)]

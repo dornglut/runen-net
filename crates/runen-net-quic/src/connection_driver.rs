@@ -139,6 +139,25 @@ pub(super) enum DatagramSubmitDriverError {
     Driver(ConnectionDriverError),
 }
 
+#[derive(Debug)]
+pub(super) enum KeyedDatagramSubmitError {
+    Unavailable {
+        payload: Vec<u8>,
+        error: ConnectionDriverStateError,
+    },
+    UnknownFlow {
+        payload: Vec<u8>,
+    },
+    Driver(ConnectionDriverError),
+}
+
+#[derive(Debug)]
+pub(super) enum KeyedFinishError {
+    State(ConnectionDriverStateError),
+    UnknownFlow,
+    Driver(ConnectionDriverError),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) enum OutboundFinishOutcome {
     Started,
@@ -364,6 +383,49 @@ impl EstablishedConnectionDriver {
             .map_err(InboundDecisionDriverError::Driver)
     }
 
+    pub(super) fn has_reliable_outbound_flow(&self, key: DeliveryFlowKey) -> bool {
+        self.reliable
+            .outbound_flow_id(&self.flow_control, key)
+            .is_some()
+    }
+
+    pub(super) fn request_outbound_finish_normal_by_key(
+        &mut self,
+        endpoint: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+        mode: DeliveryMode,
+    ) -> Result<OutboundFinishOutcome, KeyedFinishError> {
+        self.require_control_send_ready()
+            .map_err(KeyedFinishError::State)?;
+        match mode {
+            DeliveryMode::ReliableOrdered => {
+                let flow_id = self
+                    .reliable
+                    .outbound_flow_id(&self.flow_control, key)
+                    .ok_or(KeyedFinishError::UnknownFlow)?;
+                self.request_outbound_finish_normal(endpoint, flow_id)
+                    .map_err(KeyedFinishError::Driver)
+            }
+            DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => {
+                let flow_id = self
+                    .datagram
+                    .outbound_flow_id(&self.flow_control, key)
+                    .ok_or(KeyedFinishError::UnknownFlow)?;
+                let pending = flow_driver::terminate_local(
+                    &mut self.flow_control,
+                    endpoint,
+                    flow_id,
+                    FlowTerminateReason::Normal,
+                )
+                .map_err(ConnectionDriverError::FailurePreparation)
+                .map_err(KeyedFinishError::Driver)?;
+                self.start_prepared_send(pending)
+                    .map_err(KeyedFinishError::Driver)?;
+                Ok(OutboundFinishOutcome::Started)
+            }
+        }
+    }
+
     pub(super) fn request_outbound_finish_normal(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
@@ -405,6 +467,26 @@ impl EstablishedConnectionDriver {
             _ => {
                 self.enter_terminal(None);
                 Err(ConnectionDriverError::Reliable(error))
+            }
+        }
+    }
+
+    pub(super) fn submit_unreliable_by_key(
+        &mut self,
+        endpoint: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+        payload: Vec<u8>,
+    ) -> Result<DatagramSubmitOutcome, KeyedDatagramSubmitError> {
+        let Some(flow_id) = self.datagram.outbound_flow_id(&self.flow_control, key) else {
+            return Err(KeyedDatagramSubmitError::UnknownFlow { payload });
+        };
+        match self.submit_unreliable(endpoint, flow_id, payload) {
+            Ok(outcome) => Ok(outcome),
+            Err(DatagramSubmitDriverError::Unavailable { payload, error, .. }) => {
+                Err(KeyedDatagramSubmitError::Unavailable { payload, error })
+            }
+            Err(DatagramSubmitDriverError::Driver(error)) => {
+                Err(KeyedDatagramSubmitError::Driver(error))
             }
         }
     }

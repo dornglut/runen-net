@@ -8,7 +8,10 @@ use std::{
 
 use quinn::Connection as QuinnConnection;
 use runen_net::{
-    delivery::{DeliveryEndpoint, FlowTermination},
+    delivery::{
+        DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
+        FlowTermination, ReceiveOutcome,
+    },
     identity::ConnectionHandle,
     protocol::{
         CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationRequirements,
@@ -16,12 +19,26 @@ use runen_net::{
 };
 
 use crate::{
+    connection_driver::{
+        ConnectionDriverError, ConnectionDriverStateError, DatagramSubmitOutcome,
+        EstablishedConnectionDriver, EstablishedConnectionProgress, InboundDecisionDriverError,
+        KeyedDatagramSubmitError, KeyedFinishError, OutboundFinishOutcome,
+    },
     control::{
         ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
         ProfileReadyParts, Settings, ValidatedControlProfile,
     },
+    datagram::{
+        DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress, DatagramSubmissionOutcome,
+    },
+    datagram_driver::{DatagramIoError, DatagramOutboundProgress},
     endpoint::ConnectionSlotPermit,
     facade::{ProfileBootstrapFailure, ProfileReadyConnection},
+    flow_control::{
+        FlowControlError, InboundAdmission, InboundAdmissionError, OutboundOpenError,
+        OutboundOpenRequest,
+    },
+    flow_driver::FlowControlSendEffect,
     lifecycle::{
         AdmittedProfileReadyConnection, EstablishedNegotiatedConnection,
         close_for_post_profile_control_error, close_negotiation_failed,
@@ -30,6 +47,13 @@ use crate::{
     negotiation::{
         NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress,
     },
+    public_flow::{
+        FlowCommandError, FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin,
+        InboundFlowConfig, IncomingFlowDecisionError, IncomingFlowRequest, OutboundFlowConfig,
+        SubmissionError, SubmitOutcome,
+    },
+    quinn_binding::{ReceiveError, ReceiveProgress, SendError, SendProgress},
+    reliable_driver::{ActiveReliableProgress, ReliableIoError, ReliableIoStateError},
     wire::WireSide,
 };
 
@@ -38,7 +62,7 @@ const MAX_INTERNAL_TRANSITIONS_PER_POLL: usize = 16;
 /// Explicit finite reliable receive resources retained for established delivery activation.
 ///
 /// RN6 provides no implicit defaults. These values are retained through negotiation and
-/// consumed unchanged by the established reliable transport owner in the next RN6 slice.
+/// consumed unchanged when the established reliable transport owner is activated.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ReliableReceiveLimits {
     pub scratch_bytes: NonZeroUsize,
@@ -101,6 +125,11 @@ pub enum ConnectionError {
     },
     ManagerState,
     UnexpectedCoreState,
+    EstablishedActivation,
+    EstablishedResource,
+    EstablishedProtocol,
+    EstablishedTransport,
+    EstablishedControl(ProfileBootstrapFailure),
     State(ConnectionStateError),
 }
 
@@ -115,12 +144,56 @@ impl fmt::Display for ConnectionError {
 
 impl std::error::Error for ConnectionError {}
 
-/// Public connection progress that requires host observation or action.
-#[non_exhaustive]
+/// Why an unreliable inbound payload was observably dropped before application exposure.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum UnreliableReceiveDropReason {
+    Pressure { local_pressure_drops: usize },
+    TooLarge,
+    StaleSequenced,
+}
+
+/// Public connection progress that requires host observation or action.
+///
+/// This event is intentionally move-only because incoming admission owns a one-shot request
+/// capability. Transport-local flow identifiers and progress never cross this boundary.
+#[non_exhaustive]
+#[derive(Debug)]
 pub enum ConnectionEvent {
-    AuthoritySelectionRequired { connection: ConnectionHandle },
-    Established { connection: ConnectionHandle },
+    AuthoritySelectionRequired {
+        connection: ConnectionHandle,
+    },
+    Established {
+        connection: ConnectionHandle,
+    },
+    IncomingFlowRequested {
+        request: IncomingFlowRequest,
+    },
+    OutboundFlowEstablished {
+        key: DeliveryFlowKey,
+    },
+    OutboundFlowRejected {
+        key: DeliveryFlowKey,
+        reason: FlowRejectionReason,
+    },
+    DataReady {
+        key: DeliveryFlowKey,
+        buffered_messages: usize,
+        local_pressure_drops: usize,
+    },
+    UnreliableReceiveDropped {
+        key: DeliveryFlowKey,
+        reason: UnreliableReceiveDropReason,
+    },
+    UnreliableTransportDropped {
+        key: DeliveryFlowKey,
+        accepted_index: u64,
+    },
+    FlowTerminated {
+        key: DeliveryFlowKey,
+        origin: FlowTerminationOrigin,
+        cause: FlowTerminationCause,
+        termination: Option<FlowTermination>,
+    },
 }
 
 /// Categorized cleanup failure returned by consuming connection teardown.
@@ -273,7 +346,17 @@ enum ConnectionState {
         sender: ControlSender,
         receiver: ControlReceiver,
     },
+    NegotiatedEstablished {
+        established: EstablishedNegotiatedConnection,
+    },
     Established {
+        driver: Box<EstablishedConnectionDriver>,
+    },
+    EstablishedFailed {
+        driver: Box<EstablishedConnectionDriver>,
+        error: ConnectionError,
+    },
+    EstablishedActivationFailed {
         established: EstablishedNegotiatedConnection,
     },
     Failed {
@@ -288,7 +371,10 @@ impl fmt::Debug for ConnectionState {
             Self::Sending { .. } => "Sending",
             Self::Receiving { .. } => "Receiving",
             Self::AuthoritySelection { .. } => "AuthoritySelection",
+            Self::NegotiatedEstablished { .. } => "NegotiatedEstablished",
             Self::Established { .. } => "Established",
+            Self::EstablishedFailed { .. } => "EstablishedFailed",
+            Self::EstablishedActivationFailed { .. } => "EstablishedActivationFailed",
             Self::Failed { .. } => "Failed",
             Self::Transitioning => "Transitioning",
         })
@@ -391,14 +477,305 @@ impl Connection {
         self.reliable_receive
     }
 
+    /// Begin one outbound flow establishment using only the host Core flow identity.
+    pub fn open_outbound_flow(
+        &mut self,
+        delivery: &DeliveryEndpoint,
+        config: OutboundFlowConfig,
+    ) -> Result<(), FlowCommandError> {
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(FlowCommandError::NotEstablished);
+            }
+        };
+        driver
+            .open_outbound(
+                delivery,
+                OutboundOpenRequest {
+                    key: config.key,
+                    mode: config.mode,
+                    policy: config.policy,
+                    stable_max_message_bytes: config.stable_max_message_bytes,
+                    connection_limits: config.connection_limits,
+                },
+            )
+            .map_err(map_flow_command_driver_error)
+    }
+
+    /// Accept one move-only incoming request with an explicit host Core flow identity.
+    pub fn accept_incoming_flow(
+        &mut self,
+        delivery: &mut DeliveryEndpoint,
+        request: IncomingFlowRequest,
+        config: InboundFlowConfig,
+    ) -> Result<(), IncomingFlowDecisionError> {
+        if request.connection != self.connection || config.key.connection() != self.connection {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::WrongConnection,
+            });
+        }
+        if config.key.direction() != FlowDirection::Inbound {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::WrongDirection,
+            });
+        }
+        if config.policy.validate_for_mode(request.mode()).is_err() {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::InvalidConfiguration,
+            });
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => {
+                return Err(IncomingFlowDecisionError::Failed(
+                    FlowCommandError::Terminal,
+                ));
+            }
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(IncomingFlowDecisionError::Retryable {
+                    request,
+                    reason: FlowCommandError::NotEstablished,
+                });
+            }
+        };
+
+        match driver.accept_inbound(
+            delivery,
+            request.inner,
+            InboundAdmission {
+                key: config.key,
+                policy: config.policy,
+                connection_limits: config.connection_limits,
+            },
+        ) {
+            Ok(()) => Ok(()),
+            Err(InboundDecisionDriverError::Unavailable { request, error }) => {
+                let reason = map_driver_state_error(error);
+                if reason == FlowCommandError::Busy {
+                    Err(IncomingFlowDecisionError::Retryable {
+                        request: IncomingFlowRequest {
+                            connection: self.connection,
+                            inner: request,
+                        },
+                        reason,
+                    })
+                } else {
+                    Err(IncomingFlowDecisionError::Failed(reason))
+                }
+            }
+            Err(InboundDecisionDriverError::Driver(error)) => Err(
+                IncomingFlowDecisionError::Failed(map_inbound_decision_driver_error(&error)),
+            ),
+        }
+    }
+
+    /// Reject one move-only incoming request with an accepted profile rejection reason.
+    pub fn reject_incoming_flow(
+        &mut self,
+        request: IncomingFlowRequest,
+        reason: FlowRejectionReason,
+    ) -> Result<(), IncomingFlowDecisionError> {
+        if request.connection != self.connection {
+            return Err(IncomingFlowDecisionError::Retryable {
+                request,
+                reason: FlowCommandError::WrongConnection,
+            });
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => {
+                return Err(IncomingFlowDecisionError::Failed(
+                    FlowCommandError::Terminal,
+                ));
+            }
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(IncomingFlowDecisionError::Retryable {
+                    request,
+                    reason: FlowCommandError::NotEstablished,
+                });
+            }
+        };
+
+        match driver.reject_inbound(request.inner, reason.into()) {
+            Ok(()) => Ok(()),
+            Err(InboundDecisionDriverError::Unavailable { request, error }) => {
+                let reason = map_driver_state_error(error);
+                if reason == FlowCommandError::Busy {
+                    Err(IncomingFlowDecisionError::Retryable {
+                        request: IncomingFlowRequest {
+                            connection: self.connection,
+                            inner: request,
+                        },
+                        reason,
+                    })
+                } else {
+                    Err(IncomingFlowDecisionError::Failed(reason))
+                }
+            }
+            Err(InboundDecisionDriverError::Driver(error)) => Err(
+                IncomingFlowDecisionError::Failed(map_inbound_decision_driver_error(&error)),
+            ),
+        }
+    }
+
+    /// Submit one owned payload to an established outbound flow using only its Core key.
+    pub fn submit(
+        &mut self,
+        delivery: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+        payload: Vec<u8>,
+    ) -> Result<SubmitOutcome, SubmissionError> {
+        if key.connection() != self.connection {
+            return Err(SubmissionError::Retryable {
+                key,
+                payload,
+                reason: FlowCommandError::WrongConnection,
+            });
+        }
+        if key.direction() != FlowDirection::Outbound {
+            return Err(SubmissionError::Retryable {
+                key,
+                payload,
+                reason: FlowCommandError::WrongDirection,
+            });
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => {
+                return Err(SubmissionError::Failed(FlowCommandError::Terminal));
+            }
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(SubmissionError::Retryable {
+                    key,
+                    payload,
+                    reason: FlowCommandError::NotEstablished,
+                });
+            }
+        };
+
+        let Some((mode, _)) = delivery.flow_contract(key) else {
+            return Err(SubmissionError::Failed(FlowCommandError::UnknownFlow));
+        };
+        match mode {
+            DeliveryMode::ReliableOrdered => {
+                if !driver.has_reliable_outbound_flow(key) {
+                    return Err(SubmissionError::Failed(FlowCommandError::UnknownFlow));
+                }
+                delivery
+                    .submit(key, payload)
+                    .map(SubmitOutcome::from)
+                    .map_err(|error| SubmissionError::Failed(map_core_submission_error(error)))
+            }
+            DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => {
+                match driver.submit_unreliable_by_key(delivery, key, payload) {
+                    Ok(outcome) => {
+                        map_datagram_submit_outcome(outcome).map_err(SubmissionError::Failed)
+                    }
+                    Err(KeyedDatagramSubmitError::Unavailable { payload, error }) => {
+                        let reason = map_driver_state_error(error);
+                        if reason == FlowCommandError::Busy {
+                            Err(SubmissionError::Retryable {
+                                key,
+                                payload,
+                                reason,
+                            })
+                        } else {
+                            Err(SubmissionError::Failed(reason))
+                        }
+                    }
+                    Err(KeyedDatagramSubmitError::UnknownFlow { .. }) => {
+                        Err(SubmissionError::Failed(FlowCommandError::UnknownFlow))
+                    }
+                    Err(KeyedDatagramSubmitError::Driver(error)) => Err(SubmissionError::Failed(
+                        map_flow_command_driver_error(error),
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Request the accepted normal sender finish for one established outbound flow.
+    pub fn finish_outbound_flow_normal(
+        &mut self,
+        delivery: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+    ) -> Result<(), FlowCommandError> {
+        if key.connection() != self.connection {
+            return Err(FlowCommandError::WrongConnection);
+        }
+        if key.direction() != FlowDirection::Outbound {
+            return Err(FlowCommandError::WrongDirection);
+        }
+
+        let driver = match &mut self.state {
+            ConnectionState::Established { driver } => driver,
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
+            | ConnectionState::Failed { .. }
+            | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
+            ConnectionState::Sending { .. }
+            | ConnectionState::Receiving { .. }
+            | ConnectionState::AuthoritySelection { .. }
+            | ConnectionState::NegotiatedEstablished { .. } => {
+                return Err(FlowCommandError::NotEstablished);
+            }
+        };
+
+        let Some((mode, _)) = delivery.flow_contract(key) else {
+            return Err(FlowCommandError::UnknownFlow);
+        };
+        match driver.request_outbound_finish_normal_by_key(delivery, key, mode) {
+            Ok(OutboundFinishOutcome::Started) => Ok(()),
+            Ok(OutboundFinishOutcome::FlowFailureHandled { .. }) => {
+                Err(FlowCommandError::FlowTerminated)
+            }
+            Err(KeyedFinishError::State(error)) => Err(map_driver_state_error(error)),
+            Err(KeyedFinishError::UnknownFlow) => Err(FlowCommandError::UnknownFlow),
+            Err(KeyedFinishError::Driver(error)) => Err(map_finish_driver_error(error)),
+        }
+    }
+
     /// Drive at most a finite amount of post-ProfileReady connection work.
     ///
-    /// Aggregate Core authorities are borrowed only for this synchronous call.
+    /// Aggregate Core authorities are borrowed only for this synchronous call. Private transport
+    /// progress is consumed internally; at most one durable application event or error is returned.
     pub fn poll(
         &mut self,
         cx: &mut Context<'_>,
         manager: &mut NegotiationManager,
-        _delivery: &mut DeliveryEndpoint,
+        delivery: &mut DeliveryEndpoint,
     ) -> Poll<Result<ConnectionEvent, ConnectionError>> {
         for _ in 0..MAX_INTERNAL_TRANSITIONS_PER_POLL {
             let state = std::mem::replace(&mut self.state, ConnectionState::Transitioning);
@@ -424,12 +801,9 @@ impl Connection {
                                 self.state = receiving_state(core, completion.sender, receiver);
                             }
                             PendingSendDisposition::Establish => {
-                                self.state = ConnectionState::Established {
+                                self.state = ConnectionState::NegotiatedEstablished {
                                     established: core.into_established(completion.sender, receiver),
                                 };
-                                return Poll::Ready(Ok(ConnectionEvent::Established {
-                                    connection: self.connection,
-                                }));
                             }
                             PendingSendDisposition::TerminalLocalFailure(outcome) => {
                                 close_negotiation_failed(&core.profile.connection);
@@ -519,9 +893,69 @@ impl Connection {
                     };
                     return Poll::Pending;
                 }
-                ConnectionState::Established { established } => {
-                    self.state = ConnectionState::Established { established };
-                    return Poll::Pending;
+                ConnectionState::NegotiatedEstablished { established } => {
+                    match activate_established_driver(established, self.reliable_receive) {
+                        Ok(driver) => {
+                            self.state = ConnectionState::Established {
+                                driver: Box::new(driver),
+                            };
+                            return Poll::Ready(Ok(ConnectionEvent::Established {
+                                connection: self.connection,
+                            }));
+                        }
+                        Err(established) => {
+                            self.state = ConnectionState::EstablishedActivationFailed {
+                                established: *established,
+                            };
+                            return Poll::Ready(Err(ConnectionError::EstablishedActivation));
+                        }
+                    }
+                }
+                ConnectionState::Established { mut driver } => {
+                    match driver.poll_step(cx, delivery) {
+                        Poll::Pending => {
+                            self.state = ConnectionState::Established { driver };
+                            return Poll::Pending;
+                        }
+                        Poll::Ready(Ok(progress)) => {
+                            match map_established_progress(self.connection, progress) {
+                                Ok(Some(event)) => {
+                                    self.state = ConnectionState::Established { driver };
+                                    return Poll::Ready(Ok(event));
+                                }
+                                Ok(None) => {
+                                    self.state = ConnectionState::Established { driver };
+                                    continue;
+                                }
+                                Err(error) => {
+                                    self.state =
+                                        ConnectionState::EstablishedFailed { driver, error };
+                                    return Poll::Ready(Err(error));
+                                }
+                            }
+                        }
+                        Poll::Ready(Err(error)) => {
+                            let (event, public_error) = map_established_driver_error(error);
+                            self.state = ConnectionState::EstablishedFailed {
+                                driver,
+                                error: public_error,
+                            };
+                            if let Some(event) = event {
+                                return Poll::Ready(Ok(event));
+                            }
+                            return Poll::Ready(Err(public_error));
+                        }
+                    }
+                }
+                ConnectionState::EstablishedFailed { driver, error } => {
+                    self.state = ConnectionState::EstablishedFailed { driver, error };
+                    return Poll::Ready(Err(error));
+                }
+                ConnectionState::EstablishedActivationFailed { established } => {
+                    self.state = ConnectionState::EstablishedActivationFailed { established };
+                    return Poll::Ready(Err(ConnectionError::State(
+                        ConnectionStateError::Terminal,
+                    )));
                 }
                 ConnectionState::Failed { core } => {
                     self.state = ConnectionState::Failed { core };
@@ -614,8 +1048,13 @@ impl Connection {
                 drop((sender, receiver));
                 core.teardown(manager, delivery, true)
             }
-            ConnectionState::Established { established } => {
+            ConnectionState::NegotiatedEstablished { established }
+            | ConnectionState::EstablishedActivationFailed { established } => {
                 established.teardown(manager, delivery).into()
+            }
+            ConnectionState::Established { driver }
+            | ConnectionState::EstablishedFailed { driver, .. } => {
+                (*driver).teardown(manager, delivery).into()
             }
             ConnectionState::Failed { core } => core.teardown(manager, delivery, false),
             ConnectionState::Transitioning => unreachable!("transition state never escapes a call"),
@@ -625,19 +1064,373 @@ impl Connection {
     #[cfg(test)]
     pub(super) fn into_established_internal(
         self,
-    ) -> Result<(EstablishedNegotiatedConnection, ReliableReceiveLimits), Box<Self>> {
+    ) -> Result<(EstablishedConnectionDriver, ReliableReceiveLimits), Box<Self>> {
         let Self {
             connection,
             reliable_receive,
             state,
         } = self;
         match state {
-            ConnectionState::Established { established } => Ok((established, reliable_receive)),
+            ConnectionState::Established { driver } => Ok((*driver, reliable_receive)),
             state => Err(Box::new(Self {
                 connection,
                 reliable_receive,
                 state,
             })),
+        }
+    }
+}
+
+fn activate_established_driver(
+    established: EstablishedNegotiatedConnection,
+    reliable_receive: ReliableReceiveLimits,
+) -> Result<EstablishedConnectionDriver, Box<EstablishedNegotiatedConnection>> {
+    let flow_controlled = match established.into_flow_control() {
+        Ok(flow_controlled) => flow_controlled,
+        Err(error) => return Err(error.established),
+    };
+    Ok(flow_controlled
+        .into_reliable_io(
+            reliable_receive.scratch_bytes,
+            reliable_receive.max_staging_bytes,
+        )
+        .into_established_io()
+        .into_connection_driver())
+}
+
+fn map_driver_state_error(error: ConnectionDriverStateError) -> FlowCommandError {
+    match error {
+        ConnectionDriverStateError::ControlSendBusy => FlowCommandError::Busy,
+        ConnectionDriverStateError::Terminal => FlowCommandError::Terminal,
+    }
+}
+
+fn map_outbound_open_error(error: &OutboundOpenError) -> FlowCommandError {
+    match error {
+        OutboundOpenError::WrongConnection { .. } => FlowCommandError::WrongConnection,
+        OutboundOpenError::WrongDirection(_) => FlowCommandError::WrongDirection,
+        OutboundOpenError::InvalidPolicy(_)
+        | OutboundOpenError::StableMessageLimitMismatch { .. }
+        | OutboundOpenError::StableMessageLimitOutOfRange => FlowCommandError::InvalidConfiguration,
+        OutboundOpenError::CoreFlowAlreadyExists(_) => FlowCommandError::AlreadyExists,
+        OutboundOpenError::PendingCoreFlow(_) => FlowCommandError::Pending,
+        OutboundOpenError::PeerMessageLimit { .. } => FlowCommandError::MessageLimit,
+        OutboundOpenError::PeerActiveFlowLimit { .. }
+        | OutboundOpenError::FlowId(_)
+        | OutboundOpenError::Allocation(_) => FlowCommandError::ResourceLimit,
+        OutboundOpenError::DatagramTooSmall { .. } => FlowCommandError::DatagramTooSmall,
+        OutboundOpenError::DatagramUnavailable => FlowCommandError::ConnectionFailure,
+        OutboundOpenError::DatagramEnvelope(_) | OutboundOpenError::Body(_) => {
+            FlowCommandError::ProtocolFailure
+        }
+    }
+}
+
+fn map_flow_command_driver_error(error: ConnectionDriverError) -> FlowCommandError {
+    match error {
+        ConnectionDriverError::State(error) => map_driver_state_error(error),
+        ConnectionDriverError::OutboundOpen(error) => map_outbound_open_error(&error),
+        _ => FlowCommandError::ConnectionFailure,
+    }
+}
+
+fn map_inbound_decision_driver_error(error: &ConnectionDriverError) -> FlowCommandError {
+    match error {
+        ConnectionDriverError::State(error) => map_driver_state_error(*error),
+        ConnectionDriverError::InboundAdmission(InboundAdmissionError::RequestNotPending(_)) => {
+            FlowCommandError::StaleRequest
+        }
+        ConnectionDriverError::InboundAdmission(_) => FlowCommandError::ConnectionFailure,
+        _ => FlowCommandError::ConnectionFailure,
+    }
+}
+
+fn map_core_submission_error(error: DeliveryOperationError) -> FlowCommandError {
+    match error {
+        DeliveryOperationError::UnknownFlow => FlowCommandError::UnknownFlow,
+        DeliveryOperationError::WrongDirection => FlowCommandError::WrongDirection,
+        DeliveryOperationError::NotReliable => FlowCommandError::ProtocolFailure,
+    }
+}
+
+fn map_finish_driver_error(error: ConnectionDriverError) -> FlowCommandError {
+    match error {
+        ConnectionDriverError::State(error) => map_driver_state_error(error),
+        ConnectionDriverError::Reliable(ReliableIoError::State(
+            ReliableIoStateError::OutboundAcquisitionPending,
+        )) => FlowCommandError::Pending,
+        ConnectionDriverError::Reliable(ReliableIoError::State(
+            ReliableIoStateError::UnknownOutboundFlow,
+        )) => FlowCommandError::UnknownFlow,
+        ConnectionDriverError::Reliable(ReliableIoError::OutboundFinish {
+            error: SendError::PendingData | SendError::AlreadyFinishing,
+            ..
+        }) => FlowCommandError::Pending,
+        ConnectionDriverError::Reliable(ReliableIoError::OutboundFinish {
+            error: SendError::Terminal | SendError::Core(DeliveryOperationError::UnknownFlow),
+            ..
+        }) => FlowCommandError::FlowTerminated,
+        ConnectionDriverError::FailurePreparation(FlowControlError::Allocation(_)) => {
+            FlowCommandError::ResourceLimit
+        }
+        ConnectionDriverError::FailurePreparation(
+            FlowControlError::UnknownActiveFlow(_)
+            | FlowControlError::CoreState(DeliveryOperationError::UnknownFlow),
+        ) => FlowCommandError::FlowTerminated,
+        ConnectionDriverError::FailurePreparation(_) => FlowCommandError::ProtocolFailure,
+        _ => FlowCommandError::ConnectionFailure,
+    }
+}
+
+fn map_datagram_submit_outcome(
+    outcome: DatagramSubmitOutcome,
+) -> Result<SubmitOutcome, FlowCommandError> {
+    match outcome {
+        DatagramSubmitOutcome::Submitted(outcome) => match outcome {
+            DatagramSubmissionOutcome::Accepted {
+                accepted_index,
+                local_pressure_drops,
+            } => Ok(SubmitOutcome::Accepted {
+                accepted_index,
+                local_pressure_drops,
+            }),
+            DatagramSubmissionOutcome::RejectedTooLarge => Ok(SubmitOutcome::RejectedTooLarge),
+            DatagramSubmissionOutcome::RejectedPressure => Ok(SubmitOutcome::RejectedPressure),
+            DatagramSubmissionOutcome::RejectedCounterExhausted => {
+                Ok(SubmitOutcome::RejectedCounterExhausted)
+            }
+            DatagramSubmissionOutcome::RejectedCurrentDatagramSize => {
+                Ok(SubmitOutcome::RejectedCurrentDatagramSize)
+            }
+            DatagramSubmissionOutcome::RejectedTransportUnavailable => {
+                Err(FlowCommandError::ConnectionFailure)
+            }
+        },
+        DatagramSubmitOutcome::FlowFailureHandled { .. } => Err(FlowCommandError::FlowTerminated),
+    }
+}
+
+fn map_established_progress(
+    connection: ConnectionHandle,
+    progress: EstablishedConnectionProgress,
+) -> Result<Option<ConnectionEvent>, ConnectionError> {
+    let event = match progress {
+        EstablishedConnectionProgress::ControlSendStarted => None,
+        EstablishedConnectionProgress::ControlSendCompleted(effect) => {
+            map_control_send_effect(effect)
+        }
+        EstablishedConnectionProgress::InboundOpen(inner) => {
+            Some(ConnectionEvent::IncomingFlowRequested {
+                request: IncomingFlowRequest { connection, inner },
+            })
+        }
+        EstablishedConnectionProgress::OutboundEstablished(flow) => {
+            Some(ConnectionEvent::OutboundFlowEstablished { key: flow.key() })
+        }
+        EstablishedConnectionProgress::OutboundRejected { key, reason, .. } => {
+            Some(ConnectionEvent::OutboundFlowRejected {
+                key,
+                reason: reason.into(),
+            })
+        }
+        EstablishedConnectionProgress::RemoteTerminated {
+            flow,
+            reason,
+            termination,
+        } => Some(flow_terminated_event(
+            flow.key(),
+            FlowTerminationOrigin::Remote,
+            reason.into(),
+            Some(termination),
+        )),
+        EstablishedConnectionProgress::ReliableOutboundAcquisition(_)
+        | EstablishedConnectionProgress::ReliableInboundAcquired => None,
+        EstablishedConnectionProgress::Reliable(progress) => match progress {
+            ActiveReliableProgress::Outbound {
+                progress: SendProgress::Closed { termination },
+                ..
+            } => Some(flow_terminated_event(
+                termination.key,
+                FlowTerminationOrigin::Local,
+                FlowTerminationCause::Normal,
+                Some(termination),
+            )),
+            ActiveReliableProgress::Outbound { .. } => None,
+            ActiveReliableProgress::Inbound(ReceiveProgress::MessagesBuffered { key, count }) => {
+                Some(ConnectionEvent::DataReady {
+                    key,
+                    buffered_messages: count,
+                    local_pressure_drops: 0,
+                })
+            }
+            ActiveReliableProgress::Inbound(ReceiveProgress::Closed {
+                key,
+                termination: Some(termination),
+            }) => Some(flow_terminated_event(
+                key,
+                FlowTerminationOrigin::Remote,
+                FlowTerminationCause::Normal,
+                Some(termination),
+            )),
+            ActiveReliableProgress::Inbound(
+                ReceiveProgress::Progressed { .. }
+                | ReceiveProgress::Associated { .. }
+                | ReceiveProgress::Draining { .. }
+                | ReceiveProgress::Closed {
+                    termination: None, ..
+                },
+            ) => None,
+        },
+        EstablishedConnectionProgress::DatagramOutbound(progress) => match progress {
+            DatagramOutboundProgress::Cancelled { .. } => None,
+            DatagramOutboundProgress::Driven {
+                key,
+                progress: DatagramSendProgress::DroppedTransport { accepted_index },
+                ..
+            } => Some(ConnectionEvent::UnreliableTransportDropped {
+                key,
+                accepted_index,
+            }),
+            DatagramOutboundProgress::Driven { .. } => None,
+        },
+        EstablishedConnectionProgress::DatagramInbound(outcome) => match outcome {
+            DatagramReceiveOutcome::DiscardedUnknownFlow => None,
+            DatagramReceiveOutcome::Core { key, outcome } => match outcome {
+                ReceiveOutcome::Buffered {
+                    local_pressure_drops,
+                } => Some(ConnectionEvent::DataReady {
+                    key,
+                    buffered_messages: 1,
+                    local_pressure_drops,
+                }),
+                ReceiveOutcome::DroppedByPressure {
+                    local_pressure_drops,
+                } => Some(ConnectionEvent::UnreliableReceiveDropped {
+                    key,
+                    reason: UnreliableReceiveDropReason::Pressure {
+                        local_pressure_drops,
+                    },
+                }),
+                ReceiveOutcome::DroppedTooLarge => {
+                    Some(ConnectionEvent::UnreliableReceiveDropped {
+                        key,
+                        reason: UnreliableReceiveDropReason::TooLarge,
+                    })
+                }
+                ReceiveOutcome::StaleSequenced => Some(ConnectionEvent::UnreliableReceiveDropped {
+                    key,
+                    reason: UnreliableReceiveDropReason::StaleSequenced,
+                }),
+                ReceiveOutcome::DuplicateReliable
+                | ReceiveOutcome::RejectedModeMismatch
+                | ReceiveOutcome::TerminalReliableFailure => {
+                    return Err(ConnectionError::UnexpectedCoreState);
+                }
+            },
+        },
+        EstablishedConnectionProgress::FlowFailureHandled { .. } => None,
+    };
+    Ok(event)
+}
+
+fn map_control_send_effect(effect: FlowControlSendEffect) -> Option<ConnectionEvent> {
+    match effect {
+        FlowControlSendEffect::OutboundFailedAfterAccept {
+            key,
+            reason,
+            termination,
+            ..
+        }
+        | FlowControlSendEffect::ReportOnlyTermination {
+            key,
+            reason,
+            termination,
+            ..
+        } => Some(flow_terminated_event(
+            key,
+            FlowTerminationOrigin::Local,
+            reason.into(),
+            termination,
+        )),
+        FlowControlSendEffect::LocalTerminated {
+            flow,
+            reason,
+            termination,
+        } => Some(flow_terminated_event(
+            flow.key(),
+            FlowTerminationOrigin::Local,
+            reason.into(),
+            Some(termination),
+        )),
+        FlowControlSendEffect::OutboundOpenPrepared(_)
+        | FlowControlSendEffect::InboundRejected { .. }
+        | FlowControlSendEffect::InboundAccepted(_) => None,
+    }
+}
+
+const fn flow_terminated_event(
+    key: DeliveryFlowKey,
+    origin: FlowTerminationOrigin,
+    cause: FlowTerminationCause,
+    termination: Option<FlowTermination>,
+) -> ConnectionEvent {
+    ConnectionEvent::FlowTerminated {
+        key,
+        origin,
+        cause,
+        termination,
+    }
+}
+
+fn map_established_driver_error(
+    error: ConnectionDriverError,
+) -> (Option<ConnectionEvent>, ConnectionError) {
+    match error {
+        ConnectionDriverError::ControlSend(error) => {
+            let error = *error;
+            let public_error =
+                ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(&error.error));
+            (map_control_send_effect(error.effect), public_error)
+        }
+        ConnectionDriverError::ControlReceive(error) => (
+            None,
+            ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(&error)),
+        ),
+        ConnectionDriverError::State(ConnectionDriverStateError::Terminal) => {
+            (None, ConnectionError::State(ConnectionStateError::Terminal))
+        }
+        ConnectionDriverError::Reliable(ReliableIoError::Allocation(_))
+        | ConnectionDriverError::Reliable(ReliableIoError::State(
+            ReliableIoStateError::CapacityOverflow,
+        ))
+        | ConnectionDriverError::Reliable(ReliableIoError::InboundConstruction(
+            ReceiveError::AllocationFailed,
+        ))
+        | ConnectionDriverError::Datagram(DatagramIoError::Allocation(_))
+        | ConnectionDriverError::ReceivedFlowControl(FlowControlError::Allocation(_))
+        | ConnectionDriverError::FailurePreparation(FlowControlError::Allocation(_)) => {
+            (None, ConnectionError::EstablishedResource)
+        }
+        ConnectionDriverError::Reliable(ReliableIoError::Connection(_))
+        | ConnectionDriverError::Datagram(DatagramIoError::Connection(_))
+        | ConnectionDriverError::Datagram(DatagramIoError::Send {
+            error: DatagramSendError::ProfileUnavailable | DatagramSendError::ConnectionLost,
+            ..
+        })
+        | ConnectionDriverError::DatagramProfileUnavailable => {
+            (None, ConnectionError::EstablishedTransport)
+        }
+        ConnectionDriverError::State(ConnectionDriverStateError::ControlSendBusy)
+        | ConnectionDriverError::OutboundOpen(_)
+        | ConnectionDriverError::InboundAdmission(_)
+        | ConnectionDriverError::DatagramSubmission(_) => {
+            (None, ConnectionError::UnexpectedCoreState)
+        }
+        ConnectionDriverError::ReceivedFlowControl(_)
+        | ConnectionDriverError::Reliable(_)
+        | ConnectionDriverError::Datagram(_)
+        | ConnectionDriverError::FailurePreparation(_) => {
+            (None, ConnectionError::EstablishedProtocol)
         }
     }
 }
@@ -723,13 +1516,9 @@ fn transition_from_controller(
             DriverTransition::State(sending_state(core, sender, receiver, frame, disposition))
         }
         Ok(NegotiationProgress::Established) => {
-            let connection = core.connection;
-            DriverTransition::Event(
-                ConnectionState::Established {
-                    established: core.into_established(sender, receiver),
-                },
-                ConnectionEvent::Established { connection },
-            )
+            DriverTransition::State(ConnectionState::NegotiatedEstablished {
+                established: core.into_established(sender, receiver),
+            })
         }
         Ok(NegotiationProgress::RemoteFailed(outcome)) => {
             close_negotiation_failed(&core.profile.connection);
@@ -857,9 +1646,30 @@ const fn controller_send_disposition(frame_type: ControlFrameType) -> PendingSen
 
 #[cfg(test)]
 mod tests {
+    use runen_net::delivery::{
+        DeliveryFlowHandle, FlowTerminationReason as CoreFlowTerminationReason,
+    };
+
     use super::*;
 
     fn assert_owned_send<T: Send + 'static>() {}
+
+    fn key(direction: FlowDirection, handle: u64) -> DeliveryFlowKey {
+        DeliveryFlowKey::new(
+            ConnectionHandle::new(1),
+            direction,
+            DeliveryFlowHandle::new(handle),
+        )
+    }
+
+    fn termination(key: DeliveryFlowKey) -> FlowTermination {
+        FlowTermination {
+            key,
+            reason: CoreFlowTerminationReason::ReliableCustodyLost,
+            pending_messages: 1,
+            reliable_obligation_failed: true,
+        }
+    }
 
     #[test]
     fn negotiation_transport_futures_are_owned_and_send() {
@@ -884,5 +1694,131 @@ mod tests {
             controller_send_disposition(ControlFrameType::NegotiationEstablished),
             PendingSendDisposition::Establish
         );
+    }
+
+    #[test]
+    fn datagram_submission_mapping_preserves_preaccept_rejection_and_flow_failure() {
+        assert_eq!(
+            map_datagram_submit_outcome(DatagramSubmitOutcome::Submitted(
+                DatagramSubmissionOutcome::RejectedCurrentDatagramSize,
+            )),
+            Ok(SubmitOutcome::RejectedCurrentDatagramSize)
+        );
+        assert_eq!(
+            map_datagram_submit_outcome(DatagramSubmitOutcome::FlowFailureHandled {
+                flow_id: crate::wire::FlowId::new(WireSide::Client, 0).unwrap(),
+            }),
+            Err(FlowCommandError::FlowTerminated)
+        );
+    }
+
+    #[test]
+    fn finish_mapping_preserves_pending_and_terminal_flow_categories() {
+        let flow_id = crate::wire::FlowId::new(WireSide::Client, 0).unwrap();
+        assert_eq!(
+            map_finish_driver_error(ConnectionDriverError::Reliable(ReliableIoError::State(
+                ReliableIoStateError::OutboundAcquisitionPending,
+            ))),
+            FlowCommandError::Pending
+        );
+        assert_eq!(
+            map_finish_driver_error(ConnectionDriverError::Reliable(
+                ReliableIoError::OutboundFinish {
+                    flow_id,
+                    error: SendError::PendingData,
+                },
+            )),
+            FlowCommandError::Pending
+        );
+        assert_eq!(
+            map_finish_driver_error(ConnectionDriverError::Reliable(
+                ReliableIoError::OutboundFinish {
+                    flow_id,
+                    error: SendError::Terminal,
+                },
+            )),
+            FlowCommandError::FlowTerminated
+        );
+    }
+
+    #[test]
+    fn established_progress_projects_core_keyed_data_and_drop_events() {
+        let inbound = key(FlowDirection::Inbound, 9);
+        let data = map_established_progress(
+            ConnectionHandle::new(1),
+            EstablishedConnectionProgress::Reliable(ActiveReliableProgress::Inbound(
+                ReceiveProgress::MessagesBuffered {
+                    key: inbound,
+                    count: 3,
+                },
+            )),
+        )
+        .unwrap()
+        .unwrap();
+        match data {
+            ConnectionEvent::DataReady {
+                key,
+                buffered_messages,
+                local_pressure_drops,
+            } => {
+                assert_eq!(key, inbound);
+                assert_eq!(buffered_messages, 3);
+                assert_eq!(local_pressure_drops, 0);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+
+        let dropped = map_established_progress(
+            ConnectionHandle::new(1),
+            EstablishedConnectionProgress::DatagramInbound(DatagramReceiveOutcome::Core {
+                key: inbound,
+                outcome: ReceiveOutcome::DroppedByPressure {
+                    local_pressure_drops: 2,
+                },
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        match dropped {
+            ConnectionEvent::UnreliableReceiveDropped {
+                key,
+                reason:
+                    UnreliableReceiveDropReason::Pressure {
+                        local_pressure_drops,
+                    },
+            } => {
+                assert_eq!(key, inbound);
+                assert_eq!(local_pressure_drops, 2);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn control_report_effect_preserves_local_termination_evidence() {
+        let key = key(FlowDirection::Outbound, 10);
+        let termination = termination(key);
+        let event = map_control_send_effect(FlowControlSendEffect::ReportOnlyTermination {
+            flow_id: crate::wire::FlowId::new(WireSide::Client, 0).unwrap(),
+            key,
+            reason: crate::wire::FlowTerminateReason::ReliableDeliveryFailure,
+            termination: Some(termination),
+        })
+        .unwrap();
+
+        match event {
+            ConnectionEvent::FlowTerminated {
+                key: event_key,
+                origin,
+                cause,
+                termination: Some(event_termination),
+            } => {
+                assert_eq!(event_key, key);
+                assert_eq!(origin, FlowTerminationOrigin::Local);
+                assert_eq!(cause, FlowTerminationCause::ReliableDeliveryFailure);
+                assert_eq!(event_termination, termination);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 }

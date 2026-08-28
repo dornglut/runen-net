@@ -63,6 +63,7 @@ pub(super) enum FlowControlSendEffect {
         flow_id: FlowId,
         key: DeliveryFlowKey,
         reason: FlowTerminateReason,
+        termination: Option<FlowTermination>,
     },
     LocalTerminated {
         flow: EstablishedFlow,
@@ -71,7 +72,9 @@ pub(super) enum FlowControlSendEffect {
     },
     ReportOnlyTermination {
         flow_id: FlowId,
+        key: DeliveryFlowKey,
         reason: FlowTerminateReason,
+        termination: Option<FlowTermination>,
     },
 }
 
@@ -107,7 +110,9 @@ pub(super) enum EstablishedDataFailureDisposition {
     },
     ReportOnly {
         flow_id: FlowId,
+        key: DeliveryFlowKey,
         reason: FlowTerminateReason,
+        termination: Option<FlowTermination>,
     },
     CleanupOnly {
         flow_id: FlowId,
@@ -204,6 +209,7 @@ pub(super) fn process_received(
             flow_id,
             key,
             reason,
+            termination,
             frame,
         } => FlowControlDriverProgress::PendingSend(PendingFlowControlSend::new(
             frame,
@@ -211,6 +217,7 @@ pub(super) fn process_received(
                 flow_id,
                 key,
                 reason,
+                termination,
             },
         )),
         FlowControlProgress::RemoteTerminated {
@@ -284,12 +291,18 @@ pub(super) fn prepare_established_data_failure(
             terminate_local(flow_control, endpoint, flow_id, reason)
                 .map(EstablishedDataFailureProgress::PendingSend)
         }
-        EstablishedDataFailureDisposition::ReportOnly { flow_id, reason } => {
+        EstablishedDataFailureDisposition::ReportOnly {
+            flow_id,
+            key,
+            reason,
+            termination,
+        } => {
             if flow_control.registry().registered_flow(flow_id).is_some() {
+                debug_assert!(termination.is_none());
                 return terminate_local(flow_control, endpoint, flow_id, reason)
                     .map(EstablishedDataFailureProgress::PendingSend);
             }
-            pending_report_only_termination(flow_id, reason)
+            pending_report_only_termination(flow_id, key, reason, termination)
                 .map(EstablishedDataFailureProgress::PendingSend)
         }
         EstablishedDataFailureDisposition::CleanupOnly { flow_id } => {
@@ -344,7 +357,6 @@ pub(super) fn classify_outbound_reliable_acquisition_failure(
         flow_id,
         reliable_send_failure_reason(error),
         flow_control.registry().registered_flow(flow_id).is_some(),
-        false,
     )
 }
 
@@ -358,7 +370,6 @@ pub(super) fn classify_outbound_reliable_finish_failure(
         flow_id,
         reason,
         flow_control.registry().registered_flow(flow_id).is_some(),
-        false,
     ))
 }
 
@@ -370,7 +381,6 @@ pub(super) fn classify_known_flow_resource_failure(
         flow_id,
         FlowTerminateReason::ResourceFailure,
         flow_control.registry().registered_flow(flow_id).is_some(),
-        false,
     )
 }
 
@@ -390,7 +400,6 @@ pub(super) fn classify_datagram_receive_failure(
         flow_id,
         reason,
         flow_control.registry().registered_flow(flow_id).is_some(),
-        false,
     )
 }
 
@@ -407,7 +416,6 @@ pub(super) fn classify_datagram_send_failure(
             flow_id,
             FlowTerminateReason::ResourceFailure,
             flow_control.registry().registered_flow(flow_id).is_some(),
-            false,
         ),
         DatagramSendError::SequenceExhausted => {
             classify_datagram_sequence_exhaustion(flow_control, flow_id)
@@ -424,7 +432,6 @@ pub(super) fn classify_datagram_send_failure(
             flow_id,
             FlowTerminateReason::ProtocolFailure,
             flow_control.registry().registered_flow(flow_id).is_some(),
-            false,
         ),
     }
 }
@@ -488,7 +495,7 @@ fn classify_reliable_active_context(
     reason: FlowTerminateReason,
 ) -> EstablishedDataFailureDisposition {
     let live_now = match context {
-        ReliableFailureContext::ResolvedLive { flow_id } => {
+        ReliableFailureContext::ResolvedReportable { flow_id, .. } => {
             flow_control.registry().registered_flow(flow_id).is_some()
         }
         ReliableFailureContext::Unresolved | ReliableFailureContext::ResolvedDetached { .. } => {
@@ -507,11 +514,24 @@ const fn reliable_active_context_disposition(
         ReliableFailureContext::Unresolved => {
             EstablishedDataFailureDisposition::ConnectionTerminal { code: None }
         }
-        ReliableFailureContext::ResolvedDetached { flow_id } => {
+        ReliableFailureContext::ResolvedDetached { flow_id, .. } => {
             EstablishedDataFailureDisposition::CleanupOnly { flow_id }
         }
-        ReliableFailureContext::ResolvedLive { flow_id } => {
-            known_flow_disposition(flow_id, reason, live_now, true)
+        ReliableFailureContext::ResolvedReportable {
+            flow_id,
+            key,
+            termination,
+        } => {
+            if live_now {
+                EstablishedDataFailureDisposition::TerminateAndReport { flow_id, reason }
+            } else {
+                EstablishedDataFailureDisposition::ReportOnly {
+                    flow_id,
+                    key,
+                    reason,
+                    termination,
+                }
+            }
         }
     }
 }
@@ -520,12 +540,9 @@ const fn known_flow_disposition(
     flow_id: FlowId,
     reason: FlowTerminateReason,
     live_now: bool,
-    report_if_detached: bool,
 ) -> EstablishedDataFailureDisposition {
     if live_now {
         EstablishedDataFailureDisposition::TerminateAndReport { flow_id, reason }
-    } else if report_if_detached {
-        EstablishedDataFailureDisposition::ReportOnly { flow_id, reason }
     } else {
         EstablishedDataFailureDisposition::CleanupOnly { flow_id }
     }
@@ -633,7 +650,9 @@ const fn reliable_receive_failure_reason(error: &ReceiveError) -> FlowTerminateR
 
 fn pending_report_only_termination(
     flow_id: FlowId,
+    key: DeliveryFlowKey,
     reason: FlowTerminateReason,
+    termination: Option<FlowTermination>,
 ) -> Result<PendingFlowControlSend, FlowControlError> {
     let encoded = FlowTerminate { flow_id, reason }.encode();
     let encoded = encoded.as_slice();
@@ -646,7 +665,12 @@ fn pending_report_only_termination(
             frame_type: ControlFrameType::FlowTerminate,
             body,
         },
-        FlowControlSendEffect::ReportOnlyTermination { flow_id, reason },
+        FlowControlSendEffect::ReportOnlyTermination {
+            flow_id,
+            key,
+            reason,
+            termination,
+        },
     ))
 }
 
@@ -680,6 +704,13 @@ fn pending_inbound_resolution(resolution: InboundResolution) -> PendingFlowContr
 
 #[cfg(test)]
 mod tests {
+    use runen_net::{
+        delivery::{
+            DeliveryFlowHandle, FlowDirection, FlowTerminationReason as CoreFlowTerminationReason,
+        },
+        identity::ConnectionHandle,
+    };
+
     use super::*;
     use crate::{
         quinn_binding::{IoFailure, PrefixError, RegistryError},
@@ -692,6 +723,23 @@ mod tests {
 
     fn flow(sequence: u64) -> FlowId {
         FlowId::new(WireSide::Client, sequence).unwrap()
+    }
+
+    fn key(handle: u64) -> DeliveryFlowKey {
+        DeliveryFlowKey::new(
+            ConnectionHandle::new(1),
+            FlowDirection::Inbound,
+            DeliveryFlowHandle::new(handle),
+        )
+    }
+
+    fn termination(key: DeliveryFlowKey) -> FlowTermination {
+        FlowTermination {
+            key,
+            reason: CoreFlowTerminationReason::ReliableCustodyLost,
+            pending_messages: 1,
+            reliable_obligation_failed: true,
+        }
     }
 
     fn assert_owned_send<T: Send + 'static>() {}
@@ -731,9 +779,15 @@ mod tests {
     }
 
     #[test]
-    fn reliable_active_context_uses_post_failure_liveness() {
+    fn reliable_active_context_preserves_reportable_core_evidence() {
         let flow_id = flow(7);
-        let context = ReliableFailureContext::ResolvedLive { flow_id };
+        let key = key(7);
+        let termination = termination(key);
+        let context = ReliableFailureContext::ResolvedReportable {
+            flow_id,
+            key,
+            termination: Some(termination),
+        };
         assert_eq!(
             reliable_active_context_disposition(
                 context,
@@ -753,12 +807,14 @@ mod tests {
             ),
             EstablishedDataFailureDisposition::ReportOnly {
                 flow_id,
+                key,
                 reason: FlowTerminateReason::ReliableDeliveryFailure,
+                termination: Some(termination),
             }
         );
         assert_eq!(
             reliable_active_context_disposition(
-                ReliableFailureContext::ResolvedDetached { flow_id },
+                ReliableFailureContext::ResolvedDetached { flow_id, key },
                 FlowTerminateReason::ProtocolFailure,
                 true,
             ),
@@ -827,14 +883,14 @@ mod tests {
         );
         assert_ne!(delivery_reason, Some(FlowTerminateReason::Normal));
         assert_eq!(
-            known_flow_disposition(flow_id, delivery_reason.unwrap(), true, false),
+            known_flow_disposition(flow_id, delivery_reason.unwrap(), true),
             EstablishedDataFailureDisposition::TerminateAndReport {
                 flow_id,
                 reason: FlowTerminateReason::ReliableDeliveryFailure,
             }
         );
         assert_eq!(
-            known_flow_disposition(flow_id, delivery_reason.unwrap(), false, false),
+            known_flow_disposition(flow_id, delivery_reason.unwrap(), false),
             EstablishedDataFailureDisposition::CleanupOnly { flow_id }
         );
     }
@@ -870,11 +926,17 @@ mod tests {
     }
 
     #[test]
-    fn report_only_termination_uses_canonical_wire_encoder_without_core_state() {
+    fn report_only_termination_retains_core_evidence_across_control_send() {
         let flow_id = flow(9);
-        let pending =
-            pending_report_only_termination(flow_id, FlowTerminateReason::ReliableDeliveryFailure)
-                .unwrap();
+        let key = key(9);
+        let termination = termination(key);
+        let pending = pending_report_only_termination(
+            flow_id,
+            key,
+            FlowTerminateReason::ReliableDeliveryFailure,
+            Some(termination),
+        )
+        .unwrap();
         assert_eq!(pending.frame.frame_type, ControlFrameType::FlowTerminate);
         assert_eq!(
             FlowTerminate::decode(&pending.frame.body),
@@ -887,7 +949,9 @@ mod tests {
             pending.effect,
             FlowControlSendEffect::ReportOnlyTermination {
                 flow_id,
+                key,
                 reason: FlowTerminateReason::ReliableDeliveryFailure,
+                termination: Some(termination),
             }
         );
     }
