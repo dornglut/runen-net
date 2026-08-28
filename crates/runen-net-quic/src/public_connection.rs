@@ -623,10 +623,15 @@ impl Connection {
             return Err(SubmissionError::Failed(FlowCommandError::UnknownFlow));
         };
         match mode {
-            DeliveryMode::ReliableOrdered => delivery
-                .submit(key, payload)
-                .map(SubmitOutcome::from)
-                .map_err(|error| SubmissionError::Failed(map_core_submission_error(error))),
+            DeliveryMode::ReliableOrdered => {
+                if !driver.has_reliable_outbound_flow(key) {
+                    return Err(SubmissionError::Failed(FlowCommandError::UnknownFlow));
+                }
+                delivery
+                    .submit(key, payload)
+                    .map(SubmitOutcome::from)
+                    .map_err(|error| SubmissionError::Failed(map_core_submission_error(error)))
+            }
             DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => {
                 match driver.submit_unreliable_by_key(delivery, key, payload) {
                     Ok(outcome) => {
