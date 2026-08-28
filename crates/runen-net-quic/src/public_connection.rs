@@ -371,38 +371,9 @@ impl Connection {
             requirements,
         };
 
-        let state = match result {
-            Ok(frame) => sending_state(
-                core,
-                sender,
-                receiver,
-                frame,
-                PendingSendDisposition::Continue,
-            ),
-            Err(NegotiationControlError::LocalFailure {
-                outcome,
-                report: Some(frame),
-            }) => sending_state(
-                core,
-                sender,
-                receiver,
-                frame,
-                PendingSendDisposition::TerminalLocalFailure(outcome),
-            ),
-            Err(NegotiationControlError::LocalFailure {
-                outcome,
-                report: None,
-            }) => {
-                close_negotiation_failed(&core.profile.connection);
-                return Err(ConnectionError::LocalNegotiation {
-                    outcome: outcome.into(),
-                    report: NegotiationReportStatus::Unavailable,
-                });
-            }
-            Err(error) => {
-                let error = terminal_controller_error(&core, error);
-                return Err(error);
-            }
+        let state = match transition_from_local_operation(core, sender, receiver, result) {
+            LocalOperationTransition::State(state) => state,
+            LocalOperationTransition::Error(_, error) => return Err(error),
         };
 
         Ok(Self {
@@ -599,16 +570,12 @@ impl Connection {
         let result = core
             .exchange
             .propose_authority(manager, contract, &core.requirements);
-        match transition_from_controller(core, sender, receiver, result) {
-            DriverTransition::State(state) => {
+        match transition_from_local_operation(core, sender, receiver, result) {
+            LocalOperationTransition::State(state) => {
                 self.state = state;
                 Ok(())
             }
-            DriverTransition::Event(state, _) => {
-                self.state = state;
-                Ok(())
-            }
-            DriverTransition::Error(state, error) => {
+            LocalOperationTransition::Error(state, error) => {
                 self.state = state;
                 Err(error)
             }
@@ -670,6 +637,55 @@ impl Connection {
                 reliable_receive,
                 state,
             }),
+        }
+    }
+}
+
+enum LocalOperationTransition {
+    State(ConnectionState),
+    Error(ConnectionState, ConnectionError),
+}
+
+fn transition_from_local_operation(
+    core: NegotiationCore,
+    sender: ControlSender,
+    receiver: ControlReceiver,
+    result: Result<ControlFrame, NegotiationControlError>,
+) -> LocalOperationTransition {
+    match result {
+        Ok(frame) => LocalOperationTransition::State(sending_state(
+            core,
+            sender,
+            receiver,
+            frame,
+            PendingSendDisposition::Continue,
+        )),
+        Err(NegotiationControlError::LocalFailure {
+            outcome,
+            report: Some(frame),
+        }) => LocalOperationTransition::State(sending_state(
+            core,
+            sender,
+            receiver,
+            frame,
+            PendingSendDisposition::TerminalLocalFailure(outcome),
+        )),
+        Err(NegotiationControlError::LocalFailure {
+            outcome,
+            report: None,
+        }) => {
+            close_negotiation_failed(&core.profile.connection);
+            LocalOperationTransition::Error(
+                ConnectionState::Failed { core },
+                ConnectionError::LocalNegotiation {
+                    outcome: outcome.into(),
+                    report: NegotiationReportStatus::Unavailable,
+                },
+            )
+        }
+        Err(error) => {
+            let public = terminal_controller_error(&core, error);
+            LocalOperationTransition::Error(ConnectionState::Failed { core }, public)
         }
     }
 }
