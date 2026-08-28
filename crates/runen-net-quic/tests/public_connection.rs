@@ -64,7 +64,8 @@ fn public_connection_negotiates_with_host_identity_and_explicit_authority_on_eit
 fn public_reliable_flow_uses_core_keys_for_open_data_and_normal_finish() {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
-        tokio::time::timeout(SCENARIO_TIMEOUT, run_public_reliable_flow()).await
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_public_reliable_flow())
+            .await
             .expect("public RN6D reliable-flow scenario timed out");
     });
 }
@@ -692,18 +693,22 @@ async fn next_public_pair_event(
     server_host: &mut HostState,
 ) -> (Option<ConnectionEvent>, Option<ConnectionEvent>) {
     poll_fn(|cx| {
-        let client_event = match client.poll(cx, &mut client_host.negotiation, &mut client_host.delivery)
-        {
-            Poll::Pending => None,
-            Poll::Ready(Ok(event)) => Some(event),
-            Poll::Ready(Err(error)) => panic!("public client established driver failed: {error:?}"),
-        };
-        let server_event = match server.poll(cx, &mut server_host.negotiation, &mut server_host.delivery)
-        {
-            Poll::Pending => None,
-            Poll::Ready(Ok(event)) => Some(event),
-            Poll::Ready(Err(error)) => panic!("public server established driver failed: {error:?}"),
-        };
+        let client_event =
+            match client.poll(cx, &mut client_host.negotiation, &mut client_host.delivery) {
+                Poll::Pending => None,
+                Poll::Ready(Ok(event)) => Some(event),
+                Poll::Ready(Err(error)) => {
+                    panic!("public client established driver failed: {error:?}")
+                }
+            };
+        let server_event =
+            match server.poll(cx, &mut server_host.negotiation, &mut server_host.delivery) {
+                Poll::Pending => None,
+                Poll::Ready(Ok(event)) => Some(event),
+                Poll::Ready(Err(error)) => {
+                    panic!("public server established driver failed: {error:?}")
+                }
+            };
         if client_event.is_some() || server_event.is_some() {
             Poll::Ready((client_event, server_event))
         } else {
