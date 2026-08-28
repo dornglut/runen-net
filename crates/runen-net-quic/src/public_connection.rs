@@ -928,7 +928,8 @@ impl Connection {
                                     continue;
                                 }
                                 Err(error) => {
-                                    self.state = ConnectionState::EstablishedFailed { driver, error };
+                                    self.state =
+                                        ConnectionState::EstablishedFailed { driver, error };
                                     return Poll::Ready(Err(error));
                                 }
                             }
