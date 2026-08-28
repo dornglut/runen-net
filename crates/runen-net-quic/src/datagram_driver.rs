@@ -95,10 +95,7 @@ impl DatagramConnectionIo {
                 .registered_flow(*flow_id)
                 .is_some_and(|registered| {
                     registered.key() == key
-                        && is_outbound_unreliable(
-                            registered.key().direction(),
-                            registered.mode(),
-                        )
+                        && is_outbound_unreliable(registered.key().direction(), registered.mode())
                 })
         })
     }
@@ -147,7 +144,10 @@ impl DatagramConnectionIo {
             .try_reserve(1)
             .map_err(DatagramIoError::Allocation)?;
         self.outbound.push(flow.flow_id());
-        debug_assert_eq!(self.outbound_flow_id(flow_control, flow.key()), Some(flow.flow_id()));
+        debug_assert_eq!(
+            self.outbound_flow_id(flow_control, flow.key()),
+            Some(flow.flow_id())
+        );
         Ok(())
     }
 
