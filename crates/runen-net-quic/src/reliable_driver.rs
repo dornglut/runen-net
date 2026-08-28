@@ -100,10 +100,7 @@ pub(super) enum ActiveReliableProgress {
         flow_id: FlowId,
         progress: SendProgress,
     },
-    Inbound {
-        key: Option<DeliveryFlowKey>,
-        progress: ReceiveProgress,
-    },
+    Inbound(ReceiveProgress),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -413,36 +410,16 @@ impl ReliableConnectionIo {
             let before = self.active_inbound[index].resolved_flow_id();
             let before_registered = before
                 .is_some_and(|flow_id| flow_control.registry().registered_flow(flow_id).is_some());
-            let before_key = before.and_then(|flow_id| {
-                flow_control
-                    .registry()
-                    .registered_flow(flow_id)
-                    .map(|flow| flow.key())
-            });
             match self.active_inbound[index].poll_step(cx, endpoint, flow_control.registry_mut()) {
                 Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining)) => {}
                 Poll::Ready(Ok(progress @ ReceiveProgress::Closed)) => {
                     let _ = self.active_inbound.swap_remove(index);
                     self.inbound_cursor = cursor_after_remove(index, self.active_inbound.len());
-                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound {
-                        key: before_key,
-                        progress,
-                    }));
+                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress)));
                 }
                 Poll::Ready(Ok(progress)) => {
-                    let after_key = self.active_inbound[index]
-                        .resolved_flow_id()
-                        .and_then(|flow_id| {
-                            flow_control
-                                .registry()
-                                .registered_flow(flow_id)
-                                .map(|flow| flow.key())
-                        });
                     self.inbound_cursor = (index + 1) % len;
-                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound {
-                        key: before_key.or(after_key),
-                        progress,
-                    }));
+                    return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress)));
                 }
                 Poll::Ready(Err(error)) => {
                     let after = self.active_inbound[index].resolved_flow_id();
