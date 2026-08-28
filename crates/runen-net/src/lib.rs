@@ -7,5 +7,9 @@
 pub mod delivery;
 pub mod identity;
 pub mod protocol;
+mod protocol_declaration;
+pub use protocol_declaration::{
+    CompatibilityOfferBuilder, SchemaContractOfferBuilder, SchemaOfferBuilder,
+};
 pub mod replication;
 pub mod session;
