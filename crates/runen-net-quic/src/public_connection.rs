@@ -649,9 +649,7 @@ impl Connection {
             | ConnectionState::EstablishedActivationFailed { established } => {
                 established.teardown(manager, delivery).into()
             }
-            ConnectionState::Established { driver } => {
-                (*driver).teardown(manager, delivery).into()
-            }
+            ConnectionState::Established { driver } => (*driver).teardown(manager, delivery).into(),
             ConnectionState::Failed { core } => core.teardown(manager, delivery, false),
             ConnectionState::Transitioning => unreachable!("transition state never escapes a call"),
         }
