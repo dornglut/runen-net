@@ -71,6 +71,16 @@ fn public_reliable_flow_uses_core_keys_for_open_data_and_normal_finish() {
 }
 
 #[test]
+fn public_unreliable_modes_use_core_keys_for_data_and_normal_finish() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_public_unreliable_flows())
+            .await
+            .expect("public RN6D unreliable-flow scenarios timed out");
+    });
+}
+
+#[test]
 fn pending_send_and_receive_teardown_release_core_and_endpoint_capacity() {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
@@ -251,20 +261,148 @@ async fn run_public_reliable_flow() {
     let (client, server) = endpoints(config);
     let mut client_host = new_host();
     let mut server_host = new_host();
-    let (client_ready, server_ready) =
-        profile_ready_pair(&client, &server, config, AuthoritySide::Client).await;
-    let (mut client_connection, mut server_connection) = activate_pair(
-        client_ready,
-        server_ready,
+    let (mut client_connection, mut server_connection) = establish_public_connection_pair(
+        &client,
+        &server,
+        config,
         &mut client_host,
         &mut server_host,
-    );
+    )
+    .await;
 
-    drive_until_authority_selection(
+    let (outbound, inbound) = open_and_accept_public_flow(
         &mut client_connection,
         &mut client_host,
         &mut server_connection,
         &mut server_host,
+        DeliveryMode::ReliableOrdered,
+        1,
+        101,
+    )
+    .await;
+    submit_and_expect_public_payload(
+        &mut client_connection,
+        &mut client_host,
+        &mut server_connection,
+        &mut server_host,
+        outbound,
+        inbound,
+        b"public-reliable",
+    )
+    .await;
+    finish_and_expect_normal_termination(
+        &mut client_connection,
+        &mut client_host,
+        &mut server_connection,
+        &mut server_host,
+        outbound,
+        inbound,
+    )
+    .await;
+
+    assert!(client_host.delivery.flow_contract(outbound).is_none());
+    assert!(server_host.delivery.flow_contract(inbound).is_none());
+    let client_teardown =
+        client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+    let server_teardown =
+        server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
+    assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
+    assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
+
+    client.close();
+    server.close();
+    join2(client.wait_idle(), server.wait_idle()).await;
+}
+
+async fn run_public_unreliable_flows() {
+    let config = resource_limits(2).validate().unwrap();
+    let (client, server) = endpoints(config);
+    let mut client_host = new_host();
+    let mut server_host = new_host();
+    let (mut client_connection, mut server_connection) = establish_public_connection_pair(
+        &client,
+        &server,
+        config,
+        &mut client_host,
+        &mut server_host,
+    )
+    .await;
+
+    for (mode, outbound_handle, inbound_handle, payload) in [
+        (
+            DeliveryMode::UnreliableUnordered,
+            10,
+            110,
+            b"public-unordered".as_slice(),
+        ),
+        (
+            DeliveryMode::UnreliableSequenced,
+            11,
+            111,
+            b"public-sequenced".as_slice(),
+        ),
+    ] {
+        let (outbound, inbound) = open_and_accept_public_flow(
+            &mut client_connection,
+            &mut client_host,
+            &mut server_connection,
+            &mut server_host,
+            mode,
+            outbound_handle,
+            inbound_handle,
+        )
+        .await;
+        submit_and_expect_public_payload(
+            &mut client_connection,
+            &mut client_host,
+            &mut server_connection,
+            &mut server_host,
+            outbound,
+            inbound,
+            payload,
+        )
+        .await;
+        finish_and_expect_normal_termination(
+            &mut client_connection,
+            &mut client_host,
+            &mut server_connection,
+            &mut server_host,
+            outbound,
+            inbound,
+        )
+        .await;
+        assert!(client_host.delivery.flow_contract(outbound).is_none());
+        assert!(server_host.delivery.flow_contract(inbound).is_none());
+    }
+
+    let client_teardown =
+        client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+    let server_teardown =
+        server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
+    assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
+    assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
+
+    client.close();
+    server.close();
+    join2(client.wait_idle(), server.wait_idle()).await;
+}
+
+async fn establish_public_connection_pair(
+    client: &ClientEndpoint,
+    server: &ServerEndpoint,
+    config: EndpointConfig,
+    client_host: &mut HostState,
+    server_host: &mut HostState,
+) -> (Connection, Connection) {
+    let (client_ready, server_ready) =
+        profile_ready_pair(client, server, config, AuthoritySide::Client).await;
+    let (mut client_connection, mut server_connection) =
+        activate_pair(client_ready, server_ready, client_host, server_host);
+    drive_until_authority_selection(
+        &mut client_connection,
+        client_host,
+        &mut server_connection,
+        server_host,
         AuthoritySide::Client,
     )
     .await;
@@ -273,29 +411,40 @@ async fn run_public_reliable_flow() {
         .unwrap();
     drive_until_established(
         &mut client_connection,
-        &mut client_host,
+        client_host,
         &mut server_connection,
-        &mut server_host,
+        server_host,
     )
     .await;
+    (client_connection, server_connection)
+}
 
+async fn open_and_accept_public_flow(
+    client: &mut Connection,
+    client_host: &mut HostState,
+    server: &mut Connection,
+    server_host: &mut HostState,
+    mode: DeliveryMode,
+    outbound_handle: u64,
+    inbound_handle: u64,
+) -> (DeliveryFlowKey, DeliveryFlowKey) {
     let outbound = DeliveryFlowKey::new(
         CLIENT_CONNECTION,
         FlowDirection::Outbound,
-        DeliveryFlowHandle::new(1),
+        DeliveryFlowHandle::new(outbound_handle),
     );
     let inbound = DeliveryFlowKey::new(
         SERVER_CONNECTION,
         FlowDirection::Inbound,
-        DeliveryFlowHandle::new(101),
+        DeliveryFlowHandle::new(inbound_handle),
     );
-    client_connection
+    client
         .open_outbound_flow(
             &client_host.delivery,
             OutboundFlowConfig {
                 key: outbound,
-                mode: DeliveryMode::ReliableOrdered,
-                policy: flow_policy(DeliveryMode::ReliableOrdered),
+                mode,
+                policy: flow_policy(mode),
                 connection_limits: flow_connection_limits(),
                 stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
             },
@@ -303,13 +452,8 @@ async fn run_public_reliable_flow() {
         .unwrap();
 
     let request = loop {
-        let (client_event, server_event) = next_public_pair_event(
-            &mut client_connection,
-            &mut client_host,
-            &mut server_connection,
-            &mut server_host,
-        )
-        .await;
+        let (client_event, server_event) =
+            next_public_pair_event(client, client_host, server, server_host).await;
         if let Some(event) = client_event {
             panic!("sender surfaced durable flow progress before admission: {event:?}");
         }
@@ -320,28 +464,23 @@ async fn run_public_reliable_flow() {
         }
     };
     assert_eq!(request.connection(), SERVER_CONNECTION);
-    assert_eq!(request.mode(), DeliveryMode::ReliableOrdered);
+    assert_eq!(request.mode(), mode);
     assert_eq!(request.max_message_bytes(), MAX_MESSAGE_BYTES as u64);
-    server_connection
+    server
         .accept_incoming_flow(
             &mut server_host.delivery,
             request,
             InboundFlowConfig {
                 key: inbound,
-                policy: flow_policy(DeliveryMode::ReliableOrdered),
+                policy: flow_policy(mode),
                 connection_limits: flow_connection_limits(),
             },
         )
         .unwrap();
 
     loop {
-        let (client_event, server_event) = next_public_pair_event(
-            &mut client_connection,
-            &mut client_host,
-            &mut server_connection,
-            &mut server_host,
-        )
-        .await;
+        let (client_event, server_event) =
+            next_public_pair_event(client, client_host, server, server_host).await;
         if let Some(event) = server_event {
             panic!("receiver surfaced unexpected establishment event: {event:?}");
         }
@@ -354,11 +493,21 @@ async fn run_public_reliable_flow() {
             None => {}
         }
     }
+    (outbound, inbound)
+}
 
-    let payload = b"public-reliable".to_vec();
+async fn submit_and_expect_public_payload(
+    client: &mut Connection,
+    client_host: &mut HostState,
+    server: &mut Connection,
+    server_host: &mut HostState,
+    outbound: DeliveryFlowKey,
+    inbound: DeliveryFlowKey,
+    payload: &[u8],
+) {
     assert_eq!(
-        client_connection
-            .submit(&mut client_host.delivery, outbound, payload.clone())
+        client
+            .submit(&mut client_host.delivery, outbound, payload.to_vec())
             .unwrap(),
         SubmitOutcome::Accepted {
             accepted_index: 0,
@@ -367,15 +516,10 @@ async fn run_public_reliable_flow() {
     );
 
     loop {
-        let (client_event, server_event) = next_public_pair_event(
-            &mut client_connection,
-            &mut client_host,
-            &mut server_connection,
-            &mut server_host,
-        )
-        .await;
+        let (client_event, server_event) =
+            next_public_pair_event(client, client_host, server, server_host).await;
         if let Some(event) = client_event {
-            panic!("sender surfaced unexpected reliable data event: {event:?}");
+            panic!("sender surfaced unexpected data event: {event:?}");
         }
         match server_event {
             Some(ConnectionEvent::DataReady {
@@ -388,7 +532,7 @@ async fn run_public_reliable_flow() {
                 assert_eq!(local_pressure_drops, 0);
                 break;
             }
-            Some(event) => panic!("receiver surfaced unexpected reliable data event: {event:?}"),
+            Some(event) => panic!("receiver surfaced unexpected data event: {event:?}"),
             None => {}
         }
     }
@@ -398,21 +542,25 @@ async fn run_public_reliable_flow() {
         .unwrap()
         .expect("DataReady did not leave payload in Core custody");
     assert_eq!(exposed.accepted_index(), 0);
-    assert_eq!(exposed.payload(), payload.as_slice());
+    assert_eq!(exposed.payload(), payload);
+}
 
-    client_connection
+async fn finish_and_expect_normal_termination(
+    client: &mut Connection,
+    client_host: &mut HostState,
+    server: &mut Connection,
+    server_host: &mut HostState,
+    outbound: DeliveryFlowKey,
+    inbound: DeliveryFlowKey,
+) {
+    client
         .finish_outbound_flow_normal(&mut client_host.delivery, outbound)
         .unwrap();
     let mut client_closed = false;
     let mut server_closed = false;
     while !(client_closed && server_closed) {
-        let (client_event, server_event) = next_public_pair_event(
-            &mut client_connection,
-            &mut client_host,
-            &mut server_connection,
-            &mut server_host,
-        )
-        .await;
+        let (client_event, server_event) =
+            next_public_pair_event(client, client_host, server, server_host).await;
         if let Some(event) = client_event {
             match event {
                 ConnectionEvent::FlowTerminated {
@@ -450,19 +598,6 @@ async fn run_public_reliable_flow() {
             }
         }
     }
-
-    assert!(client_host.delivery.flow_contract(outbound).is_none());
-    assert!(server_host.delivery.flow_contract(inbound).is_none());
-    let client_teardown =
-        client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
-    let server_teardown =
-        server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
-    assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
-    assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
-
-    client.close();
-    server.close();
-    join2(client.wait_idle(), server.wait_idle()).await;
 }
 
 async fn run_public_success(authority: AuthoritySide) {
