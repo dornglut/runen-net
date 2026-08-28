@@ -21,7 +21,7 @@ mod public_flow;
 pub use public_flow::{
     FlowCommandError, FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin,
     InboundFlowConfig, IncomingFlowDecisionError, IncomingFlowRequest, OutboundFlowConfig,
-    SubmitOutcome,
+    SubmissionError, SubmitOutcome,
 };
 
 #[cfg(test)]
