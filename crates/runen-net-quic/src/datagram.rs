@@ -425,7 +425,10 @@ fn encode_datagram(
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum DatagramReceiveOutcome {
     DiscardedUnknownFlow,
-    Core(ReceiveOutcome),
+    Core {
+        key: DeliveryFlowKey,
+        outcome: ReceiveOutcome,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -520,7 +523,10 @@ pub(super) fn receive_datagram(
         .map_err(|error| {
             DatagramReceiveFailure::resolved(flow_id, DatagramReceiveError::Core(error))
         })?;
-    Ok(DatagramReceiveOutcome::Core(outcome))
+    Ok(DatagramReceiveOutcome::Core {
+        key: flow.key(),
+        outcome,
+    })
 }
 
 pub(super) fn read_quinn_datagram_owned(connection: Connection) -> OwnedDatagramReadFuture {
@@ -882,17 +888,21 @@ mod tests {
 
         assert_eq!(
             receive_datagram(&mut endpoint, &registry, &[1, b'a']),
-            Ok(DatagramReceiveOutcome::Core(ReceiveOutcome::Buffered {
-                local_pressure_drops: 0,
-            }))
+            Ok(DatagramReceiveOutcome::Core {
+                key,
+                outcome: ReceiveOutcome::Buffered {
+                    local_pressure_drops: 0,
+                },
+            })
         );
         assert_eq!(
             receive_datagram(&mut endpoint, &registry, &[1, b'b']),
-            Ok(DatagramReceiveOutcome::Core(
-                ReceiveOutcome::DroppedByPressure {
+            Ok(DatagramReceiveOutcome::Core {
+                key,
+                outcome: ReceiveOutcome::DroppedByPressure {
                     local_pressure_drops: 1,
-                }
-            ))
+                },
+            })
         );
         let exposed = endpoint.poll_exposure(key).unwrap().unwrap();
         assert_eq!(exposed.accepted_index(), UNORDERED_INGRESS_INDEX);
@@ -920,16 +930,22 @@ mod tests {
 
         assert_eq!(
             receive_datagram(&mut endpoint, &registry, &[3, 2, b'n']),
-            Ok(DatagramReceiveOutcome::Core(ReceiveOutcome::Buffered {
-                local_pressure_drops: 0,
-            }))
+            Ok(DatagramReceiveOutcome::Core {
+                key,
+                outcome: ReceiveOutcome::Buffered {
+                    local_pressure_drops: 0,
+                },
+            })
         );
         let exposed = endpoint.poll_exposure(key).unwrap().unwrap();
         assert_eq!(exposed.accepted_index(), 2);
         assert_eq!(exposed.payload(), b"n");
         assert_eq!(
             receive_datagram(&mut endpoint, &registry, &[3, 1, b'o']),
-            Ok(DatagramReceiveOutcome::Core(ReceiveOutcome::StaleSequenced))
+            Ok(DatagramReceiveOutcome::Core {
+                key,
+                outcome: ReceiveOutcome::StaleSequenced,
+            })
         );
         assert_eq!(endpoint.diagnostics().stale_sequenced_drops, 1);
     }
