@@ -13,9 +13,11 @@ This revision defines:
 - one initial participant-input model for authoritative client/server simulation;
 - participant input batches targeted at host-supplied `SimulationTick` values;
 - semantic duplicate/conflict classification without a separate input sequence domain;
-- authority-side admissible input windows and finite input-accounting requirements;
+- monotonic authority-side admissible input windows and finite input-accounting requirements;
+- deterministic authority input classification precedence;
 - bounded participant-side pending prediction state;
 - prediction continuity and invalidation;
+- an authoritative reconciliation frontier for tracked local prediction;
 - authoritative-commit-before-replay ordering;
 - retirement of predicted input covered by authoritative progression;
 - ordered replay of still-pending later input;
@@ -76,7 +78,7 @@ This semantic classification is independent of delivery duplicate handling. A de
 
 A received participant input batch may be interpreted only after the session lifecycle authorizes the sending connection as the current binding for that `ParticipantId`.
 
-Input received from an unadmitted connection, a connection not currently bound to that participant, a removed participant, or a closed session MUST NOT become applicable participant input.
+Input received from an unadmitted connection, a connection not currently bound to that participant, a removed participant, or a closed session is **UnauthorizedInput** and MUST NOT become applicable participant input.
 
 Delivery exposure by itself is not participant-input authorization.
 
@@ -91,7 +93,13 @@ The window has:
 
 The host supplies or advances this window according to its simulation lifecycle. RunenNet does not define when a particular game executes a tick.
 
-For a newly observed authorized input batch:
+For one participant incarnation, both the minimum and maximum admissible target ticks MUST be monotonically nondecreasing. Updating either bound MUST preserve `minimum <= maximum`.
+
+The host MUST advance the minimum beyond a tick only after that tick is closed to ordinary participant input under this initial profile. Once a target tick becomes lower than the minimum, that target tick MUST NOT later become admissible again for the same participant incarnation.
+
+The maximum MAY advance before the minimum as the host opens additional future simulation ticks for input, but it MUST NOT move backward to revoke a tick that was already inside the acceptance window. Resource or gameplay policy that needs to stop accepting otherwise admissible input must use an explicit rejection or lifecycle mechanism rather than silently redefining a previously open tick as never having been admissible.
+
+For an authorized batch whose target tick is considered against the current window:
 
 - a target tick lower than the minimum admissible tick is **StaleInput**;
 - a target tick greater than the maximum admissible tick is **FutureInputOutsideWindow**;
@@ -102,6 +110,22 @@ StaleInput and FutureInputOutsideWindow MUST NOT become applicable host input un
 The authority MUST NOT keep an unbounded future-input horizon. The configured input window and all storage attributable to accepted/not-yet-expired input MUST remain finite.
 
 This input window is not lag compensation. A future extension may define a different late-input or rollback policy without changing the meaning of this initial profile.
+
+## Authority input classification order
+
+For one newly exposed participant-input candidate, the authority MUST classify it in this order:
+
+1. verify current participant/session authorization; otherwise classify UnauthorizedInput;
+2. if the target tick is below the current minimum admissible tick, classify StaleInput;
+3. if retained evidence already exists for the same participant/tick key, classify DuplicateInput for the same complete value or ConflictingInput for different content;
+4. if the target tick is above the current maximum admissible tick, classify FutureInputOutsideWindow;
+5. otherwise perform required resource admission and classify InputAccepted or InputResourceRejected.
+
+Only InputAccepted creates a newly applicable host input batch.
+
+This precedence means that once the monotonic minimum advances past a key, a later observation of that key is StaleInput even if duplicate/conflict evidence happens to remain retained. DuplicateInput and ConflictingInput describe repeated observations only while the key is still inside the current admissible window.
+
+A batch rejected as FutureInputOutsideWindow does not reserve that participant/tick key. If the monotonic maximum later advances to include the target tick, a later observation may then be classified under the current window and accepted normally.
 
 ## Authority input acceptance
 
@@ -118,7 +142,7 @@ After InputAccepted, the realization MUST expose the batch to the host at most o
 
 The host owns how an accepted batch is buffered, scheduled, or applied to simulation, provided later RunenNet semantic outcomes are reported truthfully.
 
-If required RunenNet-owned accounting cannot admit the batch within configured bounds, the batch is **InputResourceRejected** and MUST NOT be reported as InputAccepted.
+If required RunenNet-owned accounting cannot admit the batch within configured bounds, the batch is InputResourceRejected and MUST NOT be reported as InputAccepted.
 
 ## Finite input resources
 
@@ -135,7 +159,7 @@ At minimum the policy MUST bound:
 
 If a realization retains complete batches for authority-side scheduling, those bytes count toward the corresponding bounds.
 
-The realization MAY discard duplicate/conflict evidence for a tick once that tick is lower than the participant's minimum admissible input tick, because any later observation of that key is StaleInput and cannot become applicable.
+The realization MAY discard duplicate/conflict evidence for a tick once that tick is lower than the participant's monotonic minimum admissible input tick, because every later observation of that key is necessarily StaleInput and cannot become applicable again in that participant incarnation.
 
 Resource pressure MUST NOT cause an already accepted participant/tick key to become silently reusable for different content while that key remains inside the admissible window.
 
@@ -164,19 +188,31 @@ Prediction continuity is subordinate to the participant membership and replicati
 
 A newly admitted participant begins PredictionInvalidated until a valid authoritative full replication state establishing the initial synchronized baseline has been committed for that lineage.
 
-After that initial synchronization, the participant may enter PredictionActive.
+When that initial authoritative full state commits at `SimulationTick T`, the participant establishes its reconciliation frontier at T and may enter PredictionActive.
+
+While PredictionActive, the reconciliation frontier is the latest successfully committed authoritative `SimulationTick` for the lineage. It MUST be monotonically nondecreasing. A newer authoritative commit at the same tick leaves the frontier unchanged; a commit at a later tick advances it.
 
 ## Pending predicted input
 
 While PredictionActive, a locally predicted participant batch remains **pending predicted input** until this specification retires or invalidates it.
 
+A new batch is eligible to enter pending prediction only when its target tick is strictly greater than the current reconciliation frontier. A local batch whose target tick is less than or equal to the frontier is **PredictionInputNotNewerThanFrontier** and MUST NOT enter pending prediction or be applied as RunenNet-tracked local prediction.
+
 Pending predicted input is keyed by target `SimulationTick`. Because the initial model permits at most one distinct batch per participant/tick key, pending replay order is the ascending target-tick order.
+
+For a new tracked-prediction candidate while PredictionActive, the participant endpoint MUST classify it in this order:
+
+1. if its target tick is less than or equal to the current reconciliation frontier, classify PredictionInputNotNewerThanFrontier;
+2. if a pending batch already exists for the same participant/tick key, classify DuplicateInput for the same complete value or ConflictingInput for different content;
+3. otherwise perform pending-prediction resource admission and either retain the immutable batch as pending predicted input or classify PendingPredictionResourceRejected.
+
+Only a newly retained pending batch may then be applied as tracked local prediction.
 
 The participant endpoint MUST impose finite bounds on:
 
 - maximum pending predicted batch count;
 - maximum pending predicted batch bytes/accounted cost; and
-- maximum target-tick distance represented by pending predicted batches.
+- maximum target-tick distance above the current reconciliation frontier represented by pending predicted batches.
 
 Exact numeric defaults are not defined by this revision.
 
@@ -186,7 +222,7 @@ If a host retries submission, it MUST retry the same immutable participant/tick 
 
 ## Authoritative reconciliation frontier
 
-A successfully committed authoritative replication state at `SimulationTick T` establishes a **reconciliation frontier** at T for the participant lineage.
+A successfully committed authoritative replication state at `SimulationTick T` establishes or updates the reconciliation frontier at T for the participant lineage according to the monotonic rule above.
 
 The frontier means that local predicted input targeted at tick T or earlier is no longer eligible to be replayed on top of that authoritative state.
 
@@ -203,11 +239,12 @@ Prediction reconciliation occurs only after a newer authoritative replication ca
 For a successful authoritative commit at target tick T, the participant-side reconciliation order is:
 
 1. the complete authoritative replication target is validated/reconstructed and atomically committed under the replication specification;
-2. pending predicted batches whose target tick is less than or equal to T are retired without replay;
-3. remaining pending predicted batches with target ticks greater than T are replayed in ascending target-tick order;
-4. only after required replay succeeds may the predicted host state be reported as reconciled under the current prediction continuity.
+2. the reconciliation frontier is established or advanced to T;
+3. pending predicted batches whose target tick is less than or equal to T are retired without replay;
+4. remaining pending predicted batches with target ticks greater than T are replayed in ascending target-tick order;
+5. only after required replay succeeds may the predicted host state be reported as reconciled under the current prediction continuity.
 
-A failed authoritative validation, reconstruction, or commit MUST NOT retire pending predicted input and MUST NOT trigger replay as though the candidate had committed.
+A failed authoritative validation, reconstruction, or commit MUST NOT advance the reconciliation frontier, retire pending predicted input, or trigger replay as though the candidate had committed.
 
 This document does not change replication acknowledgement meaning. A replication acknowledgement may truthfully confirm the authoritative commit even when later local prediction replay fails, because prediction replay does not retroactively uncommit authoritative replication state.
 
@@ -235,7 +272,7 @@ The host integration MUST provide staging, restoration, re-establishment from th
 
 After replay failure:
 
-- the authoritative replication commit remains valid;
+- the authoritative replication commit and resulting reconciliation frontier remain valid;
 - prediction continuity becomes PredictionInvalidated with a replay-failure reason;
 - pending predicted input from that invalidated continuity MUST NOT later be replayed; and
 - the endpoint MUST return to a known authoritative host state before prediction is re-enabled.
@@ -254,16 +291,17 @@ Authority-side input outcomes:
 - StaleInput;
 - FutureInputOutsideWindow;
 - InputResourceRejected;
-- unauthorized/not-applicable participant input.
+- UnauthorizedInput.
 
 Participant-side prediction outcomes/states:
 
 - PredictionActive;
 - PredictionInvalidated with a reason class;
+- PredictionInputNotNewerThanFrontier;
+- PendingPredictionResourceRejected;
 - authoritative commit with no pending replay required;
 - authoritative commit with one or more still-pending batches replayed successfully;
-- replay failure after authoritative commit;
-- pending-prediction resource rejection.
+- replay failure after authoritative commit.
 
 Concrete public enum/type names are not defined by this revision.
 
@@ -281,19 +319,21 @@ While the lineage remains FullSnapshotRequired:
 - the endpoint MUST NOT treat retained pre-recovery prediction state as a valid base for new correction;
 - RunenNet-tracked local prediction under this initial profile is suspended.
 
-After a valid newer full snapshot commits and clears the replication recovery barrier, the participant may establish a fresh PredictionActive continuity from that authoritative state.
+After a valid newer full snapshot commits and clears the replication recovery barrier, the participant establishes a fresh reconciliation frontier at that full snapshot's `SimulationTick` and may establish a fresh PredictionActive continuity from that authoritative state.
 
 The host may independently collect user intent while recovery is in progress, but such collection is not pending RunenNet prediction under this revision unless a later specification defines how it becomes safe post-recovery input.
 
 ## Connection loss and replacement
 
-When the currently bound transport connection is lost and the participant membership becomes unbound, prediction continuity becomes PredictionInvalidated.
+When the currently bound transport connection is lost and the participant membership becomes unbound, participant-side prediction continuity becomes PredictionInvalidated.
 
 An authorized replacement connection does not restore the prior prediction continuity.
 
 The existing replication recovery specification requires a fresh qualifying full authoritative baseline after replacement. Only after that baseline is committed and the recovery barrier clears may a new PredictionActive continuity begin.
 
 Accepted/unexposed delivery messages from the old connection are not transferred to the replacement connection, as defined by the delivery specification. Pre-replacement pending predicted input MUST NOT be replayed after the replacement full baseline under this initial profile.
+
+Authority-side input-window bounds and accepted-key evidence are scoped to the retained participant incarnation, not to one transport connection. Temporary unbinding or authorized replacement MUST NOT move an authority input-window bound backward or reset still-required accepted-key evidence in a way that permits a participant/tick key to become newly applicable a second time.
 
 This conservative rule deliberately does not define advanced reconnect input continuity.
 
@@ -343,17 +383,21 @@ A realization claiming this semantic area MUST be testable for at least the foll
 
 1. one accepted participant/tick batch is exposed to the authority host at most once despite a same-value duplicate;
 2. conflicting content for an already accepted participant/tick key is rejected without replacing the accepted batch;
-3. input below the minimum admissible tick is StaleInput;
-4. input beyond the finite future window is FutureInputOutsideWindow;
-5. input/resource saturation fails explicitly without unbounded growth or silent key reuse;
-6. a locally predicted batch cannot be applied as tracked prediction when pending-prediction admission failed;
-7. authoritative commit at tick T retires all pending predicted batches at ticks less than or equal to T;
-8. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order with their target-tick meaning preserved;
-9. an authoritative candidate that fails before commit does not retire or replay pending prediction;
-10. replay or intervening prediction-step failure leaves the authoritative commit valid but invalidates prediction continuity and does not expose a partially replayed state as valid prediction;
-11. entering FullSnapshotRequired invalidates and clears pre-recovery replay eligibility;
-12. authorized connection replacement does not replay pre-replacement pending prediction after the required replacement full baseline;
-13. participant removal and session close prevent old input/prediction state from becoming applicable to a later participant/session lifetime.
+3. input below the minimum admissible tick is StaleInput even when old duplicate evidence remains;
+4. authority input-window bounds never move backward, and a key below the advanced minimum cannot later become admissible again in the same participant incarnation;
+5. input beyond the finite future window is FutureInputOutsideWindow and may become admissible only after the monotonic maximum advances to include it;
+6. input/resource saturation fails explicitly without unbounded growth or silent key reuse;
+7. an unauthorized connection cannot create applicable participant input;
+8. a locally predicted batch cannot be applied as tracked prediction when pending-prediction admission failed;
+9. a local tracked-prediction candidate at or before the reconciliation frontier is PredictionInputNotNewerThanFrontier and is not applied;
+10. same-key local pending prediction is classified deterministically as DuplicateInput or ConflictingInput while newer than the frontier;
+11. authoritative commit at tick T advances/establishes the frontier and retires all pending predicted batches at ticks less than or equal to T;
+12. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order with their target-tick meaning preserved;
+13. an authoritative candidate that fails before commit does not advance the frontier, retire, or replay pending prediction;
+14. replay or intervening prediction-step failure leaves the authoritative commit/frontier valid but invalidates prediction continuity and does not expose a partially replayed state as valid prediction;
+15. entering FullSnapshotRequired invalidates and clears pre-recovery replay eligibility;
+16. authorized connection replacement does not replay pre-replacement pending prediction after the required replacement full baseline and does not reset authority input-window/key identity;
+17. participant removal and session close prevent old input/prediction state from becoming applicable to a later participant/session lifetime.
 
 ## Open items
 
