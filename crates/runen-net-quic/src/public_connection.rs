@@ -352,6 +352,10 @@ enum ConnectionState {
     Established {
         driver: Box<EstablishedConnectionDriver>,
     },
+    EstablishedFailed {
+        driver: Box<EstablishedConnectionDriver>,
+        error: ConnectionError,
+    },
     EstablishedActivationFailed {
         established: EstablishedNegotiatedConnection,
     },
@@ -369,6 +373,7 @@ impl fmt::Debug for ConnectionState {
             Self::AuthoritySelection { .. } => "AuthoritySelection",
             Self::NegotiatedEstablished { .. } => "NegotiatedEstablished",
             Self::Established { .. } => "Established",
+            Self::EstablishedFailed { .. } => "EstablishedFailed",
             Self::EstablishedActivationFailed { .. } => "EstablishedActivationFailed",
             Self::Failed { .. } => "Failed",
             Self::Transitioning => "Transitioning",
@@ -385,7 +390,6 @@ pub struct Connection {
     connection: ConnectionHandle,
     reliable_receive: ReliableReceiveLimits,
     state: ConnectionState,
-    pending_error: Option<ConnectionError>,
 }
 
 impl fmt::Debug for Connection {
@@ -395,7 +399,6 @@ impl fmt::Debug for Connection {
             .field("connection", &self.connection)
             .field("reliable_receive", &self.reliable_receive)
             .field("state", &self.state)
-            .field("pending_error", &self.pending_error)
             .finish()
     }
 }
@@ -463,7 +466,6 @@ impl Connection {
             connection,
             reliable_receive,
             state,
-            pending_error: None,
         })
     }
 
@@ -483,7 +485,8 @@ impl Connection {
     ) -> Result<(), FlowCommandError> {
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedActivationFailed { .. }
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
             ConnectionState::Sending { .. }
@@ -535,7 +538,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedActivationFailed { .. }
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
                 return Err(IncomingFlowDecisionError::Failed(
@@ -598,7 +602,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedActivationFailed { .. }
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
                 return Err(IncomingFlowDecisionError::Failed(
@@ -662,7 +667,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedActivationFailed { .. }
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
                 return Err(SubmissionError::Failed(FlowCommandError::Terminal));
@@ -735,7 +741,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedActivationFailed { .. }
+            ConnectionState::EstablishedFailed { .. }
+            | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
             ConnectionState::Sending { .. }
@@ -770,10 +777,6 @@ impl Connection {
         manager: &mut NegotiationManager,
         delivery: &mut DeliveryEndpoint,
     ) -> Poll<Result<ConnectionEvent, ConnectionError>> {
-        if let Some(error) = self.pending_error.take() {
-            return Poll::Ready(Err(error));
-        }
-
         for _ in 0..MAX_INTERNAL_TRANSITIONS_PER_POLL {
             let state = std::mem::replace(&mut self.state, ConnectionState::Transitioning);
             match state {
@@ -909,26 +912,43 @@ impl Connection {
                     }
                 }
                 ConnectionState::Established { mut driver } => {
-                    let polled = driver.poll_step(cx, delivery);
-                    self.state = ConnectionState::Established { driver };
-                    match polled {
-                        Poll::Pending => return Poll::Pending,
+                    match driver.poll_step(cx, delivery) {
+                        Poll::Pending => {
+                            self.state = ConnectionState::Established { driver };
+                            return Poll::Pending;
+                        }
                         Poll::Ready(Ok(progress)) => {
                             match map_established_progress(self.connection, progress) {
-                                Ok(Some(event)) => return Poll::Ready(Ok(event)),
-                                Ok(None) => continue,
-                                Err(error) => return Poll::Ready(Err(error)),
+                                Ok(Some(event)) => {
+                                    self.state = ConnectionState::Established { driver };
+                                    return Poll::Ready(Ok(event));
+                                }
+                                Ok(None) => {
+                                    self.state = ConnectionState::Established { driver };
+                                    continue;
+                                }
+                                Err(error) => {
+                                    self.state = ConnectionState::EstablishedFailed { driver, error };
+                                    return Poll::Ready(Err(error));
+                                }
                             }
                         }
                         Poll::Ready(Err(error)) => {
                             let (event, public_error) = map_established_driver_error(error);
+                            self.state = ConnectionState::EstablishedFailed {
+                                driver,
+                                error: public_error,
+                            };
                             if let Some(event) = event {
-                                self.pending_error = Some(public_error);
                                 return Poll::Ready(Ok(event));
                             }
                             return Poll::Ready(Err(public_error));
                         }
                     }
+                }
+                ConnectionState::EstablishedFailed { driver, error } => {
+                    self.state = ConnectionState::EstablishedFailed { driver, error };
+                    return Poll::Ready(Err(error));
                 }
                 ConnectionState::EstablishedActivationFailed { established } => {
                     self.state = ConnectionState::EstablishedActivationFailed { established };
@@ -1031,7 +1051,10 @@ impl Connection {
             | ConnectionState::EstablishedActivationFailed { established } => {
                 established.teardown(manager, delivery).into()
             }
-            ConnectionState::Established { driver } => (*driver).teardown(manager, delivery).into(),
+            ConnectionState::Established { driver }
+            | ConnectionState::EstablishedFailed { driver, .. } => {
+                (*driver).teardown(manager, delivery).into()
+            }
             ConnectionState::Failed { core } => core.teardown(manager, delivery, false),
             ConnectionState::Transitioning => unreachable!("transition state never escapes a call"),
         }
@@ -1045,15 +1068,13 @@ impl Connection {
             connection,
             reliable_receive,
             state,
-            pending_error,
         } = self;
-        match (state, pending_error) {
-            (ConnectionState::Established { driver }, None) => Ok((*driver, reliable_receive)),
-            (state, pending_error) => Err(Box::new(Self {
+        match state {
+            ConnectionState::Established { driver } => Ok((*driver, reliable_receive)),
+            state => Err(Box::new(Self {
                 connection,
                 reliable_receive,
                 state,
-                pending_error,
             })),
         }
     }
