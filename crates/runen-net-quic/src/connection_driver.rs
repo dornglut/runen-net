@@ -151,6 +151,13 @@ pub(super) enum KeyedDatagramSubmitError {
     Driver(ConnectionDriverError),
 }
 
+#[derive(Debug)]
+pub(super) enum KeyedFinishError {
+    State(ConnectionDriverStateError),
+    UnknownFlow,
+    Driver(ConnectionDriverError),
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(super) enum OutboundFinishOutcome {
     Started,
@@ -374,6 +381,43 @@ impl EstablishedConnectionDriver {
         };
         self.start_prepared_send(pending)
             .map_err(InboundDecisionDriverError::Driver)
+    }
+
+    pub(super) fn request_outbound_finish_normal_by_key(
+        &mut self,
+        endpoint: &mut DeliveryEndpoint,
+        key: DeliveryFlowKey,
+        mode: DeliveryMode,
+    ) -> Result<OutboundFinishOutcome, KeyedFinishError> {
+        self.require_control_send_ready()
+            .map_err(KeyedFinishError::State)?;
+        match mode {
+            DeliveryMode::ReliableOrdered => {
+                let flow_id = self
+                    .reliable
+                    .outbound_flow_id(&self.flow_control, key)
+                    .ok_or(KeyedFinishError::UnknownFlow)?;
+                self.request_outbound_finish_normal(endpoint, flow_id)
+                    .map_err(KeyedFinishError::Driver)
+            }
+            DeliveryMode::UnreliableUnordered | DeliveryMode::UnreliableSequenced => {
+                let flow_id = self
+                    .datagram
+                    .outbound_flow_id(&self.flow_control, key)
+                    .ok_or(KeyedFinishError::UnknownFlow)?;
+                let pending = flow_driver::terminate_local(
+                    &mut self.flow_control,
+                    endpoint,
+                    flow_id,
+                    FlowTerminateReason::Normal,
+                )
+                .map_err(ConnectionDriverError::FailurePreparation)
+                .map_err(KeyedFinishError::Driver)?;
+                self.start_prepared_send(pending)
+                    .map_err(KeyedFinishError::Driver)?;
+                Ok(OutboundFinishOutcome::Started)
+            }
+        }
     }
 
     pub(super) fn request_outbound_finish_normal(
