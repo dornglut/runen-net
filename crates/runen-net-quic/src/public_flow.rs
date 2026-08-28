@@ -8,7 +8,6 @@ use runen_net::{
 };
 
 use crate::{
-    datagram::DatagramSubmissionOutcome,
     flow_control::InboundOpenRequest,
     wire::{FlowRejectReason, FlowTerminateReason},
 };
@@ -120,8 +119,10 @@ impl From<FlowTerminateReason> for FlowTerminationCause {
 
 /// Result of one public Core-keyed message submission.
 ///
-/// Reliable submissions use the Core acceptance result directly. Unreliable submissions
-/// additionally preserve the two accepted pre-accept QUIC DATAGRAM rejection classes.
+/// Core acceptance/rejection is preserved directly. Unreliable submission may additionally
+/// reject before Core acceptance when the current negotiated DATAGRAM size cannot carry the
+/// message. Loss of negotiated DATAGRAM capability is connection-terminal and is therefore
+/// reported through the connection error boundary, not as a submission outcome.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SubmitOutcome {
     Accepted {
@@ -131,7 +132,6 @@ pub enum SubmitOutcome {
     RejectedTooLarge,
     RejectedPressure,
     RejectedCounterExhausted,
-    RejectedTransportUnavailable,
     RejectedCurrentDatagramSize,
 }
 
@@ -148,29 +148,6 @@ impl From<SubmissionOutcome> for SubmitOutcome {
             SubmissionOutcome::RejectedTooLarge => Self::RejectedTooLarge,
             SubmissionOutcome::RejectedPressure => Self::RejectedPressure,
             SubmissionOutcome::RejectedCounterExhausted => Self::RejectedCounterExhausted,
-        }
-    }
-}
-
-impl From<DatagramSubmissionOutcome> for SubmitOutcome {
-    fn from(outcome: DatagramSubmissionOutcome) -> Self {
-        match outcome {
-            DatagramSubmissionOutcome::Accepted {
-                accepted_index,
-                local_pressure_drops,
-            } => Self::Accepted {
-                accepted_index,
-                local_pressure_drops,
-            },
-            DatagramSubmissionOutcome::RejectedTooLarge => Self::RejectedTooLarge,
-            DatagramSubmissionOutcome::RejectedPressure => Self::RejectedPressure,
-            DatagramSubmissionOutcome::RejectedCounterExhausted => Self::RejectedCounterExhausted,
-            DatagramSubmissionOutcome::RejectedTransportUnavailable => {
-                Self::RejectedTransportUnavailable
-            }
-            DatagramSubmissionOutcome::RejectedCurrentDatagramSize => {
-                Self::RejectedCurrentDatagramSize
-            }
         }
     }
 }
@@ -208,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn submit_outcomes_preserve_core_and_datagram_rejections() {
+    fn submit_outcomes_preserve_core_rejections() {
         assert_eq!(
             SubmitOutcome::from(SubmissionOutcome::Accepted {
                 accepted_index: 7,
@@ -220,12 +197,8 @@ mod tests {
             }
         );
         assert_eq!(
-            SubmitOutcome::from(DatagramSubmissionOutcome::RejectedTransportUnavailable),
-            SubmitOutcome::RejectedTransportUnavailable
-        );
-        assert_eq!(
-            SubmitOutcome::from(DatagramSubmissionOutcome::RejectedCurrentDatagramSize),
-            SubmitOutcome::RejectedCurrentDatagramSize
+            SubmitOutcome::from(SubmissionOutcome::RejectedPressure),
+            SubmitOutcome::RejectedPressure
         );
     }
 }
