@@ -1329,10 +1329,10 @@ fn established_teardown_handles_outstanding_request_and_active_flow_once() {
             assert_eq!(request.connection(), SERVER_CONNECTION);
             assert_eq!(client_host.delivery.active_flows(), 0);
             assert_eq!(server_host.delivery.active_flows(), 0);
-            let client_teardown = client_connection
-                .teardown(&mut client_host.negotiation, &mut client_host.delivery);
-            let server_teardown = server_connection
-                .teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            let client_teardown =
+                client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+            let server_teardown =
+                server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
             assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
             assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
             drop(request);
@@ -1358,10 +1358,10 @@ fn established_teardown_handles_outstanding_request_and_active_flow_once() {
             assert_eq!(client_host.delivery.active_flows(), 1);
             assert_eq!(server_host.delivery.active_flows(), 1);
 
-            let client_teardown = client_connection
-                .teardown(&mut client_host.negotiation, &mut client_host.delivery);
-            let server_teardown = server_connection
-                .teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            let client_teardown =
+                client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+            let server_teardown =
+                server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
             assert!(client_teardown.cleanup_error().is_none());
             assert!(server_teardown.cleanup_error().is_none());
             assert_eq!(client_teardown.flow_terminations().len(), 1);
