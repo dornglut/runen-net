@@ -281,7 +281,7 @@ A realization MAY re-enable PredictionActive from the already committed authorit
 
 ## Reconciliation outcomes
 
-A conforming realization MUST make at least these prediction/input outcomes distinguishable to its conformance or host-integration boundary:
+An implementation of this semantic area MUST make at least these prediction/input outcomes distinguishable to its host-integration or semantic-test boundary:
 
 Authority-side input outcomes:
 
@@ -379,7 +379,7 @@ Lag compensation, server rewind, deterministic lockstep, archival replay, and ch
 
 ## Required conformance cases
 
-A realization claiming this semantic area MUST be testable for at least the following cases:
+An implementation of this semantic area MUST be testable for at least the following cases:
 
 1. one accepted participant/tick batch is exposed to the authority host at most once despite a same-value duplicate;
 2. conflicting content for an already accepted participant/tick key is rejected without replacing the accepted batch;
