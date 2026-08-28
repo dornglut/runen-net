@@ -10,7 +10,7 @@ use quinn::Connection as QuinnConnection;
 use runen_net::{
     delivery::{
         DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
-        FlowTermination,
+        FlowTermination, ReceiveOutcome,
     },
     identity::ConnectionHandle,
     protocol::{
@@ -21,20 +21,25 @@ use runen_net::{
 use crate::{
     connection_driver::{
         ConnectionDriverError, ConnectionDriverStateError, DatagramSubmitOutcome,
-        EstablishedConnectionDriver, InboundDecisionDriverError, KeyedDatagramSubmitError,
-        KeyedFinishError, OutboundFinishOutcome,
+        EstablishedConnectionDriver, EstablishedConnectionProgress, InboundDecisionDriverError,
+        KeyedDatagramSubmitError, KeyedFinishError, OutboundFinishOutcome,
     },
     control::{
         ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
         ProfileReadyParts, Settings, ValidatedControlProfile,
     },
-    datagram::DatagramSubmissionOutcome,
+    datagram::{
+        DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress,
+        DatagramSubmissionOutcome,
+    },
+    datagram_driver::{DatagramIoError, DatagramOutboundProgress},
     endpoint::ConnectionSlotPermit,
     facade::{ProfileBootstrapFailure, ProfileReadyConnection},
     flow_control::{
         FlowControlError, InboundAdmission, InboundAdmissionError, OutboundOpenError,
         OutboundOpenRequest,
     },
+    flow_driver::FlowControlSendEffect,
     lifecycle::{
         AdmittedProfileReadyConnection, EstablishedNegotiatedConnection,
         close_for_post_profile_control_error, close_negotiation_failed,
@@ -44,11 +49,14 @@ use crate::{
         NegotiationControlError, NegotiationExchange, NegotiationOutcome, NegotiationProgress,
     },
     public_flow::{
-        FlowCommandError, FlowRejectionReason, InboundFlowConfig, IncomingFlowDecisionError,
-        IncomingFlowRequest, OutboundFlowConfig, SubmissionError, SubmitOutcome,
+        FlowCommandError, FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin,
+        InboundFlowConfig, IncomingFlowDecisionError, IncomingFlowRequest, OutboundFlowConfig,
+        SubmissionError, SubmitOutcome,
     },
-    quinn_binding::SendError,
-    reliable_driver::{ReliableIoError, ReliableIoStateError},
+    quinn_binding::{ReceiveError, ReceiveProgress, SendError, SendProgress},
+    reliable_driver::{
+        ActiveReliableProgress, ReliableIoError, ReliableIoStateError,
+    },
     wire::WireSide,
 };
 
@@ -121,6 +129,10 @@ pub enum ConnectionError {
     ManagerState,
     UnexpectedCoreState,
     EstablishedActivation,
+    EstablishedResource,
+    EstablishedProtocol,
+    EstablishedTransport,
+    EstablishedControl(ProfileBootstrapFailure),
     State(ConnectionStateError),
 }
 
@@ -135,12 +147,56 @@ impl fmt::Display for ConnectionError {
 
 impl std::error::Error for ConnectionError {}
 
-/// Public connection progress that requires host observation or action.
-#[non_exhaustive]
+/// Why an unreliable inbound payload was observably dropped before application exposure.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum UnreliableReceiveDropReason {
+    Pressure { local_pressure_drops: usize },
+    TooLarge,
+    StaleSequenced,
+}
+
+/// Public connection progress that requires host observation or action.
+///
+/// This event is intentionally move-only because incoming admission owns a one-shot request
+/// capability. Transport-local flow identifiers and progress never cross this boundary.
+#[non_exhaustive]
+#[derive(Debug)]
 pub enum ConnectionEvent {
-    AuthoritySelectionRequired { connection: ConnectionHandle },
-    Established { connection: ConnectionHandle },
+    AuthoritySelectionRequired {
+        connection: ConnectionHandle,
+    },
+    Established {
+        connection: ConnectionHandle,
+    },
+    IncomingFlowRequested {
+        request: IncomingFlowRequest,
+    },
+    OutboundFlowEstablished {
+        key: DeliveryFlowKey,
+    },
+    OutboundFlowRejected {
+        key: DeliveryFlowKey,
+        reason: FlowRejectionReason,
+    },
+    DataReady {
+        key: DeliveryFlowKey,
+        buffered_messages: usize,
+        local_pressure_drops: usize,
+    },
+    UnreliableReceiveDropped {
+        key: DeliveryFlowKey,
+        reason: UnreliableReceiveDropReason,
+    },
+    UnreliableTransportDropped {
+        key: DeliveryFlowKey,
+        accepted_index: u64,
+    },
+    FlowTerminated {
+        key: DeliveryFlowKey,
+        origin: FlowTerminationOrigin,
+        cause: FlowTerminationCause,
+        termination: Option<FlowTermination>,
+    },
 }
 
 /// Categorized cleanup failure returned by consuming connection teardown.
@@ -332,6 +388,7 @@ pub struct Connection {
     connection: ConnectionHandle,
     reliable_receive: ReliableReceiveLimits,
     state: ConnectionState,
+    pending_error: Option<ConnectionError>,
 }
 
 impl fmt::Debug for Connection {
@@ -341,6 +398,7 @@ impl fmt::Debug for Connection {
             .field("connection", &self.connection)
             .field("reliable_receive", &self.reliable_receive)
             .field("state", &self.state)
+            .field("pending_error", &self.pending_error)
             .finish()
     }
 }
@@ -408,6 +466,7 @@ impl Connection {
             connection,
             reliable_receive,
             state,
+            pending_error: None,
         })
     }
 
@@ -706,13 +765,18 @@ impl Connection {
 
     /// Drive at most a finite amount of post-ProfileReady connection work.
     ///
-    /// Aggregate Core authorities are borrowed only for this synchronous call.
+    /// Aggregate Core authorities are borrowed only for this synchronous call. Private transport
+    /// progress is consumed internally; at most one durable application event or error is returned.
     pub fn poll(
         &mut self,
         cx: &mut Context<'_>,
         manager: &mut NegotiationManager,
-        _delivery: &mut DeliveryEndpoint,
+        delivery: &mut DeliveryEndpoint,
     ) -> Poll<Result<ConnectionEvent, ConnectionError>> {
+        if let Some(error) = self.pending_error.take() {
+            return Poll::Ready(Err(error));
+        }
+
         for _ in 0..MAX_INTERNAL_TRANSITIONS_PER_POLL {
             let state = std::mem::replace(&mut self.state, ConnectionState::Transitioning);
             match state {
@@ -847,9 +911,27 @@ impl Connection {
                         }
                     }
                 }
-                ConnectionState::Established { driver } => {
+                ConnectionState::Established { mut driver } => {
+                    let polled = driver.poll_step(cx, delivery);
                     self.state = ConnectionState::Established { driver };
-                    return Poll::Pending;
+                    match polled {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Ok(progress)) => {
+                            match map_established_progress(self.connection, progress) {
+                                Ok(Some(event)) => return Poll::Ready(Ok(event)),
+                                Ok(None) => continue,
+                                Err(error) => return Poll::Ready(Err(error)),
+                            }
+                        }
+                        Poll::Ready(Err(error)) => {
+                            let (event, public_error) = map_established_driver_error(error);
+                            if let Some(event) = event {
+                                self.pending_error = Some(public_error);
+                                return Poll::Ready(Ok(event));
+                            }
+                            return Poll::Ready(Err(public_error));
+                        }
+                    }
                 }
                 ConnectionState::EstablishedActivationFailed { established } => {
                     self.state = ConnectionState::EstablishedActivationFailed { established };
@@ -966,13 +1048,15 @@ impl Connection {
             connection,
             reliable_receive,
             state,
+            pending_error,
         } = self;
-        match state {
-            ConnectionState::Established { driver } => Ok((*driver, reliable_receive)),
-            state => Err(Box::new(Self {
+        match (state, pending_error) {
+            (ConnectionState::Established { driver }, None) => Ok((*driver, reliable_receive)),
+            (state, pending_error) => Err(Box::new(Self {
                 connection,
                 reliable_receive,
                 state,
+                pending_error,
             })),
         }
     }
@@ -1104,6 +1188,233 @@ fn map_datagram_submit_outcome(
             }
         },
         DatagramSubmitOutcome::FlowFailureHandled { .. } => Err(FlowCommandError::FlowTerminated),
+    }
+}
+
+fn map_established_progress(
+    connection: ConnectionHandle,
+    progress: EstablishedConnectionProgress,
+) -> Result<Option<ConnectionEvent>, ConnectionError> {
+    let event = match progress {
+        EstablishedConnectionProgress::ControlSendStarted => None,
+        EstablishedConnectionProgress::ControlSendCompleted(effect) => {
+            map_control_send_effect(effect)
+        }
+        EstablishedConnectionProgress::InboundOpen(inner) => {
+            Some(ConnectionEvent::IncomingFlowRequested {
+                request: IncomingFlowRequest { connection, inner },
+            })
+        }
+        EstablishedConnectionProgress::OutboundEstablished(flow) => {
+            Some(ConnectionEvent::OutboundFlowEstablished { key: flow.key() })
+        }
+        EstablishedConnectionProgress::OutboundRejected { key, reason, .. } => {
+            Some(ConnectionEvent::OutboundFlowRejected {
+                key,
+                reason: reason.into(),
+            })
+        }
+        EstablishedConnectionProgress::RemoteTerminated {
+            flow,
+            reason,
+            termination,
+        } => Some(flow_terminated_event(
+            flow.key(),
+            FlowTerminationOrigin::Remote,
+            reason.into(),
+            Some(termination),
+        )),
+        EstablishedConnectionProgress::ReliableOutboundAcquisition(_)
+        | EstablishedConnectionProgress::ReliableInboundAcquired => None,
+        EstablishedConnectionProgress::Reliable(progress) => match progress {
+            ActiveReliableProgress::Outbound {
+                progress: SendProgress::Closed { termination },
+                ..
+            } => Some(flow_terminated_event(
+                termination.key,
+                FlowTerminationOrigin::Local,
+                FlowTerminationCause::Normal,
+                Some(termination),
+            )),
+            ActiveReliableProgress::Outbound { .. } => None,
+            ActiveReliableProgress::Inbound(ReceiveProgress::MessagesBuffered { key, count }) => {
+                Some(ConnectionEvent::DataReady {
+                    key,
+                    buffered_messages: count,
+                    local_pressure_drops: 0,
+                })
+            }
+            ActiveReliableProgress::Inbound(ReceiveProgress::Closed {
+                key,
+                termination: Some(termination),
+            }) => Some(flow_terminated_event(
+                key,
+                FlowTerminationOrigin::Remote,
+                FlowTerminationCause::Normal,
+                Some(termination),
+            )),
+            ActiveReliableProgress::Inbound(
+                ReceiveProgress::Progressed { .. }
+                | ReceiveProgress::Associated { .. }
+                | ReceiveProgress::Draining { .. }
+                | ReceiveProgress::Closed {
+                    termination: None, ..
+                },
+            ) => None,
+        },
+        EstablishedConnectionProgress::DatagramOutbound(progress) => match progress {
+            DatagramOutboundProgress::Cancelled { .. } => None,
+            DatagramOutboundProgress::Driven {
+                key,
+                progress: DatagramSendProgress::DroppedTransport { accepted_index },
+                ..
+            } => Some(ConnectionEvent::UnreliableTransportDropped {
+                key,
+                accepted_index,
+            }),
+            DatagramOutboundProgress::Driven { .. } => None,
+        },
+        EstablishedConnectionProgress::DatagramInbound(outcome) => match outcome {
+            DatagramReceiveOutcome::DiscardedUnknownFlow => None,
+            DatagramReceiveOutcome::Core { key, outcome } => match outcome {
+                ReceiveOutcome::Buffered {
+                    local_pressure_drops,
+                } => Some(ConnectionEvent::DataReady {
+                    key,
+                    buffered_messages: 1,
+                    local_pressure_drops,
+                }),
+                ReceiveOutcome::DroppedByPressure {
+                    local_pressure_drops,
+                } => Some(ConnectionEvent::UnreliableReceiveDropped {
+                    key,
+                    reason: UnreliableReceiveDropReason::Pressure {
+                        local_pressure_drops,
+                    },
+                }),
+                ReceiveOutcome::DroppedTooLarge => Some(ConnectionEvent::UnreliableReceiveDropped {
+                    key,
+                    reason: UnreliableReceiveDropReason::TooLarge,
+                }),
+                ReceiveOutcome::StaleSequenced => {
+                    Some(ConnectionEvent::UnreliableReceiveDropped {
+                        key,
+                        reason: UnreliableReceiveDropReason::StaleSequenced,
+                    })
+                }
+                ReceiveOutcome::DuplicateReliable
+                | ReceiveOutcome::RejectedModeMismatch
+                | ReceiveOutcome::TerminalReliableFailure => {
+                    return Err(ConnectionError::UnexpectedCoreState);
+                }
+            },
+        },
+        EstablishedConnectionProgress::FlowFailureHandled { .. } => None,
+    };
+    Ok(event)
+}
+
+fn map_control_send_effect(effect: FlowControlSendEffect) -> Option<ConnectionEvent> {
+    match effect {
+        FlowControlSendEffect::OutboundFailedAfterAccept {
+            key,
+            reason,
+            termination,
+            ..
+        }
+        | FlowControlSendEffect::ReportOnlyTermination {
+            key,
+            reason,
+            termination,
+            ..
+        } => Some(flow_terminated_event(
+            key,
+            FlowTerminationOrigin::Local,
+            reason.into(),
+            termination,
+        )),
+        FlowControlSendEffect::LocalTerminated {
+            flow,
+            reason,
+            termination,
+        } => Some(flow_terminated_event(
+            flow.key(),
+            FlowTerminationOrigin::Local,
+            reason.into(),
+            Some(termination),
+        )),
+        FlowControlSendEffect::OutboundOpenPrepared(_)
+        | FlowControlSendEffect::InboundRejected { .. }
+        | FlowControlSendEffect::InboundAccepted(_) => None,
+    }
+}
+
+const fn flow_terminated_event(
+    key: DeliveryFlowKey,
+    origin: FlowTerminationOrigin,
+    cause: FlowTerminationCause,
+    termination: Option<FlowTermination>,
+) -> ConnectionEvent {
+    ConnectionEvent::FlowTerminated {
+        key,
+        origin,
+        cause,
+        termination,
+    }
+}
+
+fn map_established_driver_error(
+    error: ConnectionDriverError,
+) -> (Option<ConnectionEvent>, ConnectionError) {
+    match error {
+        ConnectionDriverError::ControlSend(error) => {
+            let error = *error;
+            let public_error = ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(
+                &error.error,
+            ));
+            (map_control_send_effect(error.effect), public_error)
+        }
+        ConnectionDriverError::ControlReceive(error) => (
+            None,
+            ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(&error)),
+        ),
+        ConnectionDriverError::State(ConnectionDriverStateError::Terminal) => (
+            None,
+            ConnectionError::State(ConnectionStateError::Terminal),
+        ),
+        ConnectionDriverError::Reliable(ReliableIoError::Allocation(_))
+        | ConnectionDriverError::Reliable(ReliableIoError::State(
+            ReliableIoStateError::CapacityOverflow,
+        ))
+        | ConnectionDriverError::Reliable(ReliableIoError::InboundConstruction(
+            ReceiveError::AllocationFailed,
+        ))
+        | ConnectionDriverError::Datagram(DatagramIoError::Allocation(_))
+        | ConnectionDriverError::ReceivedFlowControl(FlowControlError::Allocation(_))
+        | ConnectionDriverError::FailurePreparation(FlowControlError::Allocation(_)) => {
+            (None, ConnectionError::EstablishedResource)
+        }
+        ConnectionDriverError::Reliable(ReliableIoError::Connection(_))
+        | ConnectionDriverError::Datagram(DatagramIoError::Connection(_))
+        | ConnectionDriverError::Datagram(DatagramIoError::Send {
+            error: DatagramSendError::ProfileUnavailable | DatagramSendError::ConnectionLost,
+            ..
+        })
+        | ConnectionDriverError::DatagramProfileUnavailable => {
+            (None, ConnectionError::EstablishedTransport)
+        }
+        ConnectionDriverError::State(ConnectionDriverStateError::ControlSendBusy)
+        | ConnectionDriverError::OutboundOpen(_)
+        | ConnectionDriverError::InboundAdmission(_)
+        | ConnectionDriverError::DatagramSubmission(_) => {
+            (None, ConnectionError::UnexpectedCoreState)
+        }
+        ConnectionDriverError::ReceivedFlowControl(_)
+        | ConnectionDriverError::Reliable(_)
+        | ConnectionDriverError::Datagram(_)
+        | ConnectionDriverError::FailurePreparation(_) => {
+            (None, ConnectionError::EstablishedProtocol)
+        }
     }
 }
 
@@ -1318,9 +1629,30 @@ const fn controller_send_disposition(frame_type: ControlFrameType) -> PendingSen
 
 #[cfg(test)]
 mod tests {
+    use runen_net::delivery::{
+        DeliveryFlowHandle, FlowTerminationReason as CoreFlowTerminationReason,
+    };
+
     use super::*;
 
     fn assert_owned_send<T: Send + 'static>() {}
+
+    fn key(direction: FlowDirection, handle: u64) -> DeliveryFlowKey {
+        DeliveryFlowKey::new(
+            ConnectionHandle::new(1),
+            direction,
+            DeliveryFlowHandle::new(handle),
+        )
+    }
+
+    fn termination(key: DeliveryFlowKey) -> FlowTermination {
+        FlowTermination {
+            key,
+            reason: CoreFlowTerminationReason::ReliableCustodyLost,
+            pending_messages: 1,
+            reliable_obligation_failed: true,
+        }
+    }
 
     #[test]
     fn negotiation_transport_futures_are_owned_and_send() {
@@ -1390,5 +1722,85 @@ mod tests {
             )),
             FlowCommandError::FlowTerminated
         );
+    }
+
+    #[test]
+    fn established_progress_projects_core_keyed_data_and_drop_events() {
+        let inbound = key(FlowDirection::Inbound, 9);
+        let data = map_established_progress(
+            ConnectionHandle::new(1),
+            EstablishedConnectionProgress::Reliable(ActiveReliableProgress::Inbound(
+                ReceiveProgress::MessagesBuffered {
+                    key: inbound,
+                    count: 3,
+                },
+            )),
+        )
+        .unwrap()
+        .unwrap();
+        match data {
+            ConnectionEvent::DataReady {
+                key,
+                buffered_messages,
+                local_pressure_drops,
+            } => {
+                assert_eq!(key, inbound);
+                assert_eq!(buffered_messages, 3);
+                assert_eq!(local_pressure_drops, 0);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+
+        let dropped = map_established_progress(
+            ConnectionHandle::new(1),
+            EstablishedConnectionProgress::DatagramInbound(DatagramReceiveOutcome::Core {
+                key: inbound,
+                outcome: ReceiveOutcome::DroppedByPressure {
+                    local_pressure_drops: 2,
+                },
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        match dropped {
+            ConnectionEvent::UnreliableReceiveDropped {
+                key,
+                reason: UnreliableReceiveDropReason::Pressure {
+                    local_pressure_drops,
+                },
+            } => {
+                assert_eq!(key, inbound);
+                assert_eq!(local_pressure_drops, 2);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+    }
+
+    #[test]
+    fn control_report_effect_preserves_local_termination_evidence() {
+        let key = key(FlowDirection::Outbound, 10);
+        let termination = termination(key);
+        let event = map_control_send_effect(FlowControlSendEffect::ReportOnlyTermination {
+            flow_id: crate::wire::FlowId::new(WireSide::Client, 0).unwrap(),
+            key,
+            reason: crate::wire::FlowTerminateReason::ReliableDeliveryFailure,
+            termination: Some(termination),
+        })
+        .unwrap();
+
+        match event {
+            ConnectionEvent::FlowTerminated {
+                key: event_key,
+                origin,
+                cause,
+                termination: Some(event_termination),
+            } => {
+                assert_eq!(event_key, key);
+                assert_eq!(origin, FlowTerminationOrigin::Local);
+                assert_eq!(cause, FlowTerminationCause::ReliableDeliveryFailure);
+                assert_eq!(event_termination, termination);
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 }
