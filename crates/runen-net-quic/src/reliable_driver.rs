@@ -9,9 +9,7 @@ use std::{
 
 use quinn::{Connection, ConnectionError, RecvStream, SendStream};
 use runen_net::{
-    delivery::{
-        DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowDirection, FlowTermination,
-    },
+    delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowDirection, FlowTermination},
     protocol::NegotiationManager,
 };
 
@@ -391,12 +389,8 @@ impl ReliableConnectionIo {
                     let termination = self.active_outbound[index]
                         .binding
                         .take_failure_termination();
-                    let context = resolved_failure_context(
-                        flow_id,
-                        key,
-                        registered_before,
-                        termination,
-                    );
+                    let context =
+                        resolved_failure_context(flow_id, key, registered_before, termination);
                     let _ = self.active_outbound.swap_remove(index);
                     self.outbound_cursor = cursor_after_remove(index, self.active_outbound.len());
                     return Poll::Ready(Err(ReliableIoError::OutboundActiveBinding {
@@ -693,7 +687,14 @@ mod tests {
             ReliableFailureContext::Unresolved
         );
         assert_eq!(
-            inbound_failure_context(None, None, false, Some(flow_id), Some(key), Some(termination)),
+            inbound_failure_context(
+                None,
+                None,
+                false,
+                Some(flow_id),
+                Some(key),
+                Some(termination)
+            ),
             ReliableFailureContext::ResolvedReportable {
                 flow_id,
                 key,
