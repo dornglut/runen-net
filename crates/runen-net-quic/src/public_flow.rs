@@ -34,22 +34,11 @@ pub struct OutboundFlowConfig {
 /// accidentally applied to another connection with coincident transport-local state.
 #[derive(Debug, PartialEq, Eq)]
 pub struct IncomingFlowRequest {
-    connection: ConnectionHandle,
-    inner: InboundOpenRequest,
+    pub(super) connection: ConnectionHandle,
+    pub(super) inner: InboundOpenRequest,
 }
 
 impl IncomingFlowRequest {
-    pub(super) const fn from_inner(
-        connection: ConnectionHandle,
-        inner: InboundOpenRequest,
-    ) -> Self {
-        Self { connection, inner }
-    }
-
-    pub(super) fn into_inner(self) -> InboundOpenRequest {
-        self.inner
-    }
-
     pub const fn connection(&self) -> ConnectionHandle {
         self.connection
     }
