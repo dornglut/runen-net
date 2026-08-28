@@ -22,10 +22,11 @@ use runen_net::{
 };
 use runen_net_quic::{
     CertificateDer, ClientEndpoint, ClientTrust, Connection, ConnectionError, ConnectionEvent,
-    ConnectionStateError, EndpointConfig, EndpointResourceLimits, FlowTerminationCause,
-    FlowTerminationOrigin, InboundFlowConfig, NegotiationFailure, NegotiationReportStatus,
-    OutboundFlowConfig, PrivateKeyDer, ProfileConfig, ProfileLimits, ProfileReadyConnection,
-    ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity, SubmitOutcome,
+    ConnectionStateError, EndpointConfig, EndpointResourceLimits, FlowCommandError,
+    FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin, InboundFlowConfig,
+    NegotiationFailure, NegotiationReportStatus, OutboundFlowConfig, PrivateKeyDer, ProfileConfig,
+    ProfileLimits, ProfileReadyConnection, ReliableReceiveLimits, SemanticRole, ServerEndpoint,
+    ServerIdentity, SubmitOutcome,
 };
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use tokio::runtime::Builder;
@@ -77,6 +78,16 @@ fn public_unreliable_modes_use_core_keys_for_data_and_normal_finish() {
         tokio::time::timeout(SCENARIO_TIMEOUT, run_public_unreliable_flows())
             .await
             .expect("public RN6D unreliable-flow scenarios timed out");
+    });
+}
+
+#[test]
+fn public_incoming_capability_is_connection_scoped_and_rejections_round_trip() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, run_public_admission_contracts())
+            .await
+            .expect("public RN6D admission-contract scenario timed out");
     });
 }
 
@@ -375,6 +386,191 @@ async fn run_public_unreliable_flows() {
         assert!(server_host.delivery.flow_contract(inbound).is_none());
     }
 
+    let client_teardown =
+        client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+    let server_teardown =
+        server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
+    assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
+    assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
+
+    client.close();
+    server.close();
+    join2(client.wait_idle(), server.wait_idle()).await;
+}
+
+async fn run_public_admission_contracts() {
+    let config = resource_limits(2).validate().unwrap();
+    let (client, server) = endpoints(config);
+    let mut client_host = new_host();
+    let mut server_host = new_host();
+    let (mut client_connection, mut server_connection) = establish_public_connection_pair(
+        &client,
+        &server,
+        config,
+        &mut client_host,
+        &mut server_host,
+    )
+    .await;
+
+    let outbound = DeliveryFlowKey::new(
+        CLIENT_CONNECTION,
+        FlowDirection::Outbound,
+        DeliveryFlowHandle::new(20),
+    );
+    let inbound = DeliveryFlowKey::new(
+        SERVER_CONNECTION,
+        FlowDirection::Inbound,
+        DeliveryFlowHandle::new(120),
+    );
+    client_connection
+        .open_outbound_flow(
+            &client_host.delivery,
+            OutboundFlowConfig {
+                key: outbound,
+                mode: DeliveryMode::ReliableOrdered,
+                policy: flow_policy(DeliveryMode::ReliableOrdered),
+                connection_limits: flow_connection_limits(),
+                stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
+            },
+        )
+        .unwrap();
+    let request = loop {
+        let (client_event, server_event) = next_public_pair_event(
+            &mut client_connection,
+            &mut client_host,
+            &mut server_connection,
+            &mut server_host,
+        )
+        .await;
+        assert!(client_event.is_none());
+        match server_event {
+            Some(ConnectionEvent::IncomingFlowRequested { request }) => break request,
+            Some(event) => panic!("unexpected admission request event: {event:?}"),
+            None => {}
+        }
+    };
+    assert_eq!(request.connection(), SERVER_CONNECTION);
+    let wrong_connection = client_connection
+        .accept_incoming_flow(
+            &mut client_host.delivery,
+            request,
+            InboundFlowConfig {
+                key: inbound,
+                policy: flow_policy(DeliveryMode::ReliableOrdered),
+                connection_limits: flow_connection_limits(),
+            },
+        )
+        .expect_err("incoming capability was accepted by the wrong public connection");
+    assert_eq!(wrong_connection.reason(), FlowCommandError::WrongConnection);
+    let request = wrong_connection
+        .into_request()
+        .expect("wrong-connection admission consumed a retryable incoming capability");
+    assert_eq!(request.connection(), SERVER_CONNECTION);
+    server_connection
+        .accept_incoming_flow(
+            &mut server_host.delivery,
+            request,
+            InboundFlowConfig {
+                key: inbound,
+                policy: flow_policy(DeliveryMode::ReliableOrdered),
+                connection_limits: flow_connection_limits(),
+            },
+        )
+        .unwrap();
+    loop {
+        let (client_event, server_event) = next_public_pair_event(
+            &mut client_connection,
+            &mut client_host,
+            &mut server_connection,
+            &mut server_host,
+        )
+        .await;
+        assert!(server_event.is_none());
+        match client_event {
+            Some(ConnectionEvent::OutboundFlowEstablished { key }) => {
+                assert_eq!(key, outbound);
+                break;
+            }
+            Some(event) => panic!("unexpected post-retry establishment event: {event:?}"),
+            None => {}
+        }
+    }
+    finish_and_expect_normal_termination(
+        &mut client_connection,
+        &mut client_host,
+        &mut server_connection,
+        &mut server_host,
+        outbound,
+        inbound,
+    )
+    .await;
+
+    for (handle, reason) in [
+        (21, FlowRejectionReason::ResourceLimit),
+        (22, FlowRejectionReason::MessageLimit),
+    ] {
+        let outbound = DeliveryFlowKey::new(
+            CLIENT_CONNECTION,
+            FlowDirection::Outbound,
+            DeliveryFlowHandle::new(handle),
+        );
+        client_connection
+            .open_outbound_flow(
+                &client_host.delivery,
+                OutboundFlowConfig {
+                    key: outbound,
+                    mode: DeliveryMode::ReliableOrdered,
+                    policy: flow_policy(DeliveryMode::ReliableOrdered),
+                    connection_limits: flow_connection_limits(),
+                    stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
+                },
+            )
+            .unwrap();
+        let request = loop {
+            let (client_event, server_event) = next_public_pair_event(
+                &mut client_connection,
+                &mut client_host,
+                &mut server_connection,
+                &mut server_host,
+            )
+            .await;
+            assert!(client_event.is_none());
+            match server_event {
+                Some(ConnectionEvent::IncomingFlowRequested { request }) => break request,
+                Some(event) => panic!("unexpected rejection request event: {event:?}"),
+                None => {}
+            }
+        };
+        server_connection
+            .reject_incoming_flow(request, reason)
+            .unwrap();
+        loop {
+            let (client_event, server_event) = next_public_pair_event(
+                &mut client_connection,
+                &mut client_host,
+                &mut server_connection,
+                &mut server_host,
+            )
+            .await;
+            assert!(server_event.is_none());
+            match client_event {
+                Some(ConnectionEvent::OutboundFlowRejected {
+                    key,
+                    reason: observed,
+                }) => {
+                    assert_eq!(key, outbound);
+                    assert_eq!(observed, reason);
+                    break;
+                }
+                Some(event) => panic!("unexpected rejection result event: {event:?}"),
+                None => {}
+            }
+        }
+        assert!(client_host.delivery.flow_contract(outbound).is_none());
+    }
+
+    assert_eq!(client_host.delivery.active_flows(), 0);
+    assert_eq!(server_host.delivery.active_flows(), 0);
     let client_teardown =
         client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
     let server_teardown =
