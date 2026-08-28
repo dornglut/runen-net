@@ -45,6 +45,7 @@ pub(super) enum DatagramOutboundProgress {
     },
     Driven {
         flow_id: FlowId,
+        key: DeliveryFlowKey,
         progress: DatagramSendProgress,
     },
 }
@@ -170,6 +171,11 @@ impl DatagramConnectionIo {
                 self.outbound_cursor = normalize_cursor(index, self.outbound.len());
                 return Ok(Some(DatagramOutboundProgress::Cancelled { flow_id }));
             }
+            let key = flow_control
+                .registry()
+                .registered_flow(flow_id)
+                .expect("outbound DATAGRAM liveness was checked above")
+                .key();
 
             match self
                 .sender
@@ -178,7 +184,11 @@ impl DatagramConnectionIo {
                 Ok(DatagramSendProgress::Idle) => {}
                 Ok(progress) => {
                     self.outbound_cursor = (index + 1) % len;
-                    return Ok(Some(DatagramOutboundProgress::Driven { flow_id, progress }));
+                    return Ok(Some(DatagramOutboundProgress::Driven {
+                        flow_id,
+                        key,
+                        progress,
+                    }));
                 }
                 Err(error) => {
                     self.outbound_cursor = (index + 1) % len;
