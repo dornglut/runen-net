@@ -1,4 +1,4 @@
-use std::num::NonZeroUsize;
+use std::{fmt, num::NonZeroUsize};
 
 use runen_net::{
     delivery::{
@@ -32,10 +32,20 @@ pub struct OutboundFlowConfig {
 /// The private wire flow identity never crosses this boundary. The host-visible
 /// connection identity is retained so a request from one connection cannot be
 /// accidentally applied to another connection with coincident transport-local state.
-#[derive(Debug, PartialEq, Eq)]
 pub struct IncomingFlowRequest {
     pub(super) connection: ConnectionHandle,
     pub(super) inner: InboundOpenRequest,
+}
+
+impl fmt::Debug for IncomingFlowRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IncomingFlowRequest")
+            .field("connection", &self.connection)
+            .field("mode", &self.mode())
+            .field("max_message_bytes", &self.max_message_bytes())
+            .finish()
+    }
 }
 
 impl IncomingFlowRequest {
