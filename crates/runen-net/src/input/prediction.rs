@@ -1,0 +1,307 @@
+use std::collections::BTreeMap;
+
+use crate::identity::SimulationTick;
+use crate::replication::{
+    ClientLineage, ClientRecoveryReason, ClientReplicationSet, ClientReplicationState,
+    ClientSetError, ClientSnapshotOutcome, ReplicationLineageKey,
+};
+
+use super::model::PredictionLimits;
+
+#[derive(Debug, Clone)]
+struct PendingInput<I> {
+    value: I,
+    accounted_bytes: usize,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PredictionInvalidationReason {
+    InitialBaseline,
+    ReplicationRecovery(ClientRecoveryReason),
+    ConnectionLoss,
+    ReplayFailure,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PredictionState {
+    Active {
+        frontier: SimulationTick,
+    },
+    Invalidated {
+        reason: PredictionInvalidationReason,
+        frontier: Option<SimulationTick>,
+    },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PredictionInputOutcome {
+    InputAccepted,
+    DuplicateInput,
+    ConflictingInput,
+    PredictionInputNotNewerThanFrontier,
+    PendingPredictionResourceRejected,
+    PredictionInvalidated(PredictionInvalidationReason),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PredictionReconciliationOutcome {
+    NoAuthoritativeCommit,
+    ActivatedFromAuthoritative {
+        frontier: SimulationTick,
+    },
+    ReconciledNoReplay {
+        frontier: SimulationTick,
+    },
+    ReconciledReplay {
+        frontier: SimulationTick,
+        replayed: usize,
+    },
+    InvalidatedByRecovery {
+        reason: ClientRecoveryReason,
+    },
+}
+
+#[derive(Debug)]
+pub enum PredictionReconciliationError<E> {
+    LineageMismatch,
+    CommittedCursorMismatch,
+    MissingCommittedTick,
+    FrontierRegression,
+    AccountingInvariantViolation,
+    ReplayFailed { tick: SimulationTick, source: E },
+}
+
+#[derive(Debug)]
+pub struct PredictionLineage<I> {
+    key: ReplicationLineageKey,
+    limits: PredictionLimits,
+    state: PredictionState,
+    pending: BTreeMap<SimulationTick, PendingInput<I>>,
+    pending_bytes: usize,
+}
+
+impl<I> PredictionLineage<I> {
+    pub fn new(key: ReplicationLineageKey, limits: PredictionLimits) -> Self {
+        Self {
+            key,
+            limits,
+            state: PredictionState::Invalidated {
+                reason: PredictionInvalidationReason::InitialBaseline,
+                frontier: None,
+            },
+            pending: BTreeMap::new(),
+            pending_bytes: 0,
+        }
+    }
+
+    pub const fn key(&self) -> ReplicationLineageKey {
+        self.key
+    }
+
+    pub const fn state(&self) -> PredictionState {
+        self.state
+    }
+
+    pub const fn frontier(&self) -> Option<SimulationTick> {
+        match self.state {
+            PredictionState::Active { frontier } => Some(frontier),
+            PredictionState::Invalidated { frontier, .. } => frontier,
+        }
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
+    }
+
+    pub const fn pending_bytes(&self) -> usize {
+        self.pending_bytes
+    }
+
+    pub fn pending_input(&self, tick: SimulationTick) -> Option<&I> {
+        self.pending.get(&tick).map(|pending| &pending.value)
+    }
+
+    pub fn admit_local(
+        &mut self,
+        target_tick: SimulationTick,
+        input: &I,
+        accounted_bytes: usize,
+    ) -> PredictionInputOutcome
+    where
+        I: Clone + Eq,
+    {
+        let frontier = match self.state {
+            PredictionState::Active { frontier } => frontier,
+            PredictionState::Invalidated { reason, .. } => {
+                return PredictionInputOutcome::PredictionInvalidated(reason);
+            }
+        };
+
+        if target_tick <= frontier {
+            return PredictionInputOutcome::PredictionInputNotNewerThanFrontier;
+        }
+        if let Some(pending) = self.pending.get(&target_tick) {
+            return if pending.value == *input {
+                PredictionInputOutcome::DuplicateInput
+            } else {
+                PredictionInputOutcome::ConflictingInput
+            };
+        }
+
+        let future_distance = target_tick.get() - frontier.get();
+        if future_distance > self.limits.max_future_tick_distance()
+            || accounted_bytes > self.limits.max_pending_bytes()
+            || self.pending.len() >= self.limits.max_pending_inputs()
+        {
+            return PredictionInputOutcome::PendingPredictionResourceRejected;
+        }
+        let Some(next_pending_bytes) = self.pending_bytes.checked_add(accounted_bytes) else {
+            return PredictionInputOutcome::PendingPredictionResourceRejected;
+        };
+        if next_pending_bytes > self.limits.max_pending_bytes() {
+            return PredictionInputOutcome::PendingPredictionResourceRejected;
+        }
+
+        let previous = self.pending.insert(
+            target_tick,
+            PendingInput {
+                value: input.clone(),
+                accounted_bytes,
+            },
+        );
+        debug_assert!(previous.is_none());
+        self.pending_bytes = next_pending_bytes;
+        PredictionInputOutcome::InputAccepted
+    }
+
+    pub fn connection_lost(&mut self) {
+        self.invalidate(PredictionInvalidationReason::ConnectionLoss);
+    }
+
+    pub fn invalidate_for_recovery(&mut self, reason: ClientRecoveryReason) {
+        self.invalidate(PredictionInvalidationReason::ReplicationRecovery(reason));
+    }
+
+    pub fn require_connection_replacement_full<S>(
+        &mut self,
+        replication: &mut ClientReplicationSet<S>,
+    ) -> Result<(), ClientSetError> {
+        replication.require_connection_replacement_full(self.key)?;
+        self.invalidate_for_recovery(ClientRecoveryReason::ConnectionReplacement);
+        Ok(())
+    }
+
+    pub fn observe_replication<S, E, F>(
+        &mut self,
+        outcome: ClientSnapshotOutcome,
+        lineage: &ClientLineage<S>,
+        replay: F,
+    ) -> Result<PredictionReconciliationOutcome, PredictionReconciliationError<E>>
+    where
+        F: FnMut(SimulationTick, &I) -> Result<(), E>,
+    {
+        if lineage.key() != self.key {
+            return Err(PredictionReconciliationError::LineageMismatch);
+        }
+
+        if let ClientSnapshotOutcome::Committed(cursor) = outcome {
+            if lineage.current_cursor() != Some(cursor) {
+                return Err(PredictionReconciliationError::CommittedCursorMismatch);
+            }
+            let tick = lineage
+                .current_tick()
+                .ok_or(PredictionReconciliationError::MissingCommittedTick)?;
+            return self.reconcile_committed(tick, replay);
+        }
+
+        if let ClientReplicationState::FullSnapshotRequired(reason) = lineage.replication_state() {
+            self.invalidate_for_recovery(reason);
+            return Ok(PredictionReconciliationOutcome::InvalidatedByRecovery { reason });
+        }
+
+        Ok(PredictionReconciliationOutcome::NoAuthoritativeCommit)
+    }
+
+    fn reconcile_committed<E, F>(
+        &mut self,
+        tick: SimulationTick,
+        mut replay: F,
+    ) -> Result<PredictionReconciliationOutcome, PredictionReconciliationError<E>>
+    where
+        F: FnMut(SimulationTick, &I) -> Result<(), E>,
+    {
+        if self.frontier().is_some_and(|frontier| tick < frontier) {
+            return Err(PredictionReconciliationError::FrontierRegression);
+        }
+
+        if matches!(self.state, PredictionState::Invalidated { .. }) {
+            self.pending.clear();
+            self.pending_bytes = 0;
+            self.state = PredictionState::Active { frontier: tick };
+            return Ok(PredictionReconciliationOutcome::ActivatedFromAuthoritative {
+                frontier: tick,
+            });
+        }
+
+        let mut retired_ticks = Vec::new();
+        let mut retired_bytes = 0usize;
+        for (target_tick, pending) in self.pending.range(..=tick) {
+            retired_ticks.push(*target_tick);
+            retired_bytes = retired_bytes
+                .checked_add(pending.accounted_bytes)
+                .ok_or(PredictionReconciliationError::AccountingInvariantViolation)?;
+        }
+        let next_pending_bytes = self
+            .pending_bytes
+            .checked_sub(retired_bytes)
+            .ok_or(PredictionReconciliationError::AccountingInvariantViolation)?;
+
+        self.state = PredictionState::Active { frontier: tick };
+        for target_tick in retired_ticks {
+            self.pending.remove(&target_tick);
+        }
+        self.pending_bytes = next_pending_bytes;
+
+        if self.pending.is_empty() {
+            return Ok(PredictionReconciliationOutcome::ReconciledNoReplay {
+                frontier: tick,
+            });
+        }
+
+        let mut replayed = 0usize;
+        let mut failure = None;
+        for (target_tick, pending) in &self.pending {
+            match replay(*target_tick, &pending.value) {
+                Ok(()) => {
+                    replayed = replayed
+                        .checked_add(1)
+                        .ok_or(PredictionReconciliationError::AccountingInvariantViolation)?;
+                }
+                Err(source) => {
+                    failure = Some((*target_tick, source));
+                    break;
+                }
+            }
+        }
+
+        if let Some((failed_tick, source)) = failure {
+            self.invalidate(PredictionInvalidationReason::ReplayFailure);
+            return Err(PredictionReconciliationError::ReplayFailed {
+                tick: failed_tick,
+                source,
+            });
+        }
+
+        Ok(PredictionReconciliationOutcome::ReconciledReplay {
+            frontier: tick,
+            replayed,
+        })
+    }
+
+    fn invalidate(&mut self, reason: PredictionInvalidationReason) {
+        let frontier = self.frontier();
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.state = PredictionState::Invalidated { reason, frontier };
+    }
+}
