@@ -16,6 +16,7 @@ use runen_net::{
 };
 
 use crate::{
+    connection_driver::EstablishedConnectionDriver,
     control::{
         ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
         ProfileReadyParts, Settings, ValidatedControlProfile,
@@ -38,7 +39,7 @@ const MAX_INTERNAL_TRANSITIONS_PER_POLL: usize = 16;
 /// Explicit finite reliable receive resources retained for established delivery activation.
 ///
 /// RN6 provides no implicit defaults. These values are retained through negotiation and
-/// consumed unchanged by the established reliable transport owner in the next RN6 slice.
+/// consumed unchanged when the established reliable transport owner is activated.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ReliableReceiveLimits {
     pub scratch_bytes: NonZeroUsize,
@@ -101,6 +102,7 @@ pub enum ConnectionError {
     },
     ManagerState,
     UnexpectedCoreState,
+    EstablishedActivation,
     State(ConnectionStateError),
 }
 
@@ -273,7 +275,13 @@ enum ConnectionState {
         sender: ControlSender,
         receiver: ControlReceiver,
     },
+    NegotiatedEstablished {
+        established: EstablishedNegotiatedConnection,
+    },
     Established {
+        driver: EstablishedConnectionDriver,
+    },
+    EstablishedActivationFailed {
         established: EstablishedNegotiatedConnection,
     },
     Failed {
@@ -288,7 +296,9 @@ impl fmt::Debug for ConnectionState {
             Self::Sending { .. } => "Sending",
             Self::Receiving { .. } => "Receiving",
             Self::AuthoritySelection { .. } => "AuthoritySelection",
+            Self::NegotiatedEstablished { .. } => "NegotiatedEstablished",
             Self::Established { .. } => "Established",
+            Self::EstablishedActivationFailed { .. } => "EstablishedActivationFailed",
             Self::Failed { .. } => "Failed",
             Self::Transitioning => "Transitioning",
         })
@@ -424,12 +434,9 @@ impl Connection {
                                 self.state = receiving_state(core, completion.sender, receiver);
                             }
                             PendingSendDisposition::Establish => {
-                                self.state = ConnectionState::Established {
+                                self.state = ConnectionState::NegotiatedEstablished {
                                     established: core.into_established(completion.sender, receiver),
                                 };
-                                return Poll::Ready(Ok(ConnectionEvent::Established {
-                                    connection: self.connection,
-                                }));
                             }
                             PendingSendDisposition::TerminalLocalFailure(outcome) => {
                                 close_negotiation_failed(&core.profile.connection);
@@ -519,9 +526,31 @@ impl Connection {
                     };
                     return Poll::Pending;
                 }
-                ConnectionState::Established { established } => {
-                    self.state = ConnectionState::Established { established };
+                ConnectionState::NegotiatedEstablished { established } => {
+                    match activate_established_driver(established, self.reliable_receive) {
+                        Ok(driver) => {
+                            self.state = ConnectionState::Established { driver };
+                            return Poll::Ready(Ok(ConnectionEvent::Established {
+                                connection: self.connection,
+                            }));
+                        }
+                        Err(established) => {
+                            self.state = ConnectionState::EstablishedActivationFailed {
+                                established,
+                            };
+                            return Poll::Ready(Err(ConnectionError::EstablishedActivation));
+                        }
+                    }
+                }
+                ConnectionState::Established { driver } => {
+                    self.state = ConnectionState::Established { driver };
                     return Poll::Pending;
+                }
+                ConnectionState::EstablishedActivationFailed { established } => {
+                    self.state = ConnectionState::EstablishedActivationFailed { established };
+                    return Poll::Ready(Err(ConnectionError::State(
+                        ConnectionStateError::Terminal,
+                    )));
                 }
                 ConnectionState::Failed { core } => {
                     self.state = ConnectionState::Failed { core };
@@ -614,9 +643,11 @@ impl Connection {
                 drop((sender, receiver));
                 core.teardown(manager, delivery, true)
             }
-            ConnectionState::Established { established } => {
+            ConnectionState::NegotiatedEstablished { established }
+            | ConnectionState::EstablishedActivationFailed { established } => {
                 established.teardown(manager, delivery).into()
             }
+            ConnectionState::Established { driver } => driver.teardown(manager, delivery).into(),
             ConnectionState::Failed { core } => core.teardown(manager, delivery, false),
             ConnectionState::Transitioning => unreachable!("transition state never escapes a call"),
         }
@@ -625,14 +656,14 @@ impl Connection {
     #[cfg(test)]
     pub(super) fn into_established_internal(
         self,
-    ) -> Result<(EstablishedNegotiatedConnection, ReliableReceiveLimits), Box<Self>> {
+    ) -> Result<(EstablishedConnectionDriver, ReliableReceiveLimits), Box<Self>> {
         let Self {
             connection,
             reliable_receive,
             state,
         } = self;
         match state {
-            ConnectionState::Established { established } => Ok((established, reliable_receive)),
+            ConnectionState::Established { driver } => Ok((driver, reliable_receive)),
             state => Err(Box::new(Self {
                 connection,
                 reliable_receive,
@@ -640,6 +671,23 @@ impl Connection {
             })),
         }
     }
+}
+
+fn activate_established_driver(
+    established: EstablishedNegotiatedConnection,
+    reliable_receive: ReliableReceiveLimits,
+) -> Result<EstablishedConnectionDriver, EstablishedNegotiatedConnection> {
+    let flow_controlled = match established.into_flow_control() {
+        Ok(flow_controlled) => flow_controlled,
+        Err(error) => return Err(*error.established),
+    };
+    Ok(flow_controlled
+        .into_reliable_io(
+            reliable_receive.scratch_bytes,
+            reliable_receive.max_staging_bytes,
+        )
+        .into_established_io()
+        .into_connection_driver())
 }
 
 enum LocalOperationTransition {
@@ -722,15 +770,11 @@ fn transition_from_controller(
             let disposition = controller_send_disposition(frame.frame_type);
             DriverTransition::State(sending_state(core, sender, receiver, frame, disposition))
         }
-        Ok(NegotiationProgress::Established) => {
-            let connection = core.connection;
-            DriverTransition::Event(
-                ConnectionState::Established {
-                    established: core.into_established(sender, receiver),
-                },
-                ConnectionEvent::Established { connection },
-            )
-        }
+        Ok(NegotiationProgress::Established) => DriverTransition::State(
+            ConnectionState::NegotiatedEstablished {
+                established: core.into_established(sender, receiver),
+            },
+        ),
         Ok(NegotiationProgress::RemoteFailed(outcome)) => {
             close_negotiation_failed(&core.profile.connection);
             DriverTransition::Error(
