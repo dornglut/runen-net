@@ -1,8 +1,13 @@
 use std::num::NonZeroUsize;
 
-use runen_net::delivery::{
-    DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits, FlowResourcePolicy,
+use runen_net::{
+    delivery::{
+        DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits, FlowResourcePolicy,
+    },
+    identity::ConnectionHandle,
 };
+
+use crate::flow_control::InboundOpenRequest;
 
 /// Explicit application-owned declaration for one outbound RunenNet delivery flow.
 ///
@@ -16,6 +21,31 @@ pub struct OutboundFlowConfig {
     pub policy: FlowResourcePolicy,
     pub connection_limits: DeliveryScopeLimits,
     pub stable_max_message_bytes: NonZeroUsize,
+}
+
+/// Move-only capability for one pending peer `OPEN_FLOW` decision.
+///
+/// The private wire flow identity never crosses this boundary. The host-visible
+/// connection identity is retained so a request from one connection cannot be
+/// accidentally applied to another connection with coincident transport-local state.
+#[derive(Debug, PartialEq, Eq)]
+pub struct IncomingFlowRequest {
+    pub(super) connection: ConnectionHandle,
+    pub(super) inner: InboundOpenRequest,
+}
+
+impl IncomingFlowRequest {
+    pub const fn connection(&self) -> ConnectionHandle {
+        self.connection
+    }
+
+    pub const fn mode(&self) -> DeliveryMode {
+        self.inner.mode()
+    }
+
+    pub const fn max_message_bytes(&self) -> u64 {
+        self.inner.max_message_bytes()
+    }
 }
 
 /// Public rejection vocabulary for an incoming or outbound flow establishment attempt.
@@ -43,4 +73,21 @@ pub enum FlowTerminationCause {
     ResourceFailure,
     ProtocolFailure,
     ReliableDeliveryFailure,
+}
+
+/// Result of one public Core-keyed message submission.
+///
+/// Reliable submissions use the Core acceptance result directly. Unreliable submissions
+/// additionally preserve the two accepted pre-accept QUIC DATAGRAM rejection classes.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum SubmitOutcome {
+    Accepted {
+        accepted_index: u64,
+        local_pressure_drops: usize,
+    },
+    RejectedTooLarge,
+    RejectedPressure,
+    RejectedCounterExhausted,
+    RejectedTransportUnavailable,
+    RejectedCurrentDatagramSize,
 }
