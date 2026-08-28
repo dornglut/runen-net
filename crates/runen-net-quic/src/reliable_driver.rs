@@ -9,7 +9,7 @@ use std::{
 
 use quinn::{Connection, ConnectionError, RecvStream, SendStream};
 use runen_net::{
-    delivery::{DeliveryEndpoint, DeliveryMode, FlowDirection},
+    delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowDirection},
     protocol::NegotiationManager,
 };
 
@@ -159,6 +159,27 @@ impl ReliableConnectionIo {
         self.receive.max_staging_bytes
     }
 
+    pub(super) fn outbound_flow_id(
+        &self,
+        flow_control: &FlowControl,
+        key: DeliveryFlowKey,
+    ) -> Option<FlowId> {
+        self.pending_outbound
+            .iter()
+            .map(|pending| pending.flow_id)
+            .chain(self.active_outbound.iter().map(|active| active.flow_id))
+            .find(|flow_id| {
+                flow_control
+                    .registry()
+                    .registered_flow(*flow_id)
+                    .is_some_and(|registered| {
+                        registered.key() == key
+                            && registered.mode() == DeliveryMode::ReliableOrdered
+                            && registered.key().direction() == FlowDirection::Outbound
+                    })
+            })
+    }
+
     pub(super) fn request_outbound_finish_normal(
         &mut self,
         endpoint: &DeliveryEndpoint,
@@ -238,6 +259,7 @@ impl ReliableConnectionIo {
             flow_id: flow.flow_id(),
             future: open_uni_owned(connection.clone()),
         });
+        debug_assert_eq!(self.outbound_flow_id(flow_control, flow.key()), Some(flow.flow_id()));
         Ok(())
     }
 
