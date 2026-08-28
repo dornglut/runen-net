@@ -15,6 +15,7 @@ Implementation packages, Runenwerk behavior, roadmap items, and research records
 - [Protocol and schema negotiation](protocol/negotiation.md)
 - [Authoritative replication consistency](replication/consistency.md)
 - [Replication retention and full-snapshot recovery](replication/recovery.md)
+- [Participant input prediction and authoritative reconciliation](prediction/reconciliation.md)
 - [QUIC transport profile](transport/quic.md)
 - [Conformance profiles](conformance/profiles.md)
 
