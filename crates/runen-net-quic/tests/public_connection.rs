@@ -1335,7 +1335,7 @@ fn established_teardown_handles_outstanding_request_and_active_flow_once() {
                 server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
             assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
             assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
-            drop(request);
+            let _outstanding_request = request;
 
             let (mut client_connection, mut server_connection) = establish_public_connection_pair(
                 &client,
