@@ -1480,19 +1480,10 @@ async fn negotiate_side(
     }
 
     assert_eq!(authority_selection_events, usize::from(expected_authority));
-    let (established, reliable_receive) = public
+    let (driver, reliable_receive) = public
         .into_established_internal()
-        .expect("Established event did not retain negotiated ownership");
+        .expect("Established event did not retain established driver ownership");
     assert_eq!(reliable_receive, reliable_receive_limits());
-    let driver = established
-        .into_flow_control()
-        .unwrap()
-        .into_reliable_io(
-            reliable_receive.scratch_bytes,
-            reliable_receive.max_staging_bytes,
-        )
-        .into_established_io()
-        .into_connection_driver();
     LiveSide {
         connection,
         driver,
