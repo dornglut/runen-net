@@ -805,7 +805,7 @@ fn sending_state(
     ConnectionState::Sending {
         core,
         receiver,
-        future: send_control_owned(sender, frame),
+        future: send_control_owned(sender, frame, disposition),
         disposition,
     }
 }
@@ -825,9 +825,18 @@ fn receiving_state(
 fn send_control_owned(
     mut sender: ControlSender,
     frame: ControlFrame,
+    disposition: PendingSendDisposition,
 ) -> OwnedNegotiationSendFuture {
     Box::pin(async move {
-        let result = sender.send_frame(frame.frame_type, &frame.body).await;
+        let result = match disposition {
+            PendingSendDisposition::TerminalLocalFailure(_) => {
+                debug_assert_eq!(frame.frame_type, ControlFrameType::NegotiationFailed);
+                sender.send_terminal_negotiation_failure(&frame.body).await
+            }
+            PendingSendDisposition::Continue | PendingSendDisposition::Establish => {
+                sender.send_frame(frame.frame_type, &frame.body).await
+            }
+        };
         NegotiationSendCompletion { sender, result }
     })
 }
