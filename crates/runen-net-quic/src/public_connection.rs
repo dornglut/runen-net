@@ -29,8 +29,7 @@ use crate::{
         ProfileReadyParts, Settings, ValidatedControlProfile,
     },
     datagram::{
-        DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress,
-        DatagramSubmissionOutcome,
+        DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress, DatagramSubmissionOutcome,
     },
     datagram_driver::{DatagramIoError, DatagramOutboundProgress},
     endpoint::ConnectionSlotPermit,
@@ -54,9 +53,7 @@ use crate::{
         SubmissionError, SubmitOutcome,
     },
     quinn_binding::{ReceiveError, ReceiveProgress, SendError, SendProgress},
-    reliable_driver::{
-        ActiveReliableProgress, ReliableIoError, ReliableIoStateError,
-    },
+    reliable_driver::{ActiveReliableProgress, ReliableIoError, ReliableIoStateError},
     wire::WireSide,
 };
 
@@ -1292,16 +1289,16 @@ fn map_established_progress(
                         local_pressure_drops,
                     },
                 }),
-                ReceiveOutcome::DroppedTooLarge => Some(ConnectionEvent::UnreliableReceiveDropped {
-                    key,
-                    reason: UnreliableReceiveDropReason::TooLarge,
-                }),
-                ReceiveOutcome::StaleSequenced => {
+                ReceiveOutcome::DroppedTooLarge => {
                     Some(ConnectionEvent::UnreliableReceiveDropped {
                         key,
-                        reason: UnreliableReceiveDropReason::StaleSequenced,
+                        reason: UnreliableReceiveDropReason::TooLarge,
                     })
                 }
+                ReceiveOutcome::StaleSequenced => Some(ConnectionEvent::UnreliableReceiveDropped {
+                    key,
+                    reason: UnreliableReceiveDropReason::StaleSequenced,
+                }),
                 ReceiveOutcome::DuplicateReliable
                 | ReceiveOutcome::RejectedModeMismatch
                 | ReceiveOutcome::TerminalReliableFailure => {
@@ -1369,19 +1366,17 @@ fn map_established_driver_error(
     match error {
         ConnectionDriverError::ControlSend(error) => {
             let error = *error;
-            let public_error = ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(
-                &error.error,
-            ));
+            let public_error =
+                ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(&error.error));
             (map_control_send_effect(error.effect), public_error)
         }
         ConnectionDriverError::ControlReceive(error) => (
             None,
             ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(&error)),
         ),
-        ConnectionDriverError::State(ConnectionDriverStateError::Terminal) => (
-            None,
-            ConnectionError::State(ConnectionStateError::Terminal),
-        ),
+        ConnectionDriverError::State(ConnectionDriverStateError::Terminal) => {
+            (None, ConnectionError::State(ConnectionStateError::Terminal))
+        }
         ConnectionDriverError::Reliable(ReliableIoError::Allocation(_))
         | ConnectionDriverError::Reliable(ReliableIoError::State(
             ReliableIoStateError::CapacityOverflow,
@@ -1765,9 +1760,10 @@ mod tests {
         match dropped {
             ConnectionEvent::UnreliableReceiveDropped {
                 key,
-                reason: UnreliableReceiveDropReason::Pressure {
-                    local_pressure_drops,
-                },
+                reason:
+                    UnreliableReceiveDropReason::Pressure {
+                        local_pressure_drops,
+                    },
             } => {
                 assert_eq!(key, inbound);
                 assert_eq!(local_pressure_drops, 2);
