@@ -1,9 +1,7 @@
 use std::num::NonZeroUsize;
 
 use runen_net::{
-    delivery::{
-        DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits, FlowResourcePolicy,
-    },
+    delivery::{DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits, FlowResourcePolicy},
     identity::ConnectionHandle,
 };
 
