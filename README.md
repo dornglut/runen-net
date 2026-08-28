@@ -4,6 +4,12 @@ RunenNet is a standalone, engine-independent Rust networking framework.
 
 Runenwerk is a downstream consumer of RunenNet, not its architectural host. Existing Runenwerk networking code is migration evidence only unless its semantics are deliberately specified and accepted here.
 
+## Standalone use
+
+- [Standalone client/server guide](docs/standalone.md)
+- [Production-QUIC public API example](crates/runen-net-quic/examples/standalone.rs)
+- [Transport-independent Core example](crates/runen-net/examples/authoritative_counter.rs)
+
 ## Repository authority
 
 - [Specification](spec/README.md) — normative RunenNet semantics.
