@@ -450,9 +450,8 @@ impl std::error::Error for ProfileConnectionError {}
 
 /// Opaque ownership of one connection that completed the RunenNet QUIC ProfileReady gate.
 ///
-/// RN6B intentionally exposes no control-stream, Quinn-connection, SETTINGS, or
-/// negotiation access. A later RN6 slice consumes this value into the public
-/// negotiation/established connection owner.
+/// Consume this value with `activate` to enter the post-ProfileReady explicit-poll
+/// connection owner. Quinn/control/profile implementation state remains private.
 pub struct ProfileReadyConnection {
     _inner: AdmittedProfileReadyConnection,
 }
@@ -468,6 +467,12 @@ impl fmt::Debug for ProfileReadyConnection {
 impl From<AdmittedProfileReadyConnection> for ProfileReadyConnection {
     fn from(inner: AdmittedProfileReadyConnection) -> Self {
         Self { _inner: inner }
+    }
+}
+
+impl ProfileReadyConnection {
+    pub(super) fn into_inner(self) -> AdmittedProfileReadyConnection {
+        self._inner
     }
 }
 

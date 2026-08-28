@@ -693,6 +693,30 @@ impl ControlSender {
         self.io_state.complete();
         Ok(())
     }
+
+    pub(super) async fn send_terminal_negotiation_failure(
+        &mut self,
+        body: &[u8],
+    ) -> Result<(), ProfileBootstrapError> {
+        self.send_frame(ControlFrameType::NegotiationFailed, body)
+            .await?;
+        self.send
+            .finish()
+            .map_err(WriteError::from)
+            .map_err(ControlFrameError::from)?;
+        match self
+            .send
+            .stopped()
+            .await
+            .map_err(WriteError::from)
+            .map_err(ControlFrameError::from)?
+        {
+            None => Ok(()),
+            Some(error_code) => {
+                Err(ControlFrameError::Write(WriteError::Stopped(error_code)).into())
+            }
+        }
+    }
 }
 
 #[derive(Debug)]

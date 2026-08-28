@@ -9,7 +9,7 @@ use std::{
 };
 
 use quinn::{
-    ConnectionError, VarInt,
+    ConnectionError as QuinnConnectionError, VarInt,
     rustls::{
         RootCertStore,
         pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
@@ -36,8 +36,8 @@ use crate::{
         EstablishedConnectionDriver, EstablishedConnectionProgress, OutboundFinishOutcome,
     },
     control::{
-        ControlFrameError, LocalControlLimits, ProfileBootstrapError, SemanticRole,
-        ValidatedControlProfile, bootstrap_server_control, confirm_profile_transport,
+        LocalControlLimits, ProfileBootstrapError, SemanticRole, ValidatedControlProfile,
+        bootstrap_server_control, confirm_profile_transport,
     },
     datagram::DatagramSubmissionOutcome,
     endpoint::{
@@ -45,12 +45,15 @@ use crate::{
         ValidatedEndpointResources, bind_client_endpoint, bind_server_endpoint,
         bind_server_endpoint_with_incompatible_alpn, bind_server_endpoint_without_datagrams,
     },
+    facade::{ProfileBootstrapFailure, ProfileReadyConnection},
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
-        AdmittedProfileReadyConnection, EstablishedNegotiatedConnection, NegotiationLifecycleError,
-        NegotiationReceiveError, NegotiationSendCompletion, NegotiationTransition,
-        PendingNegotiationSend, ProfileConnectionError, accept_profile_ready, begin_negotiation,
+        AdmittedProfileReadyConnection, ProfileConnectionError, accept_profile_ready,
         connect_profile_ready,
+    },
+    public_connection::{
+        Connection as PublicConnection, ConnectionError as PublicConnectionError, ConnectionEvent,
+        ReliableReceiveLimits,
     },
     quinn_binding::{ReceiveProgress, SendProgress},
     wire::{ApplicationErrorCode, FlowId, FlowTerminateReason, WireSide, encode_varint},
@@ -185,14 +188,8 @@ async fn run_unknown_control_frame_scenario() {
     let client_ready = client_ready.expect("production client failed ProfileReady");
     let mut server_parts = server_ready.into_parts();
 
-    let mut manager = new_manager();
-    let pending = begin_negotiation(client_ready, FIRST_CONNECTION, &mut manager, offer())
-        .expect("valid client offer failed before send");
-    let transition = complete_negotiation_send(pending).await;
-    let mut negotiating = match transition {
-        NegotiationTransition::Negotiating(negotiating) => negotiating,
-        other => panic!("valid client offer did not enter receive phase: {other:?}"),
-    };
+    let mut host = new_host();
+    let mut public = activate_public_connection(client_ready, FIRST_CONNECTION, &mut host);
 
     server_parts
         .sender
@@ -200,32 +197,31 @@ async fn run_unknown_control_frame_scenario() {
         .await
         .expect("adversarial raw control byte was not written");
 
-    let receive_error = negotiating
-        .receive()
-        .await
-        .expect_err("unknown control frame unexpectedly reached negotiation semantics");
-    assert!(matches!(
-        &receive_error,
-        NegotiationReceiveError::Control(ProfileBootstrapError::Frame(
-            ControlFrameError::UnknownFrameType(10)
-        ))
-    ));
-    let NegotiationReceiveError::Control(control_error) = receive_error else {
-        unreachable!("exact control error was asserted above");
-    };
-    let lifecycle_error = negotiating.abort_after_control_error(&mut manager, control_error);
-    assert!(matches!(
-        lifecycle_error,
-        NegotiationLifecycleError::IoAbort {
-            error: Some(ProfileBootstrapError::Frame(
-                ControlFrameError::UnknownFrameType(10)
-            )),
-            cleanup_error: None,
+    let error = poll_fn(
+        |cx| match public.poll(cx, &mut host.negotiation, &mut host.delivery) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(error)) => Poll::Ready(error),
+            Poll::Ready(Ok(event)) => {
+                panic!("unknown control frame unexpectedly produced public progress: {event:?}")
+            }
+        },
+    )
+    .await;
+    assert_eq!(
+        error,
+        PublicConnectionError::Control {
+            failure: ProfileBootstrapFailure::Control,
+            cleanup_failed: false,
         }
-    ));
+    );
+
+    let teardown = public.teardown(&mut host.negotiation, &mut host.delivery);
+    assert_eq!(teardown.connection(), FIRST_CONNECTION);
+    assert!(teardown.cleanup_error().is_none());
+    assert!(teardown.flow_terminations().is_empty());
 
     match server_parts.connection.closed().await {
-        ConnectionError::ApplicationClosed(close) => assert_eq!(
+        QuinnConnectionError::ApplicationClosed(close) => assert_eq!(
             close.error_code,
             ApplicationErrorCode::ControlFrameError.quinn()
         ),
@@ -985,47 +981,11 @@ async fn establish_connection_on_endpoints(
     let client_authority = (authority_side == AuthoritySide::Client).then(|| contract.clone());
     let server_authority = (authority_side == AuthoritySide::Server).then(|| contract.clone());
 
-    let HostState {
-        negotiation: client_negotiation,
-        delivery: client_delivery,
-    } = client_host;
-    let HostState {
-        negotiation: server_negotiation,
-        delivery: server_delivery,
-    } = server_host;
-
-    let (client_established, server_established) = join2(
-        negotiate_side(
-            client_ready,
-            connection,
-            client_negotiation,
-            client_authority,
-        ),
-        negotiate_side(
-            server_ready,
-            connection,
-            server_negotiation,
-            server_authority,
-        ),
+    join2(
+        negotiate_side(client_ready, connection, client_host, client_authority),
+        negotiate_side(server_ready, connection, server_host, server_authority),
     )
-    .await;
-
-    let (client_negotiated, client_manager) = client_established;
-    let (server_negotiated, server_manager) = server_established;
-    let client_side = activate(
-        client_negotiated,
-        client_manager,
-        client_delivery,
-        connection,
-    );
-    let server_side = activate(
-        server_negotiated,
-        server_manager,
-        server_delivery,
-        connection,
-    );
-
-    (client_side, server_side)
+    .await
 }
 
 async fn run_connection_loss_scenario() {
@@ -1450,80 +1410,93 @@ fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
 }
 
+fn reliable_receive_limits() -> ReliableReceiveLimits {
+    ReliableReceiveLimits {
+        scratch_bytes: nz(4 * 1024),
+        max_staging_bytes: nz(128 * 1024),
+    }
+}
+
+fn activate_public_connection(
+    admitted: AdmittedProfileReadyConnection,
+    connection: ConnectionHandle,
+    host: &mut HostState,
+) -> PublicConnection {
+    ProfileReadyConnection::from(admitted)
+        .activate(
+            connection,
+            offer(),
+            NegotiationRequirements::default(),
+            reliable_receive_limits(),
+            &mut host.negotiation,
+        )
+        .expect("valid public ProfileReady activation failed")
+}
+
 async fn negotiate_side(
     admitted: AdmittedProfileReadyConnection,
     connection: ConnectionHandle,
-    mut manager: NegotiationManager,
+    mut host: HostState,
     authority_contract: Option<NegotiatedContract>,
-) -> (EstablishedNegotiatedConnection, NegotiationManager) {
-    let requirements = NegotiationRequirements::default();
-    let pending = begin_negotiation(admitted, connection, &mut manager, offer()).unwrap();
-    let mut transition = complete_negotiation_send(pending).await;
+) -> LiveSide {
+    let expected_authority = authority_contract.is_some();
+    let mut authority_selection_events = 0usize;
+    let mut public = activate_public_connection(admitted, connection, &mut host);
 
     loop {
-        transition = match transition {
-            NegotiationTransition::Negotiating(mut negotiating) => {
-                negotiating.receive().await.unwrap();
-                negotiating
-                    .into_received()
-                    .unwrap()
-                    .process(&mut manager, &requirements)
-                    .unwrap()
-            }
-            NegotiationTransition::AuthoritySelection(selection) => {
-                let pending = selection
-                    .select(
-                        &mut manager,
+        let event = poll_fn(|cx| public.poll(cx, &mut host.negotiation, &mut host.delivery))
+            .await
+            .expect("valid loopback public negotiation failed");
+        match event {
+            ConnectionEvent::AuthoritySelectionRequired {
+                connection: event_connection,
+            } => {
+                assert_eq!(event_connection, connection);
+                assert!(
+                    expected_authority,
+                    "NonAuthority received an Authority-selection event"
+                );
+                authority_selection_events += 1;
+                assert_eq!(
+                    authority_selection_events, 1,
+                    "Authority selection was surfaced more than once"
+                );
+                public
+                    .select_authority(
+                        &mut host.negotiation,
                         authority_contract
                             .clone()
                             .expect("only the semantic Authority selects a contract"),
-                        &requirements,
                     )
-                    .unwrap();
-                complete_negotiation_send(pending).await
+                    .expect("valid Authority selection command failed");
             }
-            NegotiationTransition::PendingSend(pending) => complete_negotiation_send(pending).await,
-            NegotiationTransition::Established(established) => {
-                return (established, manager);
+            ConnectionEvent::Established {
+                connection: event_connection,
+            } => {
+                assert_eq!(event_connection, connection);
+                break;
             }
-        };
-    }
-}
-
-async fn complete_negotiation_send(mut pending: PendingNegotiationSend) -> NegotiationTransition {
-    pending.send().await.unwrap();
-    match pending.complete().unwrap() {
-        NegotiationSendCompletion::Negotiating(negotiating) => {
-            NegotiationTransition::Negotiating(negotiating)
-        }
-        NegotiationSendCompletion::Established(established) => {
-            NegotiationTransition::Established(established)
-        }
-        NegotiationSendCompletion::LocalFailure(outcome) => {
-            panic!("valid loopback negotiation failed locally: {outcome:?}")
         }
     }
-}
 
-fn activate(
-    established: EstablishedNegotiatedConnection,
-    negotiation: NegotiationManager,
-    delivery: DeliveryEndpoint,
-    connection: ConnectionHandle,
-) -> LiveSide {
+    assert_eq!(authority_selection_events, usize::from(expected_authority));
+    let (established, reliable_receive) = public
+        .into_established_internal()
+        .expect("Established event did not retain negotiated ownership");
+    assert_eq!(reliable_receive, reliable_receive_limits());
     let driver = established
         .into_flow_control()
         .unwrap()
-        .into_reliable_io(nz(4 * 1024), nz(128 * 1024))
+        .into_reliable_io(
+            reliable_receive.scratch_bytes,
+            reliable_receive.max_staging_bytes,
+        )
         .into_established_io()
         .into_connection_driver();
     LiveSide {
         connection,
         driver,
-        host: HostState {
-            negotiation,
-            delivery,
-        },
+        host,
     }
 }
 

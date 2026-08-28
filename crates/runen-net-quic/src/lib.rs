@@ -12,6 +12,11 @@ pub use facade::{
     ProfileConfig, ProfileConfigError, ProfileConnectionError, ProfileLimits,
     ProfileReadyConnection, SemanticRole, ServerEndpoint, ServerIdentity, TlsMaterialError,
 };
+mod public_connection;
+pub use public_connection::{
+    Connection, ConnectionCleanupError, ConnectionError, ConnectionEvent, ConnectionStateError,
+    ConnectionTeardown, NegotiationFailure, NegotiationReportStatus, ReliableReceiveLimits,
+};
 
 #[cfg(test)]
 mod conformance_tests;
