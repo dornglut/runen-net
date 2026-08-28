@@ -1310,7 +1310,7 @@ mod tests {
         assert!(!termination.reliable_obligation_failed);
         assert_eq!(frame.frame_type, ControlFrameType::FlowTerminate);
         assert_eq!(endpoint.flow_contract(requested), None);
-        assert_eq!(endpoint.flow_contract(occupied_key).is_some(), true);
+        assert!(endpoint.flow_contract(occupied_key).is_some());
         assert_eq!(control.registry().registered_flow(flow_id), None);
         assert_eq!(
             control
