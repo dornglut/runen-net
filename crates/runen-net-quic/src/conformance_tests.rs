@@ -685,7 +685,7 @@ async fn run_missing_datagram_scenario() {
         client_ready.expect("capacity-1 client permit leaked after DATAGRAM rejection");
     let server_ready = server_ready
         .expect("conforming retry server failed after DATAGRAM rejection")
-        .expect("conforming retry server endpoint closed unexpectedly");
+        .expect("server endpoint closed unexpectedly");
 
     drop(client_ready);
     drop(server_ready);
@@ -1476,6 +1476,9 @@ async fn negotiate_side(
                 assert_eq!(event_connection, connection);
                 break;
             }
+            unexpected => panic!(
+                "established-flow event surfaced before public negotiation completed: {unexpected:?}"
+            ),
         }
     }
 
