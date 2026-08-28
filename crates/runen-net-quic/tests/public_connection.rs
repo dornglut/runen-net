@@ -3,8 +3,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     num::NonZeroUsize,
     pin::pin,
-    sync::Arc,
-    task::{Context, Poll, Wake, Waker},
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -39,12 +38,6 @@ enum AuthoritySide {
 struct HostState {
     negotiation: NegotiationManager,
     delivery: DeliveryEndpoint,
-}
-
-struct NoopWake;
-
-impl Wake for NoopWake {
-    fn wake(self: Arc<Self>) {}
 }
 
 #[test]
@@ -484,8 +477,7 @@ fn poll_once(
     negotiation: &mut NegotiationManager,
     delivery: &mut DeliveryEndpoint,
 ) -> Poll<Result<ConnectionEvent, ConnectionError>> {
-    let waker = Waker::from(Arc::new(NoopWake));
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(Waker::noop());
     connection.poll(&mut cx, negotiation, delivery)
 }
 
