@@ -1579,7 +1579,10 @@ mod tests {
             .take_failure_termination()
             .expect("reliable send failure discarded Core termination evidence");
         assert_eq!(termination.key, key);
-        assert_eq!(termination.reason, FlowTerminationReason::ReliableCustodyLost);
+        assert_eq!(
+            termination.reason,
+            FlowTerminationReason::ReliableCustodyLost
+        );
         assert!(termination.reliable_obligation_failed);
         assert_eq!(endpoint.flow_contract(key), None);
         assert_eq!(registry.active_len(), 0);
@@ -1835,7 +1838,10 @@ mod tests {
             .take_failure_termination()
             .expect("associated reliable failure discarded Core termination evidence");
         assert_eq!(termination.key, key);
-        assert_eq!(termination.reason, FlowTerminationReason::ReliableCustodyLost);
+        assert_eq!(
+            termination.reason,
+            FlowTerminationReason::ReliableCustodyLost
+        );
         assert!(termination.reliable_obligation_failed);
         assert_eq!(binding.reader.stops, vec![3]);
         assert_eq!(endpoint.flow_contract(key), None);
