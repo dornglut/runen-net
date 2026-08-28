@@ -371,7 +371,7 @@ impl ReliableConnectionIo {
                 flow_control.registry_mut(),
             ) {
                 Poll::Pending | Poll::Ready(Ok(SendProgress::Idle)) => {}
-                Poll::Ready(Ok(progress @ SendProgress::Closed)) => {
+                Poll::Ready(Ok(progress @ SendProgress::Closed { .. })) => {
                     let _ = self.active_outbound.swap_remove(index);
                     self.outbound_cursor = cursor_after_remove(index, self.active_outbound.len());
                     return Poll::Ready(Ok(ActiveReliableProgress::Outbound { flow_id, progress }));
@@ -411,8 +411,8 @@ impl ReliableConnectionIo {
             let before_registered = before
                 .is_some_and(|flow_id| flow_control.registry().registered_flow(flow_id).is_some());
             match self.active_inbound[index].poll_step(cx, endpoint, flow_control.registry_mut()) {
-                Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining)) => {}
-                Poll::Ready(Ok(progress @ ReceiveProgress::Closed)) => {
+                Poll::Pending | Poll::Ready(Ok(ReceiveProgress::Draining { .. })) => {}
+                Poll::Ready(Ok(progress @ ReceiveProgress::Closed { .. })) => {
                     let _ = self.active_inbound.swap_remove(index);
                     self.inbound_cursor = cursor_after_remove(index, self.active_inbound.len());
                     return Poll::Ready(Ok(ActiveReliableProgress::Inbound(progress)));
