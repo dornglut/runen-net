@@ -84,6 +84,25 @@ impl DatagramConnectionIo {
         self.sender.outbound_transport_drops()
     }
 
+    pub(super) fn outbound_flow_id(
+        &self,
+        flow_control: &FlowControl,
+        key: DeliveryFlowKey,
+    ) -> Option<FlowId> {
+        self.outbound.iter().copied().find(|flow_id| {
+            flow_control
+                .registry()
+                .registered_flow(*flow_id)
+                .is_some_and(|registered| {
+                    registered.key() == key
+                        && is_outbound_unreliable(
+                            registered.key().direction(),
+                            registered.mode(),
+                        )
+                })
+        })
+    }
+
     pub(super) fn submit(
         &mut self,
         endpoint: &mut DeliveryEndpoint,
@@ -128,6 +147,7 @@ impl DatagramConnectionIo {
             .try_reserve(1)
             .map_err(DatagramIoError::Allocation)?;
         self.outbound.push(flow.flow_id());
+        debug_assert_eq!(self.outbound_flow_id(flow_control, flow.key()), Some(flow.flow_id()));
         Ok(())
     }
 
