@@ -1,10 +1,4 @@
-use std::{
-    fmt, io,
-    net::SocketAddr,
-    num::NonZeroUsize,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fmt, io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use quinn::rustls::RootCertStore;
 pub use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -684,7 +678,8 @@ impl ServerEndpoint {
         accept_profile_ready(&self.inner, profile.inner)
             .await
             .map(|connection| {
-                connection.map(|inner| ProfileReadyConnection::from_profile(inner, reliable_receive))
+                connection
+                    .map(|inner| ProfileReadyConnection::from_profile(inner, reliable_receive))
             })
             .map_err(ProfileConnectionError::from)
     }
