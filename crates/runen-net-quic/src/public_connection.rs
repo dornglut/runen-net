@@ -33,7 +33,7 @@ use crate::{
     },
     datagram_driver::{DatagramIoError, DatagramOutboundProgress},
     endpoint::ConnectionSlotPermit,
-    facade::{ProfileBootstrapFailure, ProfileReadyConnection},
+    facade::{ProfileBootstrapFailure, ProfileReadyConnection, ReliableReceiveLimits},
     flow_control::{
         FlowControlError, InboundAdmission, InboundAdmissionError, OutboundOpenError,
         OutboundOpenRequest,
@@ -58,16 +58,6 @@ use crate::{
 };
 
 const MAX_INTERNAL_TRANSITIONS_PER_POLL: usize = 16;
-
-/// Explicit finite reliable receive resources retained for established delivery activation.
-///
-/// RN6 provides no implicit defaults. These values are retained through negotiation and
-/// consumed unchanged when the established reliable transport owner is activated.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct ReliableReceiveLimits {
-    pub scratch_bytes: NonZeroUsize,
-    pub max_staging_bytes: NonZeroUsize,
-}
 
 /// Stable semantic compatibility-failure categories exposed by the public connection API.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -410,11 +400,11 @@ impl ProfileReadyConnection {
         connection: ConnectionHandle,
         offer: CompatibilityOffer,
         requirements: NegotiationRequirements,
-        reliable_receive: ReliableReceiveLimits,
         manager: &mut NegotiationManager,
     ) -> Result<Connection, ConnectionError> {
+        let (admitted, reliable_receive) = self.into_parts();
         Connection::activate(
-            self.into_inner(),
+            admitted,
             connection,
             offer,
             requirements,
