@@ -526,7 +526,9 @@ mod tests {
         let mut negotiation = manager();
         establish(&mut negotiation, connection);
         let mut session = Session::new(SessionId::new(10), limits());
-        session.advance_recovery_clock(recovery_time(u64::MAX)).unwrap();
+        session
+            .advance_recovery_clock(recovery_time(u64::MAX))
+            .unwrap();
         session
             .admit_new(participant, negotiation.established(connection).unwrap())
             .unwrap();
