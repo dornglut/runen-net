@@ -458,12 +458,7 @@ const fn protocol_contract() -> ProtocolContract {
 }
 
 fn profile(endpoint_config: EndpointConfig, semantic_role: SemanticRole) -> ProfileConfig {
-    ProfileConfig::baseline(
-        endpoint_config,
-        semantic_role,
-        MAX_INCOMING_MESSAGE_BYTES,
-    )
-    .unwrap()
+    ProfileConfig::baseline(endpoint_config, semantic_role, MAX_INCOMING_MESSAGE_BYTES).unwrap()
 }
 
 fn flow_connection_limits() -> DeliveryScopeLimits {
