@@ -22,7 +22,9 @@ use runen_net::replication::{
     DeltaSnapshot, FullSnapshot, ReplicationCursor, ReplicationLineageKey,
     ReplicationRetentionLimits,
 };
-use runen_net::session::{ConnectionLossOutcome, RetentionPolicy, Session, SessionLimits};
+use runen_net::session::{
+    ConnectionLossOutcome, RecoveryDuration, RecoveryTime, RetentionPolicy, Session, SessionLimits,
+};
 
 use support::FaultStage;
 
@@ -253,11 +255,16 @@ fn core_profile_composes_negotiation_session_delivery_and_replacement() {
             participant,
             first_connection,
             RetentionPolicy::RetainForRecovery {
-                duration: NonZeroU64::new(10).unwrap(),
+                duration: RecoveryDuration::new(NonZeroU64::new(10).unwrap()),
             },
         )
         .unwrap();
-    assert_eq!(outcome, ConnectionLossOutcome::Retained { expires_at: 10 });
+    assert_eq!(
+        outcome,
+        ConnectionLossOutcome::Retained {
+            expires_at: RecoveryTime::new(10),
+        }
+    );
     assert!(!session.is_authorized(participant, first_connection));
     sender.terminate_connection(first_connection);
     receiver.terminate_connection(first_connection);
@@ -552,7 +559,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
             participant,
             first_connection,
             RetentionPolicy::RetainForRecovery {
-                duration: NonZeroU64::new(10).unwrap(),
+                duration: RecoveryDuration::new(NonZeroU64::new(10).unwrap()),
             },
         )
         .unwrap();

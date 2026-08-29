@@ -46,22 +46,61 @@ pub enum SessionLimitError {
     MembershipsExceedParticipantIncarnations,
 }
 
+/// One absolute position on a host-supplied session recovery clock.
+///
+/// The host chooses the units and origin consistently for one [`Session`]. RunenNet uses this
+/// value only to order retained-membership expiry. It is not wall-clock time, `SimulationTick`,
+/// transport time, retry scheduling, or a wire timestamp.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RecoveryTime(u64);
+
+impl RecoveryTime {
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    fn checked_add(self, duration: RecoveryDuration) -> Option<Self> {
+        self.0.checked_add(duration.get()).map(Self)
+    }
+}
+
+/// One positive finite retention span on the host-supplied session recovery clock.
+///
+/// This span uses the same host-selected units as [`RecoveryTime`]. Its representation is a Rust
+/// type-safety boundary for session retention, not a standardized duration unit or wall-clock API.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct RecoveryDuration(NonZeroU64);
+
+impl RecoveryDuration {
+    pub const fn new(value: NonZeroU64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum MembershipState {
     Bound(ConnectionHandle),
-    Unbound { expires_at: u64 },
+    Unbound { expires_at: RecoveryTime },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum RetentionPolicy {
     Terminate,
-    RetainForRecovery { duration: NonZeroU64 },
+    RetainForRecovery { duration: RecoveryDuration },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ConnectionLossOutcome {
     Terminated,
-    Retained { expires_at: u64 },
+    Retained { expires_at: RecoveryTime },
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -91,7 +130,7 @@ pub struct Session {
     id: SessionId,
     phase: SessionPhase,
     limits: SessionLimits,
-    recovery_clock: u64,
+    recovery_clock: RecoveryTime,
     used_participants: IncarnationRegistry<ParticipantId>,
     memberships: HashMap<ParticipantId, MembershipRecord>,
     bindings: HashMap<ConnectionHandle, ParticipantId>,
@@ -103,7 +142,7 @@ impl Session {
             id,
             phase: SessionPhase::Open,
             limits,
-            recovery_clock: 0,
+            recovery_clock: RecoveryTime::new(0),
             used_participants: IncarnationRegistry::new(limits.max_participant_incarnations),
             memberships: HashMap::new(),
             bindings: HashMap::new(),
@@ -118,7 +157,7 @@ impl Session {
         self.phase
     }
 
-    pub const fn recovery_clock(&self) -> u64 {
+    pub const fn recovery_clock(&self) -> RecoveryTime {
         self.recovery_clock
     }
 
@@ -214,7 +253,7 @@ impl Session {
             RetentionPolicy::RetainForRecovery { duration } => {
                 let expires_at = self
                     .recovery_clock
-                    .checked_add(duration.get())
+                    .checked_add(duration)
                     .ok_or(SessionError::RecoveryExpiryOverflow)?;
                 self.bindings.remove(&connection);
                 self.memberships.insert(
@@ -286,10 +325,12 @@ impl Session {
 
     /// Advances the host/runtime recovery clock used only for retained-membership expiry.
     ///
-    /// This clock is an RN2 implementation policy and is not `SimulationTick` or wire time.
+    /// Units and origin are host-selected and must be used consistently for this [`Session`].
+    /// This clock is an RN2 implementation policy and is not `SimulationTick`, transport time,
+    /// retry scheduling, wall-clock time, or wire time.
     pub fn advance_recovery_clock(
         &mut self,
-        new_value: u64,
+        new_value: RecoveryTime,
     ) -> Result<Vec<ParticipantId>, SessionError> {
         self.require_open()?;
         if new_value < self.recovery_clock {
@@ -364,6 +405,14 @@ mod tests {
         .unwrap()
     }
 
+    fn recovery_time(value: u64) -> RecoveryTime {
+        RecoveryTime::new(value)
+    }
+
+    fn recovery_duration(value: u64) -> RecoveryDuration {
+        RecoveryDuration::new(NonZeroU64::new(value).unwrap())
+    }
+
     fn protocol() -> ProtocolContract {
         ProtocolContract::new(ProtocolId::new(1), ProtocolRevision::new(1))
     }
@@ -428,6 +477,7 @@ mod tests {
         let mut negotiation = manager();
         establish(&mut negotiation, connection);
         let mut session = Session::new(SessionId::new(10), limits());
+        assert_eq!(session.recovery_clock(), recovery_time(0));
         session
             .admit_new(participant, negotiation.established(connection).unwrap())
             .unwrap();
@@ -438,20 +488,32 @@ mod tests {
                 participant,
                 connection,
                 RetentionPolicy::RetainForRecovery {
-                    duration: NonZeroU64::new(5).unwrap(),
+                    duration: recovery_duration(5),
                 },
             )
             .unwrap();
-        assert_eq!(outcome, ConnectionLossOutcome::Retained { expires_at: 5 });
+        assert_eq!(
+            outcome,
+            ConnectionLossOutcome::Retained {
+                expires_at: recovery_time(5),
+            }
+        );
         assert!(!session.is_authorized(participant, connection));
         assert_eq!(
             session.membership_state(participant),
-            Some(MembershipState::Unbound { expires_at: 5 })
+            Some(MembershipState::Unbound {
+                expires_at: recovery_time(5),
+            })
         );
 
-        assert!(session.advance_recovery_clock(4).unwrap().is_empty());
+        assert!(
+            session
+                .advance_recovery_clock(recovery_time(4))
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
-            session.advance_recovery_clock(5).unwrap(),
+            session.advance_recovery_clock(recovery_time(5)).unwrap(),
             vec![participant]
         );
         assert_eq!(session.membership_state(participant), None);
@@ -464,7 +526,9 @@ mod tests {
         let mut negotiation = manager();
         establish(&mut negotiation, connection);
         let mut session = Session::new(SessionId::new(10), limits());
-        session.advance_recovery_clock(u64::MAX).unwrap();
+        session
+            .advance_recovery_clock(recovery_time(u64::MAX))
+            .unwrap();
         session
             .admit_new(participant, negotiation.established(connection).unwrap())
             .unwrap();
@@ -474,7 +538,7 @@ mod tests {
                 participant,
                 connection,
                 RetentionPolicy::RetainForRecovery {
-                    duration: NonZeroU64::new(1).unwrap(),
+                    duration: recovery_duration(1),
                 },
             ),
             Err(SessionError::RecoveryExpiryOverflow)
@@ -508,7 +572,7 @@ mod tests {
                 participant,
                 first_connection,
                 RetentionPolicy::RetainForRecovery {
-                    duration: NonZeroU64::new(5).unwrap(),
+                    duration: recovery_duration(5),
                 },
             )
             .unwrap();
@@ -535,7 +599,7 @@ mod tests {
                 participant,
                 connection,
                 RetentionPolicy::RetainForRecovery {
-                    duration: NonZeroU64::new(5).unwrap(),
+                    duration: recovery_duration(5),
                 },
             )
             .unwrap();
@@ -624,14 +688,16 @@ mod tests {
                 participant,
                 connection,
                 RetentionPolicy::RetainForRecovery {
-                    duration: NonZeroU64::new(5).unwrap(),
+                    duration: recovery_duration(5),
                 },
             )
             .unwrap();
 
         assert_eq!(
             session.remove_participant(participant).unwrap(),
-            MembershipState::Unbound { expires_at: 5 }
+            MembershipState::Unbound {
+                expires_at: recovery_time(5),
+            }
         );
         assert_eq!(session.membership_state(participant), None);
     }
@@ -678,11 +744,11 @@ mod tests {
                 participant,
                 first_connection,
                 RetentionPolicy::RetainForRecovery {
-                    duration: NonZeroU64::new(1).unwrap(),
+                    duration: recovery_duration(1),
                 },
             )
             .unwrap();
-        session.advance_recovery_clock(1).unwrap();
+        session.advance_recovery_clock(recovery_time(1)).unwrap();
 
         assert_eq!(
             session.bind_replacement(participant, negotiation.established(replacement).unwrap()),
@@ -707,7 +773,7 @@ mod tests {
             .admit_new(second, negotiation.established(second_connection).unwrap())
             .unwrap();
         let policy = RetentionPolicy::RetainForRecovery {
-            duration: NonZeroU64::new(1).unwrap(),
+            duration: recovery_duration(1),
         };
         session
             .connection_lost(first, first_connection, policy)
@@ -717,7 +783,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            session.advance_recovery_clock(1).unwrap(),
+            session.advance_recovery_clock(recovery_time(1)).unwrap(),
             vec![second, first]
         );
     }
@@ -749,15 +815,18 @@ mod tests {
             session.connection_lost(participant, connection, RetentionPolicy::Terminate),
             Err(SessionError::Closed)
         );
-        assert_eq!(session.advance_recovery_clock(1), Err(SessionError::Closed));
+        assert_eq!(
+            session.advance_recovery_clock(recovery_time(1)),
+            Err(SessionError::Closed)
+        );
     }
 
     #[test]
     fn recovery_clock_cannot_regress() {
         let mut session = Session::new(SessionId::new(10), limits());
-        session.advance_recovery_clock(10).unwrap();
+        session.advance_recovery_clock(recovery_time(10)).unwrap();
         assert_eq!(
-            session.advance_recovery_clock(9),
+            session.advance_recovery_clock(recovery_time(9)),
             Err(SessionError::RecoveryClockRegression)
         );
     }
