@@ -281,6 +281,11 @@ impl<I> PredictionLineage<I> {
             if lineage.current_cursor() != Some(cursor) {
                 return Err(PredictionReconciliationError::CommittedCursorMismatch);
             }
+            if let Some(terminal_reason) = self.terminal_reason() {
+                return Ok(PredictionReconciliationOutcome::RemainsInvalidated {
+                    reason: terminal_reason,
+                });
+            }
             if self.last_observed_commit == Some(cursor) {
                 return Ok(PredictionReconciliationOutcome::AlreadyObservedCommit { cursor });
             }
