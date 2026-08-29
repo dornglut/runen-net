@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-use runen_net::delivery::SubmissionOutcome;
+use runen_net::DeliveryAcceptance;
 use runen_net::identity::{ConnectionHandle, ParticipantId, SessionId, SimulationTick};
 use runen_net::protocol::{
     CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerLimits,
@@ -59,11 +59,8 @@ fn authorized_session(
     session
 }
 
-fn accepted() -> SubmissionOutcome {
-    SubmissionOutcome::Accepted {
-        accepted_index: 0,
-        local_pressure_drops: 0,
-    }
+const fn accepted() -> DeliveryAcceptance {
+    DeliveryAcceptance::Accepted
 }
 
 fn emit_full(
@@ -87,7 +84,7 @@ fn emit_full(
         )
         .unwrap();
     authority
-        .record_delivery_submission(participant, accepted())
+        .record_delivery_acceptance(participant, accepted())
         .unwrap()
         .expect("accepted full is emitted");
 }
@@ -168,7 +165,7 @@ fn authority_recovery_survives_aggregate_rejection_and_retries_same_generation()
     };
     assert_eq!(summary.recovery_generation, Some(generation_before));
     authority
-        .record_delivery_submission(participant, accepted())
+        .record_delivery_acceptance(participant, accepted())
         .unwrap()
         .expect("conforming retry is emitted");
     assert_eq!(
