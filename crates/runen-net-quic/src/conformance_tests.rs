@@ -45,7 +45,7 @@ use crate::{
         ValidatedEndpointResources, bind_client_endpoint, bind_server_endpoint,
         bind_server_endpoint_with_incompatible_alpn, bind_server_endpoint_without_datagrams,
     },
-    facade::{ProfileBootstrapFailure, ProfileReadyConnection},
+    facade::{ProfileBootstrapFailure, ProfileReadyConnection, ReliableReceiveLimits},
     flow_control::{InboundAdmission, OutboundOpenRequest},
     lifecycle::{
         AdmittedProfileReadyConnection, ProfileConnectionError, accept_profile_ready,
@@ -53,7 +53,6 @@ use crate::{
     },
     public_connection::{
         Connection as PublicConnection, ConnectionError as PublicConnectionError, ConnectionEvent,
-        ReliableReceiveLimits,
     },
     quinn_binding::{ReceiveProgress, SendProgress},
     wire::{ApplicationErrorCode, FlowId, FlowTerminateReason, WireSide, encode_varint},
@@ -1422,12 +1421,11 @@ fn activate_public_connection(
     connection: ConnectionHandle,
     host: &mut HostState,
 ) -> PublicConnection {
-    ProfileReadyConnection::from(admitted)
+    ProfileReadyConnection::from_profile(admitted, reliable_receive_limits())
         .activate(
             connection,
             offer(),
             NegotiationRequirements::default(),
-            reliable_receive_limits(),
             &mut host.negotiation,
         )
         .expect("valid public ProfileReady activation failed")
