@@ -2,11 +2,7 @@ mod authority;
 mod client;
 mod model;
 
-use crate::{
-    DeliveryAcceptance,
-    delivery::SubmissionOutcome,
-    identity::ParticipantId,
-};
+use crate::{DeliveryAcceptance, delivery::SubmissionOutcome, identity::ParticipantId};
 
 pub use authority::{
     AuthorityAckOutcome, AuthorityLineage, AuthorityOperationError, AuthorityPrepareError,
