@@ -5,6 +5,8 @@
 //! specification revision explicitly standardizes them.
 
 pub mod delivery;
+mod delivery_acceptance;
+pub use delivery_acceptance::DeliveryAcceptance;
 pub mod identity;
 pub mod input;
 pub mod protocol;

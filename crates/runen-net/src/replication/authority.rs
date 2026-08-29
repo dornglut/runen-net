@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::delivery::SubmissionOutcome;
+use crate::DeliveryAcceptance;
 use crate::identity::{ConnectionHandle, ParticipantId, SessionId, SimulationTick};
 use crate::session::Session;
 
@@ -407,11 +407,11 @@ impl<S, D> AuthorityLineage<S, D> {
         Ok(summary)
     }
 
-    fn record_delivery_submission(
+    fn record_delivery_acceptance(
         &mut self,
-        outcome: SubmissionOutcome,
+        acceptance: DeliveryAcceptance,
     ) -> Result<Option<EmittedSnapshot>, AuthorityOperationError> {
-        if !matches!(outcome, SubmissionOutcome::Accepted { .. }) {
+        if acceptance == DeliveryAcceptance::NotAccepted {
             return Ok(None);
         }
 
@@ -841,16 +841,18 @@ impl<S, D> AuthorityReplicationSession<S, D> {
         Ok(summary)
     }
 
-    pub fn record_delivery_submission(
+    /// Record whether the complete message carrying the pending snapshot was accepted into its
+    /// selected RunenNet delivery contract.
+    pub fn record_delivery_acceptance(
         &mut self,
         participant: ParticipantId,
-        outcome: SubmissionOutcome,
+        acceptance: DeliveryAcceptance,
     ) -> Result<Option<EmittedSnapshot>, AuthoritySessionError> {
         Ok(self
             .lineages
             .get_mut(&participant)
             .ok_or(AuthoritySessionError::UnknownLineage)?
-            .record_delivery_submission(outcome)?)
+            .record_delivery_acceptance(acceptance)?)
     }
 
     pub fn cancel_pending(

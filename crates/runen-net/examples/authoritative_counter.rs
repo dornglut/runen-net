@@ -212,7 +212,7 @@ fn run() {
         SubmissionOutcome::Accepted { .. }
     ));
     authority
-        .record_delivery_submission(participant, full_submission)
+        .record_delivery_acceptance(participant, full_submission.acceptance())
         .unwrap()
         .expect("accepted delivery records full-snapshot emission");
     transfer_one(&mut sender, outbound, &mut receiver, inbound, b"full:1");
@@ -257,7 +257,7 @@ fn run() {
         SubmissionOutcome::Accepted { .. }
     ));
     authority
-        .record_delivery_submission(participant, delta_submission)
+        .record_delivery_acceptance(participant, delta_submission.acceptance())
         .unwrap()
         .expect("accepted delivery records delta emission");
     transfer_one(&mut sender, outbound, &mut receiver, inbound, b"delta:2");

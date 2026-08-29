@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::num::{NonZeroU64, NonZeroUsize};
 
+use runen_net::DeliveryAcceptance;
 use runen_net::delivery::{
     DeliveryEndpoint, DeliveryFlowHandle, DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits,
     FlowDirection, FlowResourcePolicy, OutboundPressureBehavior, ReceiverPressureBehavior,
@@ -80,11 +81,8 @@ fn authorized_session(
     session
 }
 
-fn accepted() -> SubmissionOutcome {
-    SubmissionOutcome::Accepted {
-        accepted_index: 0,
-        local_pressure_drops: 0,
-    }
+fn accepted() -> DeliveryAcceptance {
+    DeliveryAcceptance::Accepted
 }
 
 fn emit_full(
@@ -107,7 +105,7 @@ fn emit_full(
         )
         .unwrap();
     authority
-        .record_delivery_submission(participant, accepted())
+        .record_delivery_acceptance(participant, accepted())
         .unwrap()
         .expect("accepted snapshot is emitted");
 }
@@ -130,7 +128,7 @@ fn emit_delta(
         )
         .unwrap();
     authority
-        .record_delivery_submission(participant, accepted())
+        .record_delivery_acceptance(participant, accepted())
         .unwrap()
         .expect("accepted snapshot is emitted");
 }
@@ -379,7 +377,7 @@ fn rn1b_acceptance_is_the_only_authority_emission_boundary() {
     assert_eq!(rejected, SubmissionOutcome::RejectedTooLarge);
     assert_eq!(
         authority
-            .record_delivery_submission(participant, rejected)
+            .record_delivery_acceptance(participant, rejected.acceptance())
             .unwrap(),
         None
     );
@@ -401,7 +399,7 @@ fn rn1b_acceptance_is_the_only_authority_emission_boundary() {
     let accepted = delivery.submit(flow, vec![0; 4]).unwrap();
     assert!(matches!(accepted, SubmissionOutcome::Accepted { .. }));
     authority
-        .record_delivery_submission(participant, accepted)
+        .record_delivery_acceptance(participant, accepted.acceptance())
         .unwrap()
         .expect("accepted delivery records emission");
     assert_eq!(

@@ -1,6 +1,7 @@
 use std::{fmt, num::NonZeroUsize};
 
 use runen_net::{
+    DeliveryAcceptance,
     delivery::{
         DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits, FlowResourcePolicy, SubmissionOutcome,
     },
@@ -234,6 +235,23 @@ pub enum SubmitOutcome {
     RejectedCurrentDatagramSize,
 }
 
+impl SubmitOutcome {
+    /// Project this QUIC submission result onto the Core-owned delivery-acceptance fact.
+    ///
+    /// Adapter-specific rejection detail remains available on this value; higher semantic layers
+    /// such as replication can consume the shared acceptance evidence without reconstructing a
+    /// Core `SubmissionOutcome`.
+    pub const fn acceptance(self) -> DeliveryAcceptance {
+        match self {
+            Self::Accepted { .. } => DeliveryAcceptance::Accepted,
+            Self::RejectedTooLarge
+            | Self::RejectedPressure
+            | Self::RejectedCounterExhausted
+            | Self::RejectedCurrentDatagramSize => DeliveryAcceptance::NotAccepted,
+        }
+    }
+}
+
 impl From<SubmissionOutcome> for SubmitOutcome {
     fn from(outcome: SubmissionOutcome) -> Self {
         match outcome {
@@ -299,6 +317,26 @@ mod tests {
             SubmitOutcome::from(SubmissionOutcome::RejectedPressure),
             SubmitOutcome::RejectedPressure
         );
+    }
+
+    #[test]
+    fn every_public_submit_outcome_exposes_shared_acceptance_evidence() {
+        assert_eq!(
+            SubmitOutcome::Accepted {
+                accepted_index: 7,
+                local_pressure_drops: 2,
+            }
+            .acceptance(),
+            DeliveryAcceptance::Accepted
+        );
+        for outcome in [
+            SubmitOutcome::RejectedTooLarge,
+            SubmitOutcome::RejectedPressure,
+            SubmitOutcome::RejectedCounterExhausted,
+            SubmitOutcome::RejectedCurrentDatagramSize,
+        ] {
+            assert_eq!(outcome.acceptance(), DeliveryAcceptance::NotAccepted);
+        }
     }
 
     #[test]
