@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-use runen_net::delivery::SubmissionOutcome;
+use runen_net::DeliveryAcceptance;
 use runen_net::identity::{ConnectionHandle, ParticipantId, SessionId, SimulationTick};
 use runen_net::protocol::{
     CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerLimits,
@@ -66,11 +66,8 @@ fn authorized_session(participant: ParticipantId, connection: ConnectionHandle) 
     session
 }
 
-fn accepted() -> SubmissionOutcome {
-    SubmissionOutcome::Accepted {
-        accepted_index: 0,
-        local_pressure_drops: 0,
-    }
+fn accepted() -> DeliveryAcceptance {
+    DeliveryAcceptance::Accepted
 }
 
 fn authority() -> AuthorityReplicationSession<BTreeMap<&'static str, i32>, ()> {
@@ -99,7 +96,7 @@ fn emit_full(
         )
         .unwrap();
     authority
-        .record_delivery_submission(participant, accepted())
+        .record_delivery_acceptance(participant, accepted())
         .unwrap();
 }
 
@@ -317,7 +314,7 @@ fn authority_keeps_latest_confirmed_as_the_only_delta_base() {
         .unwrap();
     assert_eq!(second.base_cursor, Some(ReplicationCursor::new(1)));
     authority
-        .record_delivery_submission(participant, accepted())
+        .record_delivery_acceptance(participant, accepted())
         .unwrap();
     let third = authority
         .prepare_delta(
@@ -331,7 +328,7 @@ fn authority_keeps_latest_confirmed_as_the_only_delta_base() {
         .unwrap();
     assert_eq!(third.base_cursor, Some(ReplicationCursor::new(1)));
     authority
-        .record_delivery_submission(participant, accepted())
+        .record_delivery_acceptance(participant, accepted())
         .unwrap();
 
     assert_eq!(
