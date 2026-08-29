@@ -411,3 +411,90 @@ impl<I> PredictionLineage<I> {
         };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::num::NonZeroUsize;
+
+    use super::*;
+    use crate::identity::{ParticipantId, SessionId};
+    use crate::replication::{
+        AccountedState, ClientAggregateLimits, FullSnapshot, ReplicationRetentionLimits,
+    };
+
+    fn nz(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
+    #[test]
+    fn repeated_commit_observation_does_not_replay_twice() {
+        let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
+        let retention =
+            ReplicationRetentionLimits::new(nz(64), nz(4), nz(128), nz(64), nz(4)).unwrap();
+        let mut replication =
+            ClientReplicationSet::new(ClientAggregateLimits::new(nz(2), nz(8), nz(256)));
+        replication.add_lineage(key, retention).unwrap();
+        let mut prediction = PredictionLineage::new(key, PredictionLimits::new(nz(4), nz(32), 8));
+
+        let initial = replication
+            .apply_full(
+                key,
+                FullSnapshot::new(
+                    ReplicationCursor::new(1),
+                    SimulationTick::new(10),
+                    AccountedState::new(10u32, 4),
+                ),
+                |_| Ok::<_, ()>(()),
+            )
+            .unwrap();
+        prediction
+            .observe_replication(initial, replication.lineage(key).unwrap(), |_, _| {
+                Ok::<_, ()>(())
+            })
+            .unwrap();
+        assert_eq!(
+            prediction.admit_local(SimulationTick::new(11), &11, 4),
+            PredictionInputOutcome::InputAccepted
+        );
+
+        let committed_cursor = ReplicationCursor::new(2);
+        let committed = replication
+            .apply_full(
+                key,
+                FullSnapshot::new(
+                    committed_cursor,
+                    SimulationTick::new(10),
+                    AccountedState::new(20u32, 4),
+                ),
+                |_| Ok::<_, ()>(()),
+            )
+            .unwrap();
+        let mut replayed = 0usize;
+        assert_eq!(
+            prediction
+                .observe_replication(committed, replication.lineage(key).unwrap(), |_, _| {
+                    replayed += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+            PredictionReconciliationOutcome::ReconciledReplay {
+                frontier: SimulationTick::new(10),
+                replayed: 1
+            }
+        );
+        assert_eq!(replayed, 1);
+
+        assert_eq!(
+            prediction
+                .observe_replication(committed, replication.lineage(key).unwrap(), |_, _| {
+                    replayed += 1;
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+            PredictionReconciliationOutcome::AlreadyObservedCommit {
+                cursor: committed_cursor
+            }
+        );
+        assert_eq!(replayed, 1);
+    }
+}
