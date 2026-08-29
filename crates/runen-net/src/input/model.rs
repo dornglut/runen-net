@@ -9,10 +9,7 @@ pub struct InputWindow {
 }
 
 impl InputWindow {
-    pub fn new(
-        minimum: SimulationTick,
-        maximum: SimulationTick,
-    ) -> Result<Self, InputWindowError> {
+    pub fn new(minimum: SimulationTick, maximum: SimulationTick) -> Result<Self, InputWindowError> {
         if maximum < minimum {
             return Err(InputWindowError::MaximumBeforeMinimum);
         }
