@@ -562,7 +562,7 @@ impl fmt::Debug for ProfileReadyConnection {
 }
 
 impl ProfileReadyConnection {
-    fn from_profile(
+    pub(crate) fn from_profile(
         inner: AdmittedProfileReadyConnection,
         reliable_receive: ReliableReceiveLimits,
     ) -> Self {
