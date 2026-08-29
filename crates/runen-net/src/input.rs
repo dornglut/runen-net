@@ -8,6 +8,7 @@ pub use model::{
     AuthorityInputOutcome, InputWindow, InputWindowError, PredictionLimits,
 };
 pub use prediction::{
-    PredictionInputOutcome, PredictionInvalidationReason, PredictionLineage,
-    PredictionReconciliationError, PredictionReconciliationOutcome, PredictionState,
+    PredictionActivationError, PredictionInputOutcome, PredictionInvalidationReason,
+    PredictionLineage, PredictionReconciliationError, PredictionReconciliationOutcome,
+    PredictionState,
 };
