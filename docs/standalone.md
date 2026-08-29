@@ -17,11 +17,42 @@ The application owns `NegotiationManager` and `DeliveryEndpoint`. A public QUIC 
 
 ## 1. Configure finite resources and TLS explicitly
 
-Create and validate `EndpointResourceLimits`, then derive a `ProfileConfig` from explicit `ProfileLimits`. Reliable receive staging is supplied separately through `ReliableReceiveLimits` when a ProfileReady connection is activated.
+For ordinary first use, select the application-owned endpoint capacities and construct the named finite revision-1 baseline:
+
+```rust
+let endpoint = EndpointConfig::baseline(
+    max_connections,
+    max_active_incoming_flows,
+)?;
+
+let profile = ProfileConfig::baseline(
+    endpoint,
+    semantic_role,
+    max_incoming_message_bytes,
+)?;
+```
+
+The caller still owns the values that materially define local product/resource policy: connection capacity, active incoming-flow capacity, semantic role, and the advertised incoming-message ceiling. The baseline fills in finite QUIC/control/adapter tuning such as transport windows, MTU ceiling, buffers, idle timeout, control-frame ceilings, and reliable scratch space. These values are implementation policy rather than normative RunenNet semantics and remain inspectable through `EndpointConfig::limits()` and `ProfileConfig::limits()`.
+
+Advanced consumers may construct and validate the full `EndpointResourceLimits` and `ProfileLimits` structures instead. The expert profile includes `ReliableReceiveLimits`, but the entire profile is validated before ProfileReady bootstrap. In particular:
+
+```text
+reliable max_staging_bytes >= max_incoming_message_bytes
+```
+
+The baseline derives reliable staging exactly from the advertised incoming-message ceiling. This prevents the adapter from advertising and accepting a reliable message-size contract that its configured reassembly staging is statically unable to support.
+
+The validated reliable receive limits travel with `ProfileConfig` into `ProfileReadyConnection`; they are not re-specified during connection activation.
+
+Resource accounting remains application-visible. Ignoring allocator and metadata overhead, potential simultaneous in-progress reliable payload reassembly is bounded approximately by:
+
+```text
+max_active_incoming_flows * reliable_max_staging_bytes
+```
+
+in addition to per-stream scratch space, Core delivery buffering, and QUIC transport windows/buffers. Choosing a larger incoming-message ceiling or flow capacity therefore raises potential local memory exposure even though the baseline keeps the lower-level tuning finite.
 
 `ClientEndpoint` owns client-side transport setup and trust material. `ServerEndpoint` owns server-side transport setup and server identity material. The example generates a self-signed certificate only to make a single-process loopback program executable; production applications should provide their own certificate lifecycle and trust policy.
-
-These resource numbers, timeouts, addresses, certificate choices, and pressure policies are application/demo policy. They are not normative RunenNet defaults.
 
 ## 2. Bootstrap transport asynchronously
 
@@ -54,8 +85,9 @@ The application activates each `ProfileReadyConnection` with:
 - a host-supplied `ConnectionHandle`;
 - its `CompatibilityOffer`;
 - `NegotiationRequirements`;
-- explicit `ReliableReceiveLimits`;
 - a synchronous mutable borrow of its `NegotiationManager`.
+
+Reliable receive resources are already part of the validated ProfileReady ownership and are consumed automatically during established-driver activation.
 
 Activation returns one move-owned `runen_net_quic::Connection`. That same public owner spans compatibility negotiation and established delivery; applications do not switch to a second public flow/runtime object after negotiation.
 
