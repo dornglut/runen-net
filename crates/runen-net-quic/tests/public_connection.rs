@@ -430,7 +430,6 @@ async fn run_public_admission_contracts() {
                 mode: DeliveryMode::ReliableOrdered,
                 policy: flow_policy(DeliveryMode::ReliableOrdered),
                 connection_limits: flow_connection_limits(),
-                stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
             },
         )
         .unwrap();
@@ -532,7 +531,6 @@ async fn run_public_admission_contracts() {
                     mode: DeliveryMode::ReliableOrdered,
                     policy: flow_policy(DeliveryMode::ReliableOrdered),
                     connection_limits: flow_connection_limits(),
-                    stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
                 },
             )
             .unwrap();
@@ -652,7 +650,6 @@ async fn open_and_accept_public_flow(
                 mode,
                 policy: flow_policy(mode),
                 connection_limits: flow_connection_limits(),
-                stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
             },
         )
         .unwrap();
@@ -1307,7 +1304,6 @@ fn established_teardown_handles_outstanding_request_and_active_flow_once() {
                         mode: DeliveryMode::ReliableOrdered,
                         policy: flow_policy(DeliveryMode::ReliableOrdered),
                         connection_limits: flow_connection_limits(),
-                        stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
                     },
                 )
                 .unwrap();
