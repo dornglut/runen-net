@@ -17,7 +17,7 @@ use runen_net::replication::{
     ClientReplicationState, ClientSnapshotOutcome, FullSnapshot, ReplicationCursor,
     ReplicationLineageKey, ReplicationRetentionLimits,
 };
-use runen_net::session::{RetentionPolicy, Session, SessionLimits};
+use runen_net::session::{RecoveryDuration, RetentionPolicy, Session, SessionLimits};
 
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
@@ -701,7 +701,7 @@ fn replacement_resets_prediction_but_preserves_participant_scoped_authority_inpu
             participant,
             first_connection,
             RetentionPolicy::RetainForRecovery {
-                duration: NonZeroU64::new(5).unwrap(),
+                duration: RecoveryDuration::new(NonZeroU64::new(5).unwrap()),
             },
         )
         .unwrap();
