@@ -45,6 +45,19 @@ fn validate() -> Result<(), String> {
     )?;
     run(
         &root,
+        "standalone QUIC example",
+        "cargo",
+        &[
+            "run",
+            "--locked",
+            "-p",
+            "runen-net-quic",
+            "--example",
+            "standalone",
+        ],
+    )?;
+    run(
+        &root,
         "Clippy",
         "cargo",
         &[
