@@ -17,9 +17,12 @@ The command is repository-owned and currently verifies:
 3. normative `spec/` dependency-boundary rules;
 4. workspace formatting;
 5. locked all-target workspace tests;
-6. Clippy with warnings denied;
-7. Git diff hygiene;
-8. before/after checkout-state preservation.
+6. execution of the public standalone QUIC loopback example;
+7. Clippy with warnings denied;
+8. Git diff hygiene;
+9. before/after checkout-state preservation.
+
+The standalone QUIC execution check is self-contained and loopback-only. It verifies that the advertised public client/server example completes successfully at runtime rather than merely compiling.
 
 Focused checks may be used during development but do not replace `cargo validate` before acceptance.
 
