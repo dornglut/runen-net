@@ -40,9 +40,10 @@ RN6 declaration ergonomics build the existing Core values without adding a runti
 ```rust
 let offer = CompatibilityOffer::builder()
     .protocol(ProtocolId::new(1), ProtocolRevision::new(1))
-    .diagnostic_label("my-client")
     .build();
 ```
+
+The revision-1 QUIC profile does not encode `CompatibilityOffer` diagnostic labels, so an offer submitted through `runen-net-quic` must omit them. Keep any local diagnostic metadata outside the submitted compatibility offer.
 
 For schemas, compose `SchemaOffer::builder(...)` and `SchemaContractOffer::builder(...)` with explicit `RequirementLevel`, contract IDs, and codec IDs. The builders preserve the declared values and ordering. Existing `CompatibilityOffer::validate` / `NegotiationManager::validate_offer` remain the validation and accounting paths.
 
@@ -130,7 +131,7 @@ Raw mutable Quinn access is not the ordinary escape hatch because bypassing the 
 From the repository root:
 
 ```text
-cargo run -p runen-net-quic --example standalone
+cargo run --locked -p runen-net-quic --example standalone
 ```
 
 The example is intentionally one process on loopback. It demonstrates ownership and API composition, not production deployment, authentication, matchmaking, certificate operations, or world/session policy.

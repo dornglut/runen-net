@@ -448,7 +448,6 @@ fn host_state() -> HostState {
 fn compatibility_offer() -> CompatibilityOffer {
     CompatibilityOffer::builder()
         .protocol(ProtocolId::new(1), ProtocolRevision::new(1))
-        .diagnostic_label("standalone-example")
         .build()
 }
 
