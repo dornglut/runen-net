@@ -481,7 +481,7 @@ fn authoritative_commit_advances_frontier_and_retires_covered_prediction() {
     prediction.admit_local(tick(12), &12, 4);
 
     let outcome = replication
-        .apply_full(key, full(2, 12, 99), |_| Ok::<_, ()>(() ))
+        .apply_full(key, full(2, 12, 99), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replay_called = false;
     assert_eq!(
@@ -509,15 +509,19 @@ fn later_prediction_replays_once_in_target_tick_order() {
     prediction.admit_local(tick(12), &12, 4);
 
     let outcome = replication
-        .apply_full(key, full(2, 11, 50), |_| Ok::<_, ()>(() ))
+        .apply_full(key, full(2, 11, 50), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replayed = Vec::new();
     assert_eq!(
         prediction
-            .observe_replication(outcome, replication.lineage(key).unwrap(), |target, value| {
-                replayed.push((target.get(), *value));
-                Ok::<_, ()>(())
-            })
+            .observe_replication(
+                outcome,
+                replication.lineage(key).unwrap(),
+                |target, value| {
+                    replayed.push((target.get(), *value));
+                    Ok::<_, ()>(())
+                },
+            )
             .unwrap(),
         PredictionReconciliationOutcome::ReconciledReplay {
             frontier: tick(11),
@@ -565,21 +569,28 @@ fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore
     prediction.admit_local(tick(13), &13, 4);
 
     let outcome = replication
-        .apply_full(key, full(2, 11, 100), |_| Ok::<_, ()>(() ))
+        .apply_full(key, full(2, 11, 100), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replayed = Vec::new();
     let error = prediction
-        .observe_replication(outcome, replication.lineage(key).unwrap(), |target, value| {
-            replayed.push((target.get(), *value));
-            if target == tick(13) {
-                Err("replay failed")
-            } else {
-                Ok(())
-            }
-        })
+        .observe_replication(
+            outcome,
+            replication.lineage(key).unwrap(),
+            |target, value| {
+                replayed.push((target.get(), *value));
+                if target == tick(13) {
+                    Err("replay failed")
+                } else {
+                    Ok(())
+                }
+            },
+        )
         .unwrap_err();
     match error {
-        PredictionReconciliationError::ReplayFailed { tick: failed, source } => {
+        PredictionReconciliationError::ReplayFailed {
+            tick: failed,
+            source,
+        } => {
             assert_eq!(failed, tick(13));
             assert_eq!(source, "replay failed");
         }
@@ -590,7 +601,10 @@ fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore
         replication.lineage(key).unwrap().current_cursor(),
         Some(ReplicationCursor::new(2))
     );
-    assert_eq!(replication.lineage(key).unwrap().current_tick(), Some(tick(11)));
+    assert_eq!(
+        replication.lineage(key).unwrap().current_tick(),
+        Some(tick(11))
+    );
     assert_eq!(
         prediction.state(),
         PredictionState::Invalidated {
@@ -692,9 +706,20 @@ fn replacement_resets_prediction_but_preserves_participant_scoped_authority_inpu
         )
         .unwrap();
     prediction.connection_lost();
-    assert!(authority_input.reconcile_memberships(&session).unwrap().is_empty());
-    assert_eq!(authority_input.participant_retained_key_count(participant), Some(1));
-    assert_eq!(authority_input.participant_window(participant), Some(window(10, 20)));
+    assert!(
+        authority_input
+            .reconcile_memberships(&session)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        authority_input.participant_retained_key_count(participant),
+        Some(1)
+    );
+    assert_eq!(
+        authority_input.participant_window(participant),
+        Some(window(10, 20))
+    );
     assert_eq!(prediction.pending_count(), 0);
 
     session
@@ -712,7 +737,7 @@ fn replacement_resets_prediction_but_preserves_participant_scoped_authority_inpu
     );
 
     let outcome = replication
-        .apply_full(key, full(2, 12, 120), |_| Ok::<_, ()>(() ))
+        .apply_full(key, full(2, 12, 120), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replay_called = false;
     assert_eq!(
@@ -753,7 +778,10 @@ fn participant_removal_and_session_close_terminate_old_input_and_prediction_stat
     prediction.admit_local(tick(2), &2, 4);
 
     session.remove_participant(participant).unwrap();
-    assert_eq!(authority_input.reconcile_memberships(&session).unwrap(), vec![participant]);
+    assert_eq!(
+        authority_input.reconcile_memberships(&session).unwrap(),
+        vec![participant]
+    );
     prediction.participant_membership_ended();
     assert_eq!(authority_input.participant_count(), 0);
     assert_eq!(authority_input.retained_key_count(), 0);
@@ -880,14 +908,7 @@ fn checked_accounting_overflow_fails_closed() {
         .unwrap();
     assert_eq!(
         authority
-            .submit(
-                &session,
-                first,
-                first_connection,
-                tick(2),
-                &1,
-                usize::MAX,
-            )
+            .submit(&session, first, first_connection, tick(2), &1, usize::MAX,)
             .unwrap(),
         AuthorityInputOutcome::InputAccepted
     );
@@ -926,15 +947,19 @@ fn same_tick_newer_authoritative_commit_replays_pending_prediction() {
     prediction.admit_local(tick(11), &11, 4);
 
     let outcome = replication
-        .apply_full(key, full(2, 10, 200), |_| Ok::<_, ()>(() ))
+        .apply_full(key, full(2, 10, 200), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replayed = Vec::new();
     assert_eq!(
         prediction
-            .observe_replication(outcome, replication.lineage(key).unwrap(), |target, value| {
-                replayed.push((target.get(), *value));
-                Ok::<_, ()>(())
-            })
+            .observe_replication(
+                outcome,
+                replication.lineage(key).unwrap(),
+                |target, value| {
+                    replayed.push((target.get(), *value));
+                    Ok::<_, ()>(())
+                },
+            )
             .unwrap(),
         PredictionReconciliationOutcome::ReconciledReplay {
             frontier: tick(10),
