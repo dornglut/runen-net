@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use crate::identity::SimulationTick;
 use crate::replication::{
     ClientLineage, ClientRecoveryReason, ClientReplicationSet, ClientReplicationState,
-    ClientSetError, ClientSnapshotOutcome, ReplicationLineageKey,
+    ClientSetError, ClientSnapshotOutcome, ReplicationCursor, ReplicationLineageKey,
 };
 
 use super::model::PredictionLimits;
@@ -54,6 +54,9 @@ pub enum PredictionInputOutcome {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PredictionReconciliationOutcome {
     NoAuthoritativeCommit,
+    AlreadyObservedCommit {
+        cursor: ReplicationCursor,
+    },
     ActivatedFromAuthoritative {
         frontier: SimulationTick,
     },
@@ -98,6 +101,9 @@ pub struct PredictionLineage<I> {
     state: PredictionState,
     pending: BTreeMap<SimulationTick, PendingInput<I>>,
     pending_bytes: usize,
+    // Non-authoritative idempotence evidence only. ClientLineage remains the
+    // sole owner of the current authoritative replication cursor and state.
+    last_observed_commit: Option<ReplicationCursor>,
 }
 
 impl<I> PredictionLineage<I> {
@@ -111,6 +117,7 @@ impl<I> PredictionLineage<I> {
             },
             pending: BTreeMap::new(),
             pending_bytes: 0,
+            last_observed_commit: None,
         }
     }
 
@@ -274,10 +281,13 @@ impl<I> PredictionLineage<I> {
             if lineage.current_cursor() != Some(cursor) {
                 return Err(PredictionReconciliationError::CommittedCursorMismatch);
             }
+            if self.last_observed_commit == Some(cursor) {
+                return Ok(PredictionReconciliationOutcome::AlreadyObservedCommit { cursor });
+            }
             let tick = lineage
                 .current_tick()
                 .ok_or(PredictionReconciliationError::MissingCommittedTick)?;
-            return self.reconcile_committed(tick, replay);
+            return self.reconcile_committed(cursor, tick, replay);
         }
 
         if let ClientReplicationState::FullSnapshotRequired(reason) = lineage.replication_state() {
@@ -295,6 +305,7 @@ impl<I> PredictionLineage<I> {
 
     fn reconcile_committed<E, F>(
         &mut self,
+        cursor: ReplicationCursor,
         tick: SimulationTick,
         mut replay: F,
     ) -> Result<PredictionReconciliationOutcome, PredictionReconciliationError<E>>
@@ -306,6 +317,7 @@ impl<I> PredictionLineage<I> {
         }
 
         if let PredictionState::Invalidated { reason, .. } = self.state {
+            self.last_observed_commit = Some(cursor);
             if matches!(
                 reason,
                 PredictionInvalidationReason::InitialBaseline
@@ -334,6 +346,7 @@ impl<I> PredictionLineage<I> {
             .checked_sub(retired_bytes)
             .ok_or(PredictionReconciliationError::AccountingInvariantViolation)?;
 
+        self.last_observed_commit = Some(cursor);
         self.state = PredictionState::Active { frontier: tick };
         for target_tick in retired_ticks {
             self.pending.remove(&target_tick);
