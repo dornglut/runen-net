@@ -179,7 +179,6 @@ fn live_public_quic_submission_composes_directly_with_authority_replication() {
                         mode: DeliveryMode::ReliableOrdered,
                         policy: reliable_policy(),
                         connection_limits: connection_limits(),
-                        stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
                     },
                 )
                 .unwrap();
