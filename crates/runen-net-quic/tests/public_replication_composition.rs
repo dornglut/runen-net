@@ -26,7 +26,8 @@ use runen_net::{
 use runen_net_quic::{
     CertificateDer, ClientEndpoint, ClientTrust, ConnectionEvent, EndpointConfig,
     EndpointResourceLimits, InboundFlowConfig, OutboundFlowConfig, PrivateKeyDer, ProfileConfig,
-    ProfileLimits, ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity, SubmitOutcome,
+    ProfileLimits, ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity,
+    SubmitOutcome,
 };
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use tokio::runtime::Builder;
@@ -245,8 +246,7 @@ fn live_public_quic_submission_composes_directly_with_authority_replication() {
             replication
                 .add_lineage(
                     participant,
-                    ReplicationRetentionLimits::new(nz(16), nz(2), nz(32), nz(16), nz(2))
-                        .unwrap(),
+                    ReplicationRetentionLimits::new(nz(16), nz(2), nz(32), nz(16), nz(2)).unwrap(),
                 )
                 .unwrap();
             replication
