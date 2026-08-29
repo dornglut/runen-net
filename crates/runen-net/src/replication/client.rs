@@ -75,6 +75,7 @@ pub struct ClientLineage<S> {
     limits: ReplicationRetentionLimits,
     state: ClientReplicationState,
     current: Option<ReplicationCursor>,
+    latest_recovery_boundary: Option<(ReplicationCursor, ClientRecoveryReason)>,
     retained: BTreeMap<ReplicationCursor, RetainedState<S>>,
     retained_bytes: usize,
 }
@@ -88,6 +89,7 @@ impl<S> ClientLineage<S> {
                 ClientRecoveryReason::InitialBaseline,
             ),
             current: None,
+            latest_recovery_boundary: None,
             retained: BTreeMap::new(),
             retained_bytes: 0,
         }
@@ -134,6 +136,12 @@ impl<S> ClientLineage<S> {
 
     pub const fn acknowledgement_cursor(&self) -> Option<ReplicationCursor> {
         self.current
+    }
+
+    pub(crate) const fn latest_recovery_boundary(
+        &self,
+    ) -> Option<(ReplicationCursor, ClientRecoveryReason)> {
+        self.latest_recovery_boundary
     }
 
     fn classify_cursor(&self, target: ReplicationCursor) -> Option<ClientSnapshotOutcome> {
@@ -213,6 +221,13 @@ impl<S> ClientLineage<S> {
     }
 
     fn enter_recovery(&mut self, reason: ClientRecoveryReason) {
+        if let Some(cursor) = self.current
+            && self
+                .latest_recovery_boundary
+                .is_none_or(|(recorded, _)| recorded != cursor)
+        {
+            self.latest_recovery_boundary = Some((cursor, reason));
+        }
         self.state = ClientReplicationState::FullSnapshotRequired(reason);
     }
 

@@ -13,9 +13,9 @@ use runen_net::protocol::{
     NegotiationRequirements, OfferLimits, ProtocolContract, ProtocolId, ProtocolRevision,
 };
 use runen_net::replication::{
-    AccountedState, ClientAggregateLimits, ClientRecoveryReason, ClientReplicationSet,
-    ClientReplicationState, ClientSnapshotOutcome, FullSnapshot, ReplicationCursor,
-    ReplicationLineageKey, ReplicationRetentionLimits,
+    AccountedState, ClientAggregateLimits, ClientApplyError, ClientRecoveryReason,
+    ClientReplicationSet, ClientReplicationState, ClientSnapshotOutcome, DeltaSnapshot,
+    FullSnapshot, ReplicationCursor, ReplicationLineageKey, ReplicationRetentionLimits,
 };
 use runen_net::session::{RecoveryDuration, RetentionPolicy, Session, SessionLimits};
 
@@ -123,18 +123,14 @@ fn activate_prediction(
     cursor: u64,
     target_tick: u64,
 ) {
-    let outcome = replication
+    replication
         .apply_full(key, full(cursor, target_tick, target_tick as u32), |_| {
             Ok::<_, ()>(())
         })
         .unwrap();
     assert_eq!(
         prediction
-            .observe_replication(
-                outcome,
-                replication.lineage(key).unwrap(),
-                |_, _| Ok::<_, ()>(()),
-            )
+            .observe_replication(replication, |_, _| Ok::<_, ()>(()))
             .unwrap(),
         PredictionReconciliationOutcome::ActivatedFromAuthoritative {
             frontier: tick(target_tick)
@@ -480,13 +476,13 @@ fn authoritative_commit_advances_frontier_and_retires_covered_prediction() {
     prediction.admit_local(tick(11), &11, 4);
     prediction.admit_local(tick(12), &12, 4);
 
-    let outcome = replication
+    replication
         .apply_full(key, full(2, 12, 99), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replay_called = false;
     assert_eq!(
         prediction
-            .observe_replication(outcome, replication.lineage(key).unwrap(), |_, _| {
+            .observe_replication(&replication, |_, _| {
                 replay_called = true;
                 Ok::<_, ()>(())
             })
@@ -508,20 +504,16 @@ fn later_prediction_replays_once_in_target_tick_order() {
     prediction.admit_local(tick(11), &11, 4);
     prediction.admit_local(tick(12), &12, 4);
 
-    let outcome = replication
+    replication
         .apply_full(key, full(2, 11, 50), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replayed = Vec::new();
     assert_eq!(
         prediction
-            .observe_replication(
-                outcome,
-                replication.lineage(key).unwrap(),
-                |target, value| {
-                    replayed.push((target.get(), *value));
-                    Ok::<_, ()>(())
-                },
-            )
+            .observe_replication(&replication, |target, value| {
+                replayed.push((target.get(), *value));
+                Ok::<_, ()>(())
+            })
             .unwrap(),
         PredictionReconciliationOutcome::ReconciledReplay {
             frontier: tick(11),
@@ -546,7 +538,7 @@ fn failed_authoritative_candidate_does_not_mutate_prediction() {
         .unwrap_err();
     assert_eq!(
         failed,
-        runen_net::replication::ClientApplyError::HostCommitFailure {
+        ClientApplyError::HostCommitFailure {
             source: "commit failed"
         }
     );
@@ -558,10 +550,167 @@ fn failed_authoritative_candidate_does_not_mutate_prediction() {
         replication.lineage(key).unwrap().current_tick(),
         Some(tick(10))
     );
+    let mut replay_called = false;
+    assert_eq!(
+        prediction
+            .observe_replication(&replication, |_, _| {
+                replay_called = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        PredictionReconciliationOutcome::NoAuthoritativeCommit
+    );
+    assert!(!replay_called);
     assert_eq!(prediction.frontier(), Some(tick(10)));
     assert_eq!(prediction.pending_count(), 2);
     assert_eq!(prediction.pending_input(tick(11)), Some(&11));
     assert_eq!(prediction.pending_input(tick(12)), Some(&12));
+}
+
+#[test]
+fn delta_host_commit_failure_invalidates_prediction_from_live_recovery_state() {
+    let key = ReplicationLineageKey::new(SessionId::new(22), ParticipantId::new(22));
+    let mut replication = replication(key);
+    let mut prediction = PredictionLineage::new(key, prediction_limits());
+    activate_prediction(&mut prediction, &mut replication, key, 1, 10);
+    prediction.admit_local(tick(12), &12, 4);
+
+    let failed = replication
+        .apply_delta(
+            key,
+            DeltaSnapshot::new(
+                ReplicationCursor::new(1),
+                ReplicationCursor::new(2),
+                tick(11),
+                5u32,
+            ),
+            |base, delta, _candidate_limit| Ok(AccountedState::new(*base + *delta, 8)),
+            |_| Err::<(), _>("delta commit failed"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        failed,
+        ClientApplyError::HostCommitFailure {
+            source: "delta commit failed"
+        }
+    );
+    assert_eq!(
+        replication.lineage(key).unwrap().replication_state(),
+        ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::DeltaCommitFailure)
+    );
+    let mut replay_called = false;
+    assert_eq!(
+        prediction
+            .observe_replication(&replication, |_, _| {
+                replay_called = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        PredictionReconciliationOutcome::InvalidatedByRecovery {
+            reason: ClientRecoveryReason::DeltaCommitFailure
+        }
+    );
+    assert!(!replay_called);
+    assert_eq!(
+        prediction.state(),
+        PredictionState::Invalidated {
+            reason: PredictionInvalidationReason::ReplicationRecovery(
+                ClientRecoveryReason::DeltaCommitFailure
+            ),
+            frontier: Some(tick(10))
+        }
+    );
+    assert_eq!(prediction.pending_count(), 0);
+}
+
+#[test]
+fn delta_recovery_cleared_before_observation_still_discards_old_prediction() {
+    let key = ReplicationLineageKey::new(SessionId::new(24), ParticipantId::new(24));
+    let mut replication = replication(key);
+    let mut prediction = PredictionLineage::new(key, prediction_limits());
+    activate_prediction(&mut prediction, &mut replication, key, 1, 10);
+    prediction.admit_local(tick(12), &12, 4);
+
+    let failed = replication
+        .apply_delta(
+            key,
+            DeltaSnapshot::new(
+                ReplicationCursor::new(1),
+                ReplicationCursor::new(2),
+                tick(11),
+                5u32,
+            ),
+            |base, delta, _candidate_limit| Ok(AccountedState::new(*base + *delta, 8)),
+            |_| Err::<(), _>("delta commit failed"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        failed,
+        ClientApplyError::HostCommitFailure {
+            source: "delta commit failed"
+        }
+    );
+    assert_eq!(
+        replication.lineage(key).unwrap().replication_state(),
+        ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::DeltaCommitFailure)
+    );
+
+    replication
+        .apply_full(key, full(2, 11, 200), |_| Ok::<_, ()>(()))
+        .unwrap();
+    assert_eq!(
+        replication.lineage(key).unwrap().replication_state(),
+        ClientReplicationState::Synchronized
+    );
+
+    let mut replay_called = false;
+    assert_eq!(
+        prediction
+            .observe_replication(&replication, |_, _| {
+                replay_called = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        PredictionReconciliationOutcome::ActivatedFromAuthoritative { frontier: tick(11) }
+    );
+    assert!(!replay_called);
+    assert_eq!(prediction.pending_count(), 0);
+    assert_eq!(prediction.frontier(), Some(tick(11)));
+}
+
+#[test]
+fn missing_base_recovery_invalidates_prediction_from_live_state() {
+    let key = ReplicationLineageKey::new(SessionId::new(23), ParticipantId::new(23));
+    let mut replication = replication(key);
+    let mut prediction = PredictionLineage::new(key, prediction_limits());
+    activate_prediction(&mut prediction, &mut replication, key, 1, 10);
+    prediction.admit_local(tick(12), &12, 4);
+
+    assert_eq!(
+        replication
+            .apply_delta(
+                key,
+                DeltaSnapshot::new(
+                    ReplicationCursor::new(99),
+                    ReplicationCursor::new(100),
+                    tick(11),
+                    5u32,
+                ),
+                |base, delta, _candidate_limit| Ok(AccountedState::new(*base + *delta, 8)),
+                |_| Ok::<_, ()>(()),
+            )
+            .unwrap(),
+        ClientSnapshotOutcome::MissingBase
+    );
+    assert_eq!(
+        prediction
+            .observe_replication(&replication, |_, _| Ok::<_, ()>(()))
+            .unwrap(),
+        PredictionReconciliationOutcome::InvalidatedByRecovery {
+            reason: ClientRecoveryReason::MissingBase
+        }
+    );
+    assert_eq!(prediction.pending_count(), 0);
 }
 
 #[test]
@@ -573,23 +722,19 @@ fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore
     prediction.admit_local(tick(12), &12, 4);
     prediction.admit_local(tick(13), &13, 4);
 
-    let outcome = replication
+    replication
         .apply_full(key, full(2, 11, 100), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replayed = Vec::new();
     let error = prediction
-        .observe_replication(
-            outcome,
-            replication.lineage(key).unwrap(),
-            |target, value| {
-                replayed.push((target.get(), *value));
-                if target == tick(13) {
-                    Err("replay failed")
-                } else {
-                    Ok(())
-                }
-            },
-        )
+        .observe_replication(&replication, |target, value| {
+            replayed.push((target.get(), *value));
+            if target == tick(13) {
+                Err("replay failed")
+            } else {
+                Ok(())
+            }
+        })
         .unwrap_err();
     match error {
         PredictionReconciliationError::ReplayFailed {
@@ -621,7 +766,7 @@ fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore
 
     assert_eq!(
         prediction
-            .confirm_host_restored_after_replay_failure(replication.lineage(key).unwrap())
+            .confirm_host_restored_after_replay_failure(&replication)
             .unwrap(),
         tick(11)
     );
@@ -629,8 +774,19 @@ fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore
         prediction.state(),
         PredictionState::Active { frontier: tick(11) }
     );
+    let mut replay_called = false;
     assert_eq!(
-        prediction.confirm_host_restored_after_replay_failure(replication.lineage(key).unwrap()),
+        prediction
+            .observe_replication(&replication, |_, _| {
+                replay_called = true;
+                Ok::<_, ()>(())
+            })
+            .unwrap(),
+        PredictionReconciliationOutcome::NoAuthoritativeCommit
+    );
+    assert!(!replay_called);
+    assert_eq!(
+        prediction.confirm_host_restored_after_replay_failure(&replication),
         Err(PredictionActivationError::NotReplayFailure)
     );
 }
@@ -741,13 +897,13 @@ fn replacement_resets_prediction_but_preserves_participant_scoped_authority_inpu
         AuthorityInputOutcome::DuplicateInput
     );
 
-    let outcome = replication
+    replication
         .apply_full(key, full(2, 12, 120), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replay_called = false;
     assert_eq!(
         prediction
-            .observe_replication(outcome, replication.lineage(key).unwrap(), |_, _| {
+            .observe_replication(&replication, |_, _| {
                 replay_called = true;
                 Ok::<_, ()>(())
             })
@@ -805,11 +961,7 @@ fn participant_removal_and_session_close_terminate_old_input_and_prediction_stat
     );
     assert_eq!(
         prediction
-            .observe_replication(
-                ClientSnapshotOutcome::Committed(ReplicationCursor::new(1)),
-                first_replication.lineage(key).unwrap(),
-                |_, _| Ok::<_, ()>(()),
-            )
+            .observe_replication(&first_replication, |_, _| Ok::<_, ()>(()))
             .unwrap(),
         PredictionReconciliationOutcome::RemainsInvalidated {
             reason: PredictionInvalidationReason::ParticipantMembershipEnded
@@ -951,20 +1103,16 @@ fn same_tick_newer_authoritative_commit_replays_pending_prediction() {
     activate_prediction(&mut prediction, &mut replication, key, 1, 10);
     prediction.admit_local(tick(11), &11, 4);
 
-    let outcome = replication
+    replication
         .apply_full(key, full(2, 10, 200), |_| Ok::<_, ()>(()))
         .unwrap();
     let mut replayed = Vec::new();
     assert_eq!(
         prediction
-            .observe_replication(
-                outcome,
-                replication.lineage(key).unwrap(),
-                |target, value| {
-                    replayed.push((target.get(), *value));
-                    Ok::<_, ()>(())
-                },
-            )
+            .observe_replication(&replication, |target, value| {
+                replayed.push((target.get(), *value));
+                Ok::<_, ()>(())
+            })
             .unwrap(),
         PredictionReconciliationOutcome::ReconciledReplay {
             frontier: tick(10),
