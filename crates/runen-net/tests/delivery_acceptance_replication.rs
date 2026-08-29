@@ -87,10 +87,8 @@ fn replication_consumes_only_delivery_acceptance_evidence() {
 fn non_acceptance_still_rejects_unknown_lineage() {
     let mut replication = authority();
     assert_eq!(
-        replication.record_delivery_acceptance(
-            ParticipantId::new(99),
-            DeliveryAcceptance::NotAccepted,
-        ),
+        replication
+            .record_delivery_acceptance(ParticipantId::new(99), DeliveryAcceptance::NotAccepted,),
         Err(AuthoritySessionError::UnknownLineage)
     );
 }
