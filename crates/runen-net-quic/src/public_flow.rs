@@ -1,4 +1,4 @@
-use std::{fmt, num::NonZeroUsize};
+use std::fmt;
 
 use runen_net::{
     DeliveryAcceptance,
@@ -17,14 +17,15 @@ use crate::{
 ///
 /// The Core `DeliveryFlowKey` is the public flow identity. Delivery mode and resource
 /// policy are fixed explicitly; the QUIC adapter never rewrites them based on transport
-/// availability, payload size, or pressure.
+/// availability, payload size, or pressure. Revision-1 `OPEN_FLOW.max_message_bytes` is
+/// derived from [`FlowResourcePolicy::max_message_bytes`], so callers specify the outbound
+/// message-size authority exactly once.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct OutboundFlowConfig {
     pub key: DeliveryFlowKey,
     pub mode: DeliveryMode,
     pub policy: FlowResourcePolicy,
     pub connection_limits: DeliveryScopeLimits,
-    pub stable_max_message_bytes: NonZeroUsize,
 }
 
 /// Explicit host-owned Core admission configuration for one incoming flow request.
