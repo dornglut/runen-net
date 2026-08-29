@@ -306,7 +306,7 @@ impl ProfileConfig {
         self.limits
     }
 
-    pub const fn reliable_receive_limits(self) -> ReliableReceiveLimits {
+    const fn reliable_receive_limits(self) -> ReliableReceiveLimits {
         self.limits.reliable_receive
     }
 }
@@ -570,10 +570,6 @@ impl ProfileReadyConnection {
             _inner: inner,
             reliable_receive,
         }
-    }
-
-    pub const fn reliable_receive_limits(&self) -> ReliableReceiveLimits {
-        self.reliable_receive
     }
 
     pub(super) fn into_parts(self) -> (AdmittedProfileReadyConnection, ReliableReceiveLimits) {
