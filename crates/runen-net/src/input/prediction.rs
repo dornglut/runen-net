@@ -26,10 +26,7 @@ pub enum PredictionInvalidationReason {
 
 impl PredictionInvalidationReason {
     const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::ParticipantMembershipEnded | Self::SessionClosed
-        )
+        matches!(self, Self::ParticipantMembershipEnded | Self::SessionClosed)
     }
 }
 
@@ -198,7 +195,9 @@ impl<I> PredictionLineage<I> {
     }
 
     pub fn connection_lost(&mut self) {
-        self.invalidate(PredictionInvalidationReason::ConnectionLoss);
+        if self.terminal_reason().is_none() {
+            self.invalidate(PredictionInvalidationReason::ConnectionLoss);
+        }
     }
 
     pub fn participant_membership_ended(&mut self) {
@@ -315,9 +314,9 @@ impl<I> PredictionLineage<I> {
                 self.pending.clear();
                 self.pending_bytes = 0;
                 self.state = PredictionState::Active { frontier: tick };
-                return Ok(PredictionReconciliationOutcome::ActivatedFromAuthoritative {
-                    frontier: tick,
-                });
+                return Ok(
+                    PredictionReconciliationOutcome::ActivatedFromAuthoritative { frontier: tick },
+                );
             }
             return Ok(PredictionReconciliationOutcome::RemainsInvalidated { reason });
         }
@@ -342,9 +341,7 @@ impl<I> PredictionLineage<I> {
         self.pending_bytes = next_pending_bytes;
 
         if self.pending.is_empty() {
-            return Ok(PredictionReconciliationOutcome::ReconciledNoReplay {
-                frontier: tick,
-            });
+            return Ok(PredictionReconciliationOutcome::ReconciledNoReplay { frontier: tick });
         }
 
         let mut replayed = 0usize;
