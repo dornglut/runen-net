@@ -44,13 +44,13 @@ The baseline derives reliable staging exactly from the advertised incoming-messa
 
 The validated reliable receive limits travel with `ProfileConfig` into `ProfileReadyConnection`; they are not re-specified during connection activation.
 
-Resource accounting remains application-visible. Ignoring allocator and metadata overhead, potential simultaneous in-progress reliable payload reassembly is bounded approximately by:
+Resource accounting remains application-visible. `max_active_incoming_flows` configures each connection's incoming-flow capacity. Ignoring allocator and metadata overhead, potential simultaneous in-progress reliable payload reassembly for one connection is therefore bounded approximately by:
 
 ```text
 max_active_incoming_flows * reliable_max_staging_bytes
 ```
 
-in addition to per-stream scratch space, Core delivery buffering, and QUIC transport windows/buffers. Choosing a larger incoming-message ceiling or flow capacity therefore raises potential local memory exposure even though the baseline keeps the lower-level tuning finite.
+The conservative endpoint-wide counterpart additionally multiplies that term by `max_connections`. Both are in addition to per-stream scratch space, Core delivery buffering, and QUIC transport windows/buffers. Choosing a larger incoming-message ceiling, incoming-flow capacity, or connection capacity therefore raises potential local memory exposure even though the baseline keeps the lower-level tuning finite.
 
 `ClientEndpoint` owns client-side transport setup and trust material. `ServerEndpoint` owns server-side transport setup and server identity material. The example generates a self-signed certificate only to make a single-process loopback program executable; production applications should provide their own certificate lifecycle and trust policy.
 
