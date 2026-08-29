@@ -7,6 +7,7 @@
 pub mod delivery;
 mod delivery_acceptance;
 pub use delivery_acceptance::DeliveryAcceptance;
+mod error_behavior;
 pub mod identity;
 pub mod input;
 pub mod protocol;
