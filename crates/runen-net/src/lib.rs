@@ -6,6 +6,7 @@
 
 pub mod delivery;
 pub mod identity;
+pub mod input;
 pub mod protocol;
 mod protocol_declaration;
 pub use protocol_declaration::{
