@@ -159,6 +159,8 @@ Advanced consumers do not need a separate networking stack. They can combine:
 - synchronous host-policy commands;
 - application-owned session/world/scheduler state.
 
+Ordinary `runen-net-quic` applications do not need `runen_net::delivery::adapter`. A custom transport realization explicitly imports the sealed `DeliveryTransportAdapter` extension trait and operates on the same application-owned `DeliveryEndpoint`. The adapter boundary owns no delivery state and cannot replace or redefine Core acceptance, ordering/sequencing, pressure, exposure, or termination semantics.
+
 Raw mutable Quinn access is not the ordinary escape hatch because bypassing the accepted stream/DATAGRAM/control owners could violate the QUIC profile. If an integration requires behavior beyond the public boundary, treat it as a separately reviewed framework requirement rather than bypassing RunenNet semantics.
 
 ## Run the example

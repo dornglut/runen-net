@@ -56,17 +56,17 @@ impl ConnectionHandle {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum IncarnationClaimError {
+pub(crate) enum IncarnationClaimError {
     AlreadyUsed,
     CapacityExceeded,
 }
 
-/// Bounded evidence that an incarnation identity has already been used.
+/// Bounded implementation evidence that an incarnation identity has already been used.
 ///
-/// Entries are intentionally never released during the registry lifetime. This
-/// allows callers to enforce non-reuse without process-global allocation state.
+/// Entries are intentionally never released during the registry lifetime. Public lifecycle APIs
+/// expose semantic non-reuse outcomes; this generic storage mechanism is crate-private.
 #[derive(Debug, Clone)]
-pub struct IncarnationRegistry<I> {
+pub(crate) struct IncarnationRegistry<I> {
     max_claims: NonZeroUsize,
     used: HashSet<I>,
 }
@@ -75,14 +75,14 @@ impl<I> IncarnationRegistry<I>
 where
     I: Copy + Eq + Hash,
 {
-    pub fn new(max_claims: NonZeroUsize) -> Self {
+    pub(crate) fn new(max_claims: NonZeroUsize) -> Self {
         Self {
             max_claims,
             used: HashSet::new(),
         }
     }
 
-    pub fn claim(&mut self, id: I) -> Result<(), IncarnationClaimError> {
+    pub(crate) fn claim(&mut self, id: I) -> Result<(), IncarnationClaimError> {
         if self.used.contains(&id) {
             return Err(IncarnationClaimError::AlreadyUsed);
         }
@@ -93,20 +93,13 @@ where
         Ok(())
     }
 
-    pub fn contains(&self, id: I) -> bool {
+    pub(crate) fn contains(&self, id: I) -> bool {
         self.used.contains(&id)
     }
 
-    pub fn len(&self) -> usize {
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.used.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.used.is_empty()
-    }
-
-    pub const fn capacity(&self) -> usize {
-        self.max_claims.get()
     }
 }
 

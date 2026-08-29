@@ -1,6 +1,4 @@
 use std::collections::{HashMap, HashSet, hash_map::Entry};
-use std::hash::Hash;
-use std::num::NonZeroUsize;
 
 use crate::identity::ConnectionHandle;
 
@@ -1068,69 +1066,6 @@ impl NegotiationManager {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum SemanticRegistrationOutcome {
-    Inserted,
-    AlreadyRegistered,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum SemanticRegistrationError {
-    ContradictoryRegistration,
-    CapacityExceeded,
-}
-
-#[derive(Debug, Clone)]
-pub struct SemanticRegistry<K, V> {
-    max_entries: NonZeroUsize,
-    entries: HashMap<K, V>,
-}
-
-impl<K, V> SemanticRegistry<K, V>
-where
-    K: Eq + Hash,
-    V: Eq,
-{
-    pub fn new(max_entries: NonZeroUsize) -> Self {
-        Self {
-            max_entries,
-            entries: HashMap::new(),
-        }
-    }
-
-    pub fn register(
-        &mut self,
-        key: K,
-        value: V,
-    ) -> Result<SemanticRegistrationOutcome, SemanticRegistrationError> {
-        let at_capacity = self.entries.len() >= self.max_entries.get();
-        match self.entries.entry(key) {
-            Entry::Occupied(entry) => {
-                if entry.get() == &value {
-                    Ok(SemanticRegistrationOutcome::AlreadyRegistered)
-                } else {
-                    Err(SemanticRegistrationError::ContradictoryRegistration)
-                }
-            }
-            Entry::Vacant(entry) => {
-                if at_capacity {
-                    return Err(SemanticRegistrationError::CapacityExceeded);
-                }
-                entry.insert(value);
-                Ok(SemanticRegistrationOutcome::Inserted)
-            }
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1461,23 +1396,5 @@ mod tests {
         manager
             .start(ConnectionHandle::new(2), authority, peer)
             .unwrap();
-    }
-
-    #[test]
-    fn contradictory_registration_is_rejected_but_equal_registration_is_idempotent() {
-        let mut registry = SemanticRegistry::new(NonZeroUsize::new(2).unwrap());
-        let id = SchemaId::new(5);
-        assert_eq!(
-            registry.register(id, "contract-a"),
-            Ok(SemanticRegistrationOutcome::Inserted)
-        );
-        assert_eq!(
-            registry.register(id, "contract-a"),
-            Ok(SemanticRegistrationOutcome::AlreadyRegistered)
-        );
-        assert_eq!(
-            registry.register(id, "contract-b"),
-            Err(SemanticRegistrationError::ContradictoryRegistration)
-        );
     }
 }

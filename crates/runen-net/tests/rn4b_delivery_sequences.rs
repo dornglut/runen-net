@@ -1,11 +1,11 @@
 use std::num::NonZeroUsize;
 
 use runen_net::delivery::{
-    CustodyCommitError, DeliveryEndpoint, DeliveryFlowHandle, DeliveryFlowKey, DeliveryMode,
-    DeliveryOperationError, DeliveryScopeLimits, DeliveryTransfer, FlowDirection,
-    FlowResourcePolicy, FlowTerminationReason, OutboundPressureBehavior, ReceiveOutcome,
-    ReceiverPressureBehavior, SessionAssociationError, SessionAssociationOutcome,
-    SubmissionOutcome,
+    DeliveryEndpoint, DeliveryFlowHandle, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
+    DeliveryScopeLimits, FlowDirection, FlowResourcePolicy, FlowTerminationReason,
+    OutboundPressureBehavior, ReceiveOutcome, ReceiverPressureBehavior, SessionAssociationError,
+    SessionAssociationOutcome, SubmissionOutcome,
+    adapter::{CustodyCommitError, DeliveryTransfer, DeliveryTransportAdapter},
 };
 use runen_net::identity::{ConnectionHandle, SessionId};
 use runen_net::session::{Session, SessionLimits};
@@ -234,7 +234,7 @@ fn inbound_sequence_releases_accounting_on_terminal_pressure_and_unreliable_evic
     let wrong_mode_probe = two.clone();
 
     assert_eq!(
-        receiver.receive(reliable_in, one.clone()).unwrap(),
+        receiver.receive_transfer(reliable_in, one.clone()).unwrap(),
         ReceiveOutcome::Buffered {
             local_pressure_drops: 0,
         }
@@ -242,20 +242,20 @@ fn inbound_sequence_releases_accounting_on_terminal_pressure_and_unreliable_evic
     assert_accounting(&receiver, &[reliable_in]);
     let before_duplicate = accounting(&receiver);
     assert_eq!(
-        receiver.receive(reliable_in, one).unwrap(),
+        receiver.receive_transfer(reliable_in, one).unwrap(),
         ReceiveOutcome::DuplicateReliable
     );
     assert_eq!(accounting(&receiver), before_duplicate);
 
     assert_eq!(
-        receiver.receive(reliable_in, two).unwrap(),
+        receiver.receive_transfer(reliable_in, two).unwrap(),
         ReceiveOutcome::Buffered {
             local_pressure_drops: 0,
         }
     );
     assert_eq!(receiver.flow_pending_usage(reliable_in), Some((2, 2)));
     assert_eq!(
-        receiver.receive(reliable_in, zero).unwrap(),
+        receiver.receive_transfer(reliable_in, zero).unwrap(),
         ReceiveOutcome::TerminalReliableFailure
     );
     assert_accounting(&receiver, &[]);
@@ -294,7 +294,9 @@ fn inbound_sequence_releases_accounting_on_terminal_pressure_and_unreliable_evic
 
     let before_mode_rejection = accounting(&receiver);
     assert_eq!(
-        receiver.receive(unreliable_in, wrong_mode_probe).unwrap(),
+        receiver
+            .receive_transfer(unreliable_in, wrong_mode_probe)
+            .unwrap(),
         ReceiveOutcome::RejectedModeMismatch
     );
     assert_eq!(accounting(&receiver), before_mode_rejection);
@@ -303,19 +305,19 @@ fn inbound_sequence_releases_accounting_on_terminal_pressure_and_unreliable_evic
     let b = take_transfer(&mut sender, unreliable_out, b"b");
     let c = take_transfer(&mut sender, unreliable_out, b"c");
     assert_eq!(
-        receiver.receive(unreliable_in, a).unwrap(),
+        receiver.receive_transfer(unreliable_in, a).unwrap(),
         ReceiveOutcome::Buffered {
             local_pressure_drops: 0,
         }
     );
     assert_eq!(
-        receiver.receive(unreliable_in, b).unwrap(),
+        receiver.receive_transfer(unreliable_in, b).unwrap(),
         ReceiveOutcome::Buffered {
             local_pressure_drops: 0,
         }
     );
     assert_eq!(
-        receiver.receive(unreliable_in, c).unwrap(),
+        receiver.receive_transfer(unreliable_in, c).unwrap(),
         ReceiveOutcome::Buffered {
             local_pressure_drops: 1,
         }

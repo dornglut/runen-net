@@ -1,6 +1,10 @@
 use std::{error::Error, fmt};
 
 use crate::{
+    delivery::{
+        DeliveryOperationError, DeliveryPolicyError, FlowEstablishmentError,
+        SessionAssociationError, adapter::CustodyCommitError,
+    },
     input::{
         AuthorityInputError, AuthorityInputLimitError, InputWindowError, PredictionActivationError,
         PredictionReconciliationError,
@@ -32,6 +36,10 @@ macro_rules! debug_error {
     };
 }
 
+debug_error!(DeliveryPolicyError, "delivery-policy");
+debug_error!(SessionAssociationError, "delivery session-association");
+debug_error!(DeliveryOperationError, "delivery operation");
+debug_error!(CustodyCommitError, "delivery custody commit");
 debug_error!(SessionLimitError, "session-limit");
 debug_error!(SessionError, "session");
 debug_error!(OfferValidationError, "offer-validation");
@@ -49,6 +57,32 @@ debug_error!(InputWindowError, "input-window");
 debug_error!(AuthorityInputLimitError, "authority-input limit");
 debug_error!(AuthorityInputError, "authority-input");
 debug_error!(PredictionActivationError, "prediction activation");
+
+impl fmt::Display for FlowEstablishmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidPolicy(error) => {
+                write!(
+                    formatter,
+                    "RunenNet delivery flow policy is invalid: {error}"
+                )
+            }
+            _ => write!(
+                formatter,
+                "RunenNet delivery flow establishment failure: {self:?}"
+            ),
+        }
+    }
+}
+
+impl Error for FlowEstablishmentError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::InvalidPolicy(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 impl fmt::Display for NegotiationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -205,6 +239,9 @@ mod tests {
 
     #[test]
     fn retained_leaf_failures_are_standard_errors_with_display_text() {
+        assert_error::<DeliveryPolicyError>();
+        assert_error::<DeliveryOperationError>();
+        assert_error::<CustodyCommitError>();
         assert_error::<SessionError>();
         assert_error::<OfferValidationError>();
         assert_error::<ReplicationLimitError>();
@@ -212,6 +249,9 @@ mod tests {
         assert_error::<PredictionActivationError>();
 
         for message in [
+            DeliveryPolicyError::ReliableOutboundMustRejectNew.to_string(),
+            DeliveryOperationError::UnknownFlow.to_string(),
+            CustodyCommitError::NotFront.to_string(),
             SessionError::Closed.to_string(),
             OfferValidationError::OfferTooLarge.to_string(),
             ReplicationLimitError::StateImageExceedsCandidateBudget.to_string(),
@@ -224,6 +264,14 @@ mod tests {
 
     #[test]
     fn nested_public_failures_expose_sources() {
+        let flow = FlowEstablishmentError::InvalidPolicy(
+            DeliveryPolicyError::ReliableOutboundMustRejectNew,
+        );
+        assert_eq!(
+            flow.source().unwrap().to_string(),
+            DeliveryPolicyError::ReliableOutboundMustRejectNew.to_string()
+        );
+
         let negotiation = NegotiationManagerError::Negotiation(
             NegotiationError::AuthorityOfferInvalid(OfferValidationError::OfferTooLarge),
         );

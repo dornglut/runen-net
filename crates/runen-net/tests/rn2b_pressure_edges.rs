@@ -4,6 +4,7 @@ use runen_net::delivery::{
     DeliveryEndpoint, DeliveryFlowHandle, DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits,
     FlowDirection, FlowResourcePolicy, OutboundPressureBehavior, ReceiveOutcome,
     ReceiverPressureBehavior, SubmissionOutcome,
+    adapter::{DeliveryTransfer, DeliveryTransportAdapter},
 };
 use runen_net::identity::ConnectionHandle;
 
@@ -42,7 +43,7 @@ fn take(
     source: &mut DeliveryEndpoint,
     source_flow: DeliveryFlowKey,
     payload: &[u8],
-) -> runen_net::delivery::DeliveryTransfer {
+) -> DeliveryTransfer {
     let outcome = source.submit(source_flow, payload.to_vec()).unwrap();
     let SubmissionOutcome::Accepted { accepted_index, .. } = outcome else {
         panic!("expected accepted submission, got {outcome:?}");
@@ -91,13 +92,13 @@ fn drop_incoming_unreliable_is_distinct_and_does_not_advance_sequence() {
     let first = take(&mut source, source_flow, b"zero");
     let second = take(&mut source, source_flow, b"one");
     assert_eq!(
-        target.receive(target_flow, first).unwrap(),
+        target.receive_transfer(target_flow, first).unwrap(),
         ReceiveOutcome::Buffered {
             local_pressure_drops: 0
         }
     );
     assert_eq!(
-        target.receive(target_flow, second).unwrap(),
+        target.receive_transfer(target_flow, second).unwrap(),
         ReceiveOutcome::DroppedByPressure {
             local_pressure_drops: 1
         }

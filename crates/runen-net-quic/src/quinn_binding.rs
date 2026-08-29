@@ -6,8 +6,9 @@ use std::task::{Context, Poll};
 
 use quinn::{RecvStream, SendStream, VarInt};
 use runen_net::delivery::{
-    CustodyCommitError, DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
-    DeliveryTransfer, FlowDirection, FlowTermination, FlowTerminationReason, ReceiveOutcome,
+    DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
+    FlowTermination, FlowTerminationReason, ReceiveOutcome,
+    adapter::{CustodyCommitError, DeliveryTransfer, DeliveryTransportAdapter},
 };
 
 use super::reliable::{ReliableFrameDecoder, ReliableFrameError, encode_payload_length};
