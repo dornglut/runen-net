@@ -20,6 +20,17 @@ pub enum PredictionInvalidationReason {
     ReplicationRecovery(ClientRecoveryReason),
     ConnectionLoss,
     ReplayFailure,
+    ParticipantMembershipEnded,
+    SessionClosed,
+}
+
+impl PredictionInvalidationReason {
+    const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::ParticipantMembershipEnded | Self::SessionClosed
+        )
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -59,6 +70,18 @@ pub enum PredictionReconciliationOutcome {
     InvalidatedByRecovery {
         reason: ClientRecoveryReason,
     },
+    RemainsInvalidated {
+        reason: PredictionInvalidationReason,
+    },
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum PredictionActivationError {
+    LineageMismatch,
+    NotReplayFailure,
+    ReplicationNotSynchronized,
+    MissingCommittedTick,
+    FrontierRegression,
 }
 
 #[derive(Debug)]
@@ -178,8 +201,18 @@ impl<I> PredictionLineage<I> {
         self.invalidate(PredictionInvalidationReason::ConnectionLoss);
     }
 
+    pub fn participant_membership_ended(&mut self) {
+        self.terminate(PredictionInvalidationReason::ParticipantMembershipEnded);
+    }
+
+    pub fn session_closed(&mut self) {
+        self.terminate(PredictionInvalidationReason::SessionClosed);
+    }
+
     pub fn invalidate_for_recovery(&mut self, reason: ClientRecoveryReason) {
-        self.invalidate(PredictionInvalidationReason::ReplicationRecovery(reason));
+        if self.terminal_reason().is_none() {
+            self.invalidate(PredictionInvalidationReason::ReplicationRecovery(reason));
+        }
     }
 
     pub fn require_connection_replacement_full<S>(
@@ -189,6 +222,40 @@ impl<I> PredictionLineage<I> {
         replication.require_connection_replacement_full(self.key)?;
         self.invalidate_for_recovery(ClientRecoveryReason::ConnectionReplacement);
         Ok(())
+    }
+
+    pub fn confirm_host_restored_after_replay_failure<S>(
+        &mut self,
+        lineage: &ClientLineage<S>,
+    ) -> Result<SimulationTick, PredictionActivationError> {
+        if lineage.key() != self.key {
+            return Err(PredictionActivationError::LineageMismatch);
+        }
+        if !matches!(
+            self.state,
+            PredictionState::Invalidated {
+                reason: PredictionInvalidationReason::ReplayFailure,
+                ..
+            }
+        ) {
+            return Err(PredictionActivationError::NotReplayFailure);
+        }
+        if !matches!(
+            lineage.replication_state(),
+            ClientReplicationState::Synchronized
+        ) {
+            return Err(PredictionActivationError::ReplicationNotSynchronized);
+        }
+        let tick = lineage
+            .current_tick()
+            .ok_or(PredictionActivationError::MissingCommittedTick)?;
+        if self.frontier().is_some_and(|frontier| tick < frontier) {
+            return Err(PredictionActivationError::FrontierRegression);
+        }
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.state = PredictionState::Active { frontier: tick };
+        Ok(tick)
     }
 
     pub fn observe_replication<S, E, F>(
@@ -215,6 +282,11 @@ impl<I> PredictionLineage<I> {
         }
 
         if let ClientReplicationState::FullSnapshotRequired(reason) = lineage.replication_state() {
+            if let Some(terminal_reason) = self.terminal_reason() {
+                return Ok(PredictionReconciliationOutcome::RemainsInvalidated {
+                    reason: terminal_reason,
+                });
+            }
             self.invalidate_for_recovery(reason);
             return Ok(PredictionReconciliationOutcome::InvalidatedByRecovery { reason });
         }
@@ -234,13 +306,20 @@ impl<I> PredictionLineage<I> {
             return Err(PredictionReconciliationError::FrontierRegression);
         }
 
-        if matches!(self.state, PredictionState::Invalidated { .. }) {
-            self.pending.clear();
-            self.pending_bytes = 0;
-            self.state = PredictionState::Active { frontier: tick };
-            return Ok(PredictionReconciliationOutcome::ActivatedFromAuthoritative {
-                frontier: tick,
-            });
+        if let PredictionState::Invalidated { reason, .. } = self.state {
+            if matches!(
+                reason,
+                PredictionInvalidationReason::InitialBaseline
+                    | PredictionInvalidationReason::ReplicationRecovery(_)
+            ) {
+                self.pending.clear();
+                self.pending_bytes = 0;
+                self.state = PredictionState::Active { frontier: tick };
+                return Ok(PredictionReconciliationOutcome::ActivatedFromAuthoritative {
+                    frontier: tick,
+                });
+            }
+            return Ok(PredictionReconciliationOutcome::RemainsInvalidated { reason });
         }
 
         let mut retired_ticks = Vec::new();
@@ -298,10 +377,27 @@ impl<I> PredictionLineage<I> {
         })
     }
 
+    fn terminal_reason(&self) -> Option<PredictionInvalidationReason> {
+        match self.state {
+            PredictionState::Invalidated { reason, .. } if reason.is_terminal() => Some(reason),
+            _ => None,
+        }
+    }
+
     fn invalidate(&mut self, reason: PredictionInvalidationReason) {
         let frontier = self.frontier();
         self.pending.clear();
         self.pending_bytes = 0;
         self.state = PredictionState::Invalidated { reason, frontier };
+    }
+
+    fn terminate(&mut self, reason: PredictionInvalidationReason) {
+        debug_assert!(reason.is_terminal());
+        self.pending.clear();
+        self.pending_bytes = 0;
+        self.state = PredictionState::Invalidated {
+            reason,
+            frontier: None,
+        };
     }
 }
