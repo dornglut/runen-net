@@ -9,8 +9,8 @@ pub use authority::{
     SnapshotKind,
 };
 pub use client::{
-    ClientLineage, ClientRecoveryReason, ClientReplicationSet, ClientReplicationState,
-    ClientSetError, ClientSnapshotOutcome, DeltaReconstructionError,
+    ClientApplyError, ClientLineage, ClientRecoveryReason, ClientReplicationSet,
+    ClientReplicationState, ClientSetError, ClientSnapshotOutcome, DeltaReconstructionError,
 };
 pub use model::{
     AccountedState, AuthorityAggregateLimits, ClientAggregateLimits, DeltaSnapshot, FullSnapshot,
