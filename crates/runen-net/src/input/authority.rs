@@ -82,7 +82,9 @@ impl<I> AuthorityInputSession<I> {
     }
 
     pub fn participant_window(&self, participant: ParticipantId) -> Option<InputWindow> {
-        self.participants.get(&participant).map(|state| state.window)
+        self.participants
+            .get(&participant)
+            .map(|state| state.window)
     }
 
     pub fn participant_retained_key_count(&self, participant: ParticipantId) -> Option<usize> {
@@ -140,7 +142,11 @@ impl<I> AuthorityInputSession<I> {
 
         let mut removed_keys = 0usize;
         let mut removed_bytes = 0usize;
-        for retained in state.retained.range(..next.minimum()).map(|(_, retained)| retained) {
+        for retained in state
+            .retained
+            .range(..next.minimum())
+            .map(|(_, retained)| retained)
+        {
             removed_keys = removed_keys
                 .checked_add(1)
                 .ok_or(AuthorityInputError::AccountingOverflow)?;
