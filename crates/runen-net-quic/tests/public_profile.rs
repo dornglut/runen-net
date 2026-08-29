@@ -1,6 +1,7 @@
 use std::{
     future::{Future, poll_fn},
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    num::NonZeroUsize,
     pin::pin,
     task::Poll,
     time::Duration,
@@ -10,13 +11,14 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use runen_net_quic::{
     CertificateDer, ClientEndpoint, ClientTrust, EndpointConfig, EndpointResourceError,
     EndpointResourceLimits, PrivateKeyDer, ProfileBootstrapFailure, ProfileConfig,
-    ProfileConfigError, ProfileConnectionError, ProfileLimits, SemanticRole, ServerEndpoint,
-    ServerIdentity, TlsMaterialError,
+    ProfileConfigError, ProfileConnectionError, ProfileLimits, ReliableReceiveLimits, SemanticRole,
+    ServerEndpoint, ServerIdentity, TlsMaterialError,
 };
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use tokio::runtime::Builder;
 
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(20);
+const MAX_INCOMING_MESSAGE_BYTES: u64 = 128 * 1024;
 
 #[test]
 fn public_configuration_rejects_invalid_resources_and_tls_material() {
@@ -35,6 +37,13 @@ fn public_configuration_rejects_invalid_resources_and_tls_material() {
         ProfileConfigError::ControlFrameTooSmall
     );
 
+    let mut invalid_staging = profile_limits(SemanticRole::Authority);
+    invalid_staging.reliable_receive.max_staging_bytes = nz(64 * 1024);
+    assert_eq!(
+        invalid_staging.validate(endpoint).unwrap_err(),
+        ProfileConfigError::ReliableStagingBelowIncomingMessageCeiling
+    );
+
     assert_eq!(
         ClientTrust::new(Vec::new()).unwrap_err(),
         TlsMaterialError::EmptyClientTrust
@@ -44,6 +53,42 @@ fn public_configuration_rejects_invalid_resources_and_tls_material() {
     assert_eq!(
         ServerIdentity::new(Vec::new(), private_key).unwrap_err(),
         TlsMaterialError::EmptyServerCertificateChain
+    );
+}
+
+#[test]
+fn public_baseline_configuration_is_finite_and_inspectable() {
+    let endpoint = EndpointConfig::baseline(3, 12).unwrap();
+    let endpoint_limits = endpoint.limits();
+    assert_eq!(endpoint_limits.max_connections, 3);
+    assert_eq!(endpoint_limits.max_active_incoming_flows, 12);
+    assert_eq!(endpoint_limits.udp_payload_ceiling, 1_452);
+    assert_eq!(endpoint_limits.stream_receive_window, 64 * 1024);
+    assert_eq!(endpoint_limits.connection_receive_window, 256 * 1024);
+    assert_eq!(endpoint_limits.send_window, 256 * 1024);
+    assert_eq!(endpoint_limits.crypto_buffer_bytes, 32 * 1024);
+    assert_eq!(endpoint_limits.datagram_receive_buffer_bytes, 64 * 1024);
+    assert_eq!(endpoint_limits.datagram_send_buffer_bytes, 64 * 1024);
+    assert_eq!(endpoint_limits.max_idle_timeout, Duration::from_secs(30));
+
+    let profile = ProfileConfig::baseline(
+        endpoint,
+        SemanticRole::Authority,
+        MAX_INCOMING_MESSAGE_BYTES,
+    )
+    .unwrap();
+    let profile_limits = profile.limits();
+    assert_eq!(profile_limits.semantic_role, SemanticRole::Authority);
+    assert_eq!(profile_limits.max_control_frame_bytes, 64 * 1024);
+    assert_eq!(profile_limits.max_negotiation_frame_bytes, 32 * 1024);
+    assert_eq!(
+        profile_limits.max_incoming_message_bytes,
+        MAX_INCOMING_MESSAGE_BYTES
+    );
+    assert_eq!(profile_limits.reliable_receive.scratch_bytes, nz(4 * 1024));
+    assert_eq!(
+        profile_limits.reliable_receive.max_staging_bytes,
+        nz(MAX_INCOMING_MESSAGE_BYTES as usize)
     );
 }
 
@@ -241,7 +286,11 @@ fn profile_limits(role: SemanticRole) -> ProfileLimits {
         semantic_role: role,
         max_control_frame_bytes: 64 * 1024,
         max_negotiation_frame_bytes: 32 * 1024,
-        max_incoming_message_bytes: 128 * 1024,
+        max_incoming_message_bytes: MAX_INCOMING_MESSAGE_BYTES,
+        reliable_receive: ReliableReceiveLimits {
+            scratch_bytes: nz(4 * 1024),
+            max_staging_bytes: nz(MAX_INCOMING_MESSAGE_BYTES as usize),
+        },
     }
 }
 
@@ -251,6 +300,10 @@ fn ephemeral_identity() -> (CertificateDer<'static>, PrivateKeyDer<'static>) {
     let certificate = cert.der().clone();
     let private_key = PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into();
     (certificate, private_key)
+}
+
+fn nz(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).unwrap()
 }
 
 const fn loopback_ephemeral() -> SocketAddr {

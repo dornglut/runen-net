@@ -81,7 +81,6 @@ fn live_public_quic_submission_composes_directly_with_authority_replication() {
                     CLIENT_CONNECTION,
                     offer(),
                     NegotiationRequirements::default(),
-                    reliable_receive_limits(),
                     &mut client_negotiation,
                 )
                 .unwrap();
@@ -90,7 +89,6 @@ fn live_public_quic_submission_composes_directly_with_authority_replication() {
                     SERVER_CONNECTION,
                     offer(),
                     NegotiationRequirements::default(),
-                    reliable_receive_limits(),
                     &mut server_negotiation,
                 )
                 .unwrap();
@@ -326,6 +324,7 @@ fn profile(config: EndpointConfig, role: SemanticRole) -> ProfileConfig {
         max_control_frame_bytes: 64 * 1024,
         max_negotiation_frame_bytes: 32 * 1024,
         max_incoming_message_bytes: 128 * 1024,
+        reliable_receive: reliable_receive_limits(),
     }
     .validate(config)
     .unwrap()

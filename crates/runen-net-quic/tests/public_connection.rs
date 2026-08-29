@@ -921,7 +921,6 @@ fn activate_pair(
             CLIENT_CONNECTION,
             offer(),
             NegotiationRequirements::default(),
-            reliable_receive_limits(),
             &mut client_host.negotiation,
         )
         .unwrap();
@@ -930,7 +929,6 @@ fn activate_pair(
             SERVER_CONNECTION,
             offer(),
             NegotiationRequirements::default(),
-            reliable_receive_limits(),
             &mut server_host.negotiation,
         )
         .unwrap();
@@ -1193,6 +1191,7 @@ fn profile(config: EndpointConfig, role: SemanticRole) -> ProfileConfig {
         max_control_frame_bytes: 64 * 1024,
         max_negotiation_frame_bytes: 32 * 1024,
         max_incoming_message_bytes: 128 * 1024,
+        reliable_receive: reliable_receive_limits(),
     }
     .validate(config)
     .unwrap()

@@ -21,9 +21,9 @@ use runen_net::{
 };
 use runen_net_quic::{
     CertificateDer, ClientEndpoint, ClientTrust, Connection, ConnectionEvent, EndpointConfig,
-    EndpointResourceLimits, FlowTerminationCause, FlowTerminationOrigin, InboundFlowConfig,
-    OutboundFlowConfig, PrivateKeyDer, ProfileConfig, ProfileLimits, ProfileReadyConnection,
-    ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity, SubmitOutcome,
+    FlowTerminationCause, FlowTerminationOrigin, InboundFlowConfig, OutboundFlowConfig,
+    PrivateKeyDer, ProfileConfig, ProfileReadyConnection, SemanticRole, ServerEndpoint,
+    ServerIdentity, SubmitOutcome,
 };
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use tokio::runtime::Builder;
@@ -31,6 +31,7 @@ use tokio::runtime::Builder;
 const CLIENT_CONNECTION: ConnectionHandle = ConnectionHandle::new(1);
 const SERVER_CONNECTION: ConnectionHandle = ConnectionHandle::new(2);
 const MAX_MESSAGE_BYTES: usize = 512;
+const MAX_INCOMING_MESSAGE_BYTES: u64 = 128 * 1024;
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct HostState {
@@ -55,7 +56,7 @@ fn main() {
 }
 
 async fn run() {
-    let endpoint_config = endpoint_limits().validate().unwrap();
+    let endpoint_config = EndpointConfig::baseline(2, 16).unwrap();
     let (client_endpoint, server_endpoint) = endpoints(endpoint_config);
     let mut client_host = host_state();
     let mut server_host = host_state();
@@ -300,7 +301,6 @@ fn activate_pair(
             CLIENT_CONNECTION,
             compatibility_offer(),
             NegotiationRequirements::default(),
-            reliable_receive_limits(),
             &mut client_host.negotiation,
         )
         .unwrap();
@@ -309,7 +309,6 @@ fn activate_pair(
             SERVER_CONNECTION,
             compatibility_offer(),
             NegotiationRequirements::default(),
-            reliable_receive_limits(),
             &mut server_host.negotiation,
         )
         .unwrap();
@@ -458,37 +457,8 @@ const fn protocol_contract() -> ProtocolContract {
     ProtocolContract::new(ProtocolId::new(1), ProtocolRevision::new(1))
 }
 
-fn endpoint_limits() -> EndpointResourceLimits {
-    EndpointResourceLimits {
-        max_connections: 2,
-        max_active_incoming_flows: 16,
-        udp_payload_ceiling: 1_452,
-        stream_receive_window: 64 * 1024,
-        connection_receive_window: 256 * 1024,
-        send_window: 256 * 1024,
-        crypto_buffer_bytes: 32 * 1024,
-        datagram_receive_buffer_bytes: 64 * 1024,
-        datagram_send_buffer_bytes: 64 * 1024,
-        max_idle_timeout: Duration::from_secs(5),
-    }
-}
-
 fn profile(endpoint_config: EndpointConfig, semantic_role: SemanticRole) -> ProfileConfig {
-    ProfileLimits {
-        semantic_role,
-        max_control_frame_bytes: 64 * 1024,
-        max_negotiation_frame_bytes: 32 * 1024,
-        max_incoming_message_bytes: 128 * 1024,
-    }
-    .validate(endpoint_config)
-    .unwrap()
-}
-
-fn reliable_receive_limits() -> ReliableReceiveLimits {
-    ReliableReceiveLimits {
-        scratch_bytes: nz(4 * 1024),
-        max_staging_bytes: nz(128 * 1024),
-    }
+    ProfileConfig::baseline(endpoint_config, semantic_role, MAX_INCOMING_MESSAGE_BYTES).unwrap()
 }
 
 fn flow_connection_limits() -> DeliveryScopeLimits {

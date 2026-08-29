@@ -10,13 +10,13 @@ pub use facade::{
     CertificateDer, ClientEndpoint, ClientTrust, EndpointBindError, EndpointConfig,
     EndpointResourceError, EndpointResourceLimits, PrivateKeyDer, ProfileBootstrapFailure,
     ProfileConfig, ProfileConfigError, ProfileConnectionError, ProfileLimits,
-    ProfileReadyConnection, SemanticRole, ServerEndpoint, ServerIdentity, TlsMaterialError,
+    ProfileReadyConnection, ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity,
+    TlsMaterialError,
 };
 mod public_connection;
 pub use public_connection::{
     Connection, ConnectionCleanupError, ConnectionError, ConnectionEvent, ConnectionStateError,
-    ConnectionTeardown, NegotiationFailure, NegotiationReportStatus, ReliableReceiveLimits,
-    UnreliableReceiveDropReason,
+    ConnectionTeardown, NegotiationFailure, NegotiationReportStatus, UnreliableReceiveDropReason,
 };
 mod public_flow;
 pub use public_flow::{

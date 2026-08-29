@@ -1,4 +1,4 @@
-use std::{fmt, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{fmt, io, net::SocketAddr, num::NonZeroUsize, sync::Arc, time::Duration};
 
 use quinn::rustls::RootCertStore;
 pub use rustls_pki_types::{CertificateDer, PrivateKeyDer};
@@ -22,6 +22,17 @@ use crate::{
 };
 
 const ENDPOINT_SHUTDOWN_REASON: &[u8] = b"RunenNet endpoint shutdown";
+const BASELINE_UDP_PAYLOAD_CEILING: u16 = 1_452;
+const BASELINE_STREAM_RECEIVE_WINDOW: u64 = 64 * 1024;
+const BASELINE_CONNECTION_RECEIVE_WINDOW: u64 = 256 * 1024;
+const BASELINE_SEND_WINDOW: u64 = 256 * 1024;
+const BASELINE_CRYPTO_BUFFER_BYTES: usize = 32 * 1024;
+const BASELINE_DATAGRAM_RECEIVE_BUFFER_BYTES: usize = 64 * 1024;
+const BASELINE_DATAGRAM_SEND_BUFFER_BYTES: usize = 64 * 1024;
+const BASELINE_MAX_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const BASELINE_MAX_CONTROL_FRAME_BYTES: usize = 64 * 1024;
+const BASELINE_MAX_NEGOTIATION_FRAME_BYTES: usize = 32 * 1024;
+const BASELINE_RELIABLE_SCRATCH_BYTES: usize = 4 * 1024;
 
 /// Host-supplied semantic role advertised by the revision-1 RunenNet QUIC profile.
 ///
@@ -41,10 +52,21 @@ impl From<SemanticRole> for InternalSemanticRole {
     }
 }
 
-/// Explicit finite resource policy for one RunenNet QUIC endpoint.
+/// Explicit finite reliable receive resources carried by one validated profile.
 ///
-/// RN6 intentionally provides no implicit or recommended defaults. Callers must
-/// choose each finite resource authority and validate it before binding.
+/// `max_staging_bytes` is validated against the profile's advertised incoming-message ceiling so
+/// a reliable flow cannot be accepted when the local adapter is statically unable to reassemble it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ReliableReceiveLimits {
+    pub scratch_bytes: NonZeroUsize,
+    pub max_staging_bytes: NonZeroUsize,
+}
+
+/// Explicit finite expert resource policy for one RunenNet QUIC endpoint.
+///
+/// Normal first-use code may use [`EndpointConfig::baseline`] and supply only the endpoint
+/// capacities that remain application policy. This full structure remains available when a host
+/// deliberately needs to tune transport windows, buffers, MTU discovery, or idle timeout.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct EndpointResourceLimits {
     pub max_connections: usize,
@@ -90,6 +112,29 @@ pub struct EndpointConfig {
 }
 
 impl EndpointConfig {
+    /// Construct the named finite RunenNet revision-1 baseline for ordinary endpoint use.
+    ///
+    /// The caller still selects the endpoint connection and incoming-flow capacities. The remaining
+    /// values are finite implementation tuning and remain inspectable through [`Self::limits`].
+    pub fn baseline(
+        max_connections: usize,
+        max_active_incoming_flows: u64,
+    ) -> Result<Self, EndpointResourceError> {
+        EndpointResourceLimits {
+            max_connections,
+            max_active_incoming_flows,
+            udp_payload_ceiling: BASELINE_UDP_PAYLOAD_CEILING,
+            stream_receive_window: BASELINE_STREAM_RECEIVE_WINDOW,
+            connection_receive_window: BASELINE_CONNECTION_RECEIVE_WINDOW,
+            send_window: BASELINE_SEND_WINDOW,
+            crypto_buffer_bytes: BASELINE_CRYPTO_BUFFER_BYTES,
+            datagram_receive_buffer_bytes: BASELINE_DATAGRAM_RECEIVE_BUFFER_BYTES,
+            datagram_send_buffer_bytes: BASELINE_DATAGRAM_SEND_BUFFER_BYTES,
+            max_idle_timeout: BASELINE_MAX_IDLE_TIMEOUT,
+        }
+        .validate()
+    }
+
     pub const fn limits(self) -> EndpointResourceLimits {
         self.limits
     }
@@ -179,13 +224,17 @@ impl fmt::Display for EndpointResourceError {
 
 impl std::error::Error for EndpointResourceError {}
 
-/// Explicit ProfileReady control limits for one endpoint.
+/// Explicit expert ProfileReady and reliable-receive limits for one endpoint.
+///
+/// Normal first-use code may use [`ProfileConfig::baseline`]. Expert configuration remains
+/// explicit here, but all values are validated together before ProfileReady bootstrap begins.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct ProfileLimits {
     pub semantic_role: SemanticRole,
     pub max_control_frame_bytes: usize,
     pub max_negotiation_frame_bytes: usize,
     pub max_incoming_message_bytes: u64,
+    pub reliable_receive: ReliableReceiveLimits,
 }
 
 impl ProfileLimits {
@@ -198,6 +247,13 @@ impl ProfileLimits {
         }
         .validate(endpoint.inner)
         .map_err(ProfileConfigError::from)?;
+
+        let incoming_message_bytes = usize::try_from(self.max_incoming_message_bytes)
+            .map_err(|_| ProfileConfigError::IncomingMessageBytesDoNotFitPlatform)?;
+        if self.reliable_receive.max_staging_bytes.get() < incoming_message_bytes {
+            return Err(ProfileConfigError::ReliableStagingBelowIncomingMessageCeiling);
+        }
+
         Ok(ProfileConfig {
             limits: self,
             inner,
@@ -213,8 +269,45 @@ pub struct ProfileConfig {
 }
 
 impl ProfileConfig {
+    /// Construct the named finite RunenNet revision-1 profile baseline.
+    ///
+    /// The caller selects semantic Authority role and the local incoming-message ceiling. Reliable
+    /// staging is derived from that same ceiling so the public facade cannot advertise a reliable
+    /// receive capability that its adapter is statically unable to realize.
+    pub fn baseline(
+        endpoint: EndpointConfig,
+        semantic_role: SemanticRole,
+        max_incoming_message_bytes: u64,
+    ) -> Result<Self, ProfileConfigError> {
+        if max_incoming_message_bytes == 0 {
+            return Err(ProfileConfigError::ZeroIncomingMessageBytes);
+        }
+        let max_staging_bytes = usize::try_from(max_incoming_message_bytes)
+            .map_err(|_| ProfileConfigError::IncomingMessageBytesDoNotFitPlatform)?;
+        let max_staging_bytes = NonZeroUsize::new(max_staging_bytes)
+            .ok_or(ProfileConfigError::ZeroIncomingMessageBytes)?;
+        let scratch_bytes = NonZeroUsize::new(BASELINE_RELIABLE_SCRATCH_BYTES)
+            .expect("RunenNet baseline reliable scratch is non-zero");
+
+        ProfileLimits {
+            semantic_role,
+            max_control_frame_bytes: BASELINE_MAX_CONTROL_FRAME_BYTES,
+            max_negotiation_frame_bytes: BASELINE_MAX_NEGOTIATION_FRAME_BYTES,
+            max_incoming_message_bytes,
+            reliable_receive: ReliableReceiveLimits {
+                scratch_bytes,
+                max_staging_bytes,
+            },
+        }
+        .validate(endpoint)
+    }
+
     pub const fn limits(self) -> ProfileLimits {
         self.limits
+    }
+
+    const fn reliable_receive_limits(self) -> ReliableReceiveLimits {
+        self.limits.reliable_receive
     }
 }
 
@@ -237,6 +330,8 @@ pub enum ProfileConfigError {
     NegotiationExceedsControl,
     ZeroIncomingMessageBytes,
     IncomingMessageBytesOutOfRange,
+    IncomingMessageBytesDoNotFitPlatform,
+    ReliableStagingBelowIncomingMessageCeiling,
 }
 
 impl From<InternalProfileConfigError> for ProfileConfigError {
@@ -450,29 +545,35 @@ impl std::error::Error for ProfileConnectionError {}
 
 /// Opaque ownership of one connection that completed the RunenNet QUIC ProfileReady gate.
 ///
-/// Consume this value with `activate` to enter the post-ProfileReady explicit-poll
-/// connection owner. Quinn/control/profile implementation state remains private.
+/// The validated reliable receive resources are carried with this ownership and consumed by
+/// `activate`; callers do not repeat them after the profile advertises its receive ceiling.
 pub struct ProfileReadyConnection {
     _inner: AdmittedProfileReadyConnection,
+    reliable_receive: ReliableReceiveLimits,
 }
 
 impl fmt::Debug for ProfileReadyConnection {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProfileReadyConnection")
+            .field("reliable_receive", &self.reliable_receive)
             .finish_non_exhaustive()
     }
 }
 
-impl From<AdmittedProfileReadyConnection> for ProfileReadyConnection {
-    fn from(inner: AdmittedProfileReadyConnection) -> Self {
-        Self { _inner: inner }
-    }
-}
-
 impl ProfileReadyConnection {
-    pub(super) fn into_inner(self) -> AdmittedProfileReadyConnection {
-        self._inner
+    pub(crate) fn from_profile(
+        inner: AdmittedProfileReadyConnection,
+        reliable_receive: ReliableReceiveLimits,
+    ) -> Self {
+        Self {
+            _inner: inner,
+            reliable_receive,
+        }
+    }
+
+    pub(super) fn into_parts(self) -> (AdmittedProfileReadyConnection, ReliableReceiveLimits) {
+        (self._inner, self.reliable_receive)
     }
 }
 
@@ -511,9 +612,10 @@ impl ClientEndpoint {
         server_name: &str,
         profile: ProfileConfig,
     ) -> Result<ProfileReadyConnection, ProfileConnectionError> {
+        let reliable_receive = profile.reliable_receive_limits();
         connect_profile_ready(&self.inner, remote_address, server_name, profile.inner)
             .await
-            .map(ProfileReadyConnection::from)
+            .map(|inner| ProfileReadyConnection::from_profile(inner, reliable_receive))
             .map_err(ProfileConnectionError::from)
     }
 
@@ -568,9 +670,13 @@ impl ServerEndpoint {
         &self,
         profile: ProfileConfig,
     ) -> Result<Option<ProfileReadyConnection>, ProfileConnectionError> {
+        let reliable_receive = profile.reliable_receive_limits();
         accept_profile_ready(&self.inner, profile.inner)
             .await
-            .map(|connection| connection.map(ProfileReadyConnection::from))
+            .map(|connection| {
+                connection
+                    .map(|inner| ProfileReadyConnection::from_profile(inner, reliable_receive))
+            })
             .map_err(ProfileConnectionError::from)
     }
 
