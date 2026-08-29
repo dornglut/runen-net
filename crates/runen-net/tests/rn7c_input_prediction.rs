@@ -541,17 +541,22 @@ fn failed_authoritative_candidate_does_not_mutate_prediction() {
     prediction.admit_local(tick(11), &11, 4);
     prediction.admit_local(tick(12), &12, 4);
 
-    let outcome = replication
+    let failed = replication
         .apply_full(key, full(2, 11, 99), |_| Err::<(), _>("commit failed"))
-        .unwrap();
-    assert_eq!(outcome, ClientSnapshotOutcome::HostCommitFailure);
+        .unwrap_err();
     assert_eq!(
-        prediction
-            .observe_replication(outcome, replication.lineage(key).unwrap(), |_, _| {
-                Ok::<_, ()>(())
-            })
-            .unwrap(),
-        PredictionReconciliationOutcome::NoAuthoritativeCommit
+        failed,
+        runen_net::replication::ClientApplyError::HostCommitFailure {
+            source: "commit failed"
+        }
+    );
+    assert_eq!(
+        replication.lineage(key).unwrap().current_cursor(),
+        Some(ReplicationCursor::new(1))
+    );
+    assert_eq!(
+        replication.lineage(key).unwrap().current_tick(),
+        Some(tick(10))
     );
     assert_eq!(prediction.frontier(), Some(tick(10)));
     assert_eq!(prediction.pending_count(), 2);

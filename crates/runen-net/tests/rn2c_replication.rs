@@ -15,9 +15,9 @@ use runen_net::protocol::{
 use runen_net::replication::{
     AccountedState, AuthorityAckOutcome, AuthorityAggregateLimits, AuthorityRecoveryReason,
     AuthorityReplicationSession, AuthorityReplicationState, AuthoritySessionError,
-    ClientAggregateLimits, ClientRecoveryReason, ClientReplicationSet, ClientReplicationState,
-    ClientSnapshotOutcome, DeltaSnapshot, FullSnapshot, ReplicationCursor, ReplicationLineageKey,
-    ReplicationRetentionLimits,
+    ClientAggregateLimits, ClientApplyError, ClientRecoveryReason, ClientReplicationSet,
+    ClientReplicationState, ClientSetError, ClientSnapshotOutcome, DeltaSnapshot, FullSnapshot,
+    ReplicationCursor, ReplicationLineageKey, ReplicationRetentionLimits,
 };
 use runen_net::session::{RecoveryDuration, RetentionPolicy, Session, SessionLimits};
 
@@ -304,7 +304,7 @@ fn client_recovery_is_persistent_and_atomic() {
 }
 
 #[test]
-fn delta_host_commit_failure_does_not_advance_protocol_state() {
+fn full_host_commit_failure_preserves_source_without_mutating_protocol_state() {
     let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
     let mut client = ClientReplicationSet::new(client_limits(8, 256));
     client.add_lineage(key, retention(8)).unwrap();
@@ -312,7 +312,43 @@ fn delta_host_commit_failure_does_not_advance_protocol_state() {
         .apply_full(
             key,
             FullSnapshot::new(ReplicationCursor::new(1), SimulationTick::new(1), image(1)),
-            |_| Ok::<_, ()>(()),
+            |_| Ok::<_, &'static str>(()),
+        )
+        .unwrap();
+
+    let failed = client
+        .apply_full(
+            key,
+            FullSnapshot::new(ReplicationCursor::new(2), SimulationTick::new(2), image(2)),
+            |_| Err::<(), _>("full host commit failed"),
+        )
+        .unwrap_err();
+    assert_eq!(
+        failed,
+        ClientApplyError::HostCommitFailure {
+            source: "full host commit failed"
+        }
+    );
+    let lineage = client.lineage(key).unwrap();
+    assert_eq!(lineage.current_cursor(), Some(ReplicationCursor::new(1)));
+    assert_eq!(lineage.current_tick(), Some(SimulationTick::new(1)));
+    assert_eq!(lineage.current_state().unwrap(), &state(1));
+    assert_eq!(
+        lineage.replication_state(),
+        ClientReplicationState::Synchronized
+    );
+}
+
+#[test]
+fn delta_host_commit_failure_preserves_source_and_enters_recovery() {
+    let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
+    let mut client = ClientReplicationSet::new(client_limits(8, 256));
+    client.add_lineage(key, retention(8)).unwrap();
+    client
+        .apply_full(
+            key,
+            FullSnapshot::new(ReplicationCursor::new(1), SimulationTick::new(1), image(1)),
+            |_| Ok::<_, &'static str>(()),
         )
         .unwrap();
 
@@ -326,16 +362,39 @@ fn delta_host_commit_failure_does_not_advance_protocol_state() {
                 (),
             ),
             |_, _, _| Ok(image(2)),
-            |_| Err::<(), _>(()),
+            |_| Err::<(), _>("delta host commit failed"),
         )
-        .unwrap();
-    assert_eq!(failed, ClientSnapshotOutcome::HostCommitFailure);
+        .unwrap_err();
+    assert_eq!(
+        failed,
+        ClientApplyError::HostCommitFailure {
+            source: "delta host commit failed"
+        }
+    );
     let lineage = client.lineage(key).unwrap();
     assert_eq!(lineage.current_cursor(), Some(ReplicationCursor::new(1)));
+    assert_eq!(lineage.current_tick(), Some(SimulationTick::new(1)));
     assert_eq!(lineage.current_state().unwrap(), &state(1));
     assert_eq!(
         lineage.replication_state(),
         ClientReplicationState::FullSnapshotRequired(ClientRecoveryReason::DeltaCommitFailure)
+    );
+}
+
+#[test]
+fn apply_set_error_remains_distinct_from_host_commit_failure() {
+    let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
+    let mut client = ClientReplicationSet::new(client_limits(8, 256));
+
+    assert_eq!(
+        client
+            .apply_full(
+                key,
+                FullSnapshot::new(ReplicationCursor::new(1), SimulationTick::new(1), image(1)),
+                |_| Ok::<_, &'static str>(()),
+            )
+            .unwrap_err(),
+        ClientApplyError::Set(ClientSetError::UnknownLineage)
     );
 }
 

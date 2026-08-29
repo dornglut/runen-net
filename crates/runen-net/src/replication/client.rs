@@ -34,7 +34,6 @@ pub enum ClientSnapshotOutcome {
     DeltaBlockedByRecovery,
     MalformedDelta,
     ReconstructionFailure,
-    HostCommitFailure,
     StateResourceFailure,
 }
 
@@ -49,6 +48,12 @@ pub enum ClientSetError {
     LineageAlreadyExists,
     UnknownLineage,
     AggregateLineageLimitExceeded,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClientApplyError<E> {
+    Set(ClientSetError),
+    HostCommitFailure { source: E },
 }
 
 #[derive(Debug)]
@@ -278,7 +283,7 @@ impl<S> ClientReplicationSet<S> {
         key: ReplicationLineageKey,
         snapshot: FullSnapshot<S>,
         host_commit: F,
-    ) -> Result<ClientSnapshotOutcome, ClientSetError>
+    ) -> Result<ClientSnapshotOutcome, ClientApplyError<E>>
     where
         F: FnOnce(&S) -> Result<(), E>,
     {
@@ -286,7 +291,7 @@ impl<S> ClientReplicationSet<S> {
         let lineage = self
             .lineages
             .get(&key)
-            .ok_or(ClientSetError::UnknownLineage)?;
+            .ok_or(ClientApplyError::Set(ClientSetError::UnknownLineage))?;
 
         if let Some(classification) = lineage.classify_cursor(target) {
             return Ok(classification);
@@ -301,8 +306,8 @@ impl<S> ClientReplicationSet<S> {
         if !self.aggregate_commit_fits(key, &plan, image.accounted_bytes()) {
             return Ok(ClientSnapshotOutcome::StateResourceFailure);
         }
-        if host_commit(image.state()).is_err() {
-            return Ok(ClientSnapshotOutcome::HostCommitFailure);
+        if let Err(source) = host_commit(image.state()) {
+            return Err(ClientApplyError::HostCommitFailure { source });
         }
 
         self.lineages
@@ -318,7 +323,7 @@ impl<S> ClientReplicationSet<S> {
         snapshot: DeltaSnapshot<D>,
         reconstruct: R,
         host_commit: C,
-    ) -> Result<ClientSnapshotOutcome, ClientSetError>
+    ) -> Result<ClientSnapshotOutcome, ClientApplyError<E>>
     where
         R: FnOnce(&S, &D, usize) -> Result<AccountedState<S>, DeltaReconstructionError>,
         C: FnOnce(&S) -> Result<(), E>,
@@ -329,7 +334,7 @@ impl<S> ClientReplicationSet<S> {
             let lineage = self
                 .lineages
                 .get(&key)
-                .ok_or(ClientSetError::UnknownLineage)?;
+                .ok_or(ClientApplyError::Set(ClientSetError::UnknownLineage))?;
             if let Some(classification) = lineage.classify_cursor(target) {
                 return Ok(classification);
             }
@@ -342,7 +347,8 @@ impl<S> ClientReplicationSet<S> {
         }
 
         if target <= base_cursor {
-            self.enter_recovery(key, ClientRecoveryReason::MalformedDelta)?;
+            self.enter_recovery(key, ClientRecoveryReason::MalformedDelta)
+                .map_err(ClientApplyError::Set)?;
             return Ok(ClientSnapshotOutcome::MalformedDelta);
         }
 
@@ -352,7 +358,8 @@ impl<S> ClientReplicationSet<S> {
             .expect("lineage checked above")
             .tick_regresses_current(tick);
         if current_tick_regression {
-            self.enter_recovery(key, ClientRecoveryReason::DeltaTickRegression)?;
+            self.enter_recovery(key, ClientRecoveryReason::DeltaTickRegression)
+                .map_err(ClientApplyError::Set)?;
             return Ok(ClientSnapshotOutcome::TickRegression);
         }
 
@@ -364,11 +371,13 @@ impl<S> ClientReplicationSet<S> {
             .get(&base_cursor)
             .map(|base| base.tick);
         let Some(base_tick) = base_tick else {
-            self.enter_recovery(key, ClientRecoveryReason::MissingBase)?;
+            self.enter_recovery(key, ClientRecoveryReason::MissingBase)
+                .map_err(ClientApplyError::Set)?;
             return Ok(ClientSnapshotOutcome::MissingBase);
         };
         if tick < base_tick {
-            self.enter_recovery(key, ClientRecoveryReason::DeltaTickRegression)?;
+            self.enter_recovery(key, ClientRecoveryReason::DeltaTickRegression)
+                .map_err(ClientApplyError::Set)?;
             return Ok(ClientSnapshotOutcome::TickRegression);
         }
 
@@ -387,11 +396,13 @@ impl<S> ClientReplicationSet<S> {
         let candidate = match candidate {
             Ok(candidate) => candidate,
             Err(DeltaReconstructionError::Malformed) => {
-                self.enter_recovery(key, ClientRecoveryReason::MalformedDelta)?;
+                self.enter_recovery(key, ClientRecoveryReason::MalformedDelta)
+                    .map_err(ClientApplyError::Set)?;
                 return Ok(ClientSnapshotOutcome::MalformedDelta);
             }
             Err(DeltaReconstructionError::ReconstructionFailed) => {
-                self.enter_recovery(key, ClientRecoveryReason::ReconstructionFailure)?;
+                self.enter_recovery(key, ClientRecoveryReason::ReconstructionFailure)
+                    .map_err(ClientApplyError::Set)?;
                 return Ok(ClientSnapshotOutcome::ReconstructionFailure);
             }
         };
@@ -403,9 +414,12 @@ impl<S> ClientReplicationSet<S> {
         if !self.aggregate_commit_fits(key, &plan, candidate.accounted_bytes()) {
             return Ok(ClientSnapshotOutcome::StateResourceFailure);
         }
-        if host_commit(candidate.state()).is_err() {
-            self.enter_recovery(key, ClientRecoveryReason::DeltaCommitFailure)?;
-            return Ok(ClientSnapshotOutcome::HostCommitFailure);
+        if let Err(source) = host_commit(candidate.state()) {
+            self.lineages
+                .get_mut(&key)
+                .expect("lineage checked above")
+                .enter_recovery(ClientRecoveryReason::DeltaCommitFailure);
+            return Err(ClientApplyError::HostCommitFailure { source });
         }
 
         self.lineages
