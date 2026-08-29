@@ -22,3 +22,27 @@ impl SubmissionOutcome {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_core_submission_outcome_projects_to_acceptance() {
+        assert_eq!(
+            SubmissionOutcome::Accepted {
+                accepted_index: 3,
+                local_pressure_drops: 1,
+            }
+            .acceptance(),
+            DeliveryAcceptance::Accepted
+        );
+        for outcome in [
+            SubmissionOutcome::RejectedTooLarge,
+            SubmissionOutcome::RejectedPressure,
+            SubmissionOutcome::RejectedCounterExhausted,
+        ] {
+            assert_eq!(outcome.acceptance(), DeliveryAcceptance::NotAccepted);
+        }
+    }
+}
