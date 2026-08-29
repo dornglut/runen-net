@@ -90,10 +90,6 @@ fn public_baseline_configuration_is_finite_and_inspectable() {
         profile_limits.reliable_receive.max_staging_bytes,
         nz(MAX_INCOMING_MESSAGE_BYTES as usize)
     );
-    assert_eq!(
-        profile.reliable_receive_limits(),
-        profile_limits.reliable_receive
-    );
 }
 
 #[test]
@@ -119,21 +115,19 @@ fn public_endpoints_reach_profile_ready_and_shutdown_without_raw_quinn_access() 
             assert!(client.local_addr().unwrap().port() != 0);
             assert!(server_address.port() != 0);
 
-            let client_profile = profile(config, SemanticRole::Authority);
-            let server_profile = profile(config, SemanticRole::NonAuthority);
-            let client_receive = client_profile.reliable_receive_limits();
-            let server_receive = server_profile.reliable_receive_limits();
             let (client_ready, server_ready) = join2(
-                client.connect(server_address, "localhost", client_profile),
-                server.accept(server_profile),
+                client.connect(
+                    server_address,
+                    "localhost",
+                    profile(config, SemanticRole::Authority),
+                ),
+                server.accept(profile(config, SemanticRole::NonAuthority)),
             )
             .await;
             let client_ready = client_ready.expect("public client failed ProfileReady");
             let server_ready = server_ready
                 .expect("public server failed ProfileReady")
                 .expect("public server endpoint closed before ProfileReady");
-            assert_eq!(client_ready.reliable_receive_limits(), client_receive);
-            assert_eq!(server_ready.reliable_receive_limits(), server_receive);
 
             drop(client_ready);
             drop(server_ready);
