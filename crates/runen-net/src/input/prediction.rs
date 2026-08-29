@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use crate::identity::SimulationTick;
 use crate::replication::{
-    ClientLineage, ClientRecoveryReason, ClientReplicationSet, ClientReplicationState,
-    ClientSetError, ClientSnapshotOutcome, ReplicationCursor, ReplicationLineageKey,
+    ClientRecoveryReason, ClientReplicationSet, ClientReplicationState, ClientSetError,
+    ReplicationCursor, ReplicationLineageKey,
 };
 
 use super::model::PredictionLimits;
@@ -54,9 +54,6 @@ pub enum PredictionInputOutcome {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PredictionReconciliationOutcome {
     NoAuthoritativeCommit,
-    AlreadyObservedCommit {
-        cursor: ReplicationCursor,
-    },
     ActivatedFromAuthoritative {
         frontier: SimulationTick,
     },
@@ -77,7 +74,7 @@ pub enum PredictionReconciliationOutcome {
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PredictionActivationError {
-    LineageMismatch,
+    ReplicationLineageMissing,
     NotReplayFailure,
     ReplicationNotSynchronized,
     MissingCommittedTick,
@@ -86,12 +83,18 @@ pub enum PredictionActivationError {
 
 #[derive(Debug)]
 pub enum PredictionReconciliationError<E> {
-    LineageMismatch,
-    CommittedCursorMismatch,
+    ReplicationLineageMissing,
+    CommittedCursorRegression {
+        last_observed: ReplicationCursor,
+        current: ReplicationCursor,
+    },
     MissingCommittedTick,
     FrontierRegression,
     AccountingInvariantViolation,
-    ReplayFailed { tick: SimulationTick, source: E },
+    ReplayFailed {
+        tick: SimulationTick,
+        source: E,
+    },
 }
 
 #[derive(Debug)]
@@ -101,9 +104,10 @@ pub struct PredictionLineage<I> {
     state: PredictionState,
     pending: BTreeMap<SimulationTick, PendingInput<I>>,
     pending_bytes: usize,
-    // Non-authoritative idempotence evidence only. ClientLineage remains the
+    // Non-authoritative observation evidence only. ClientLineage remains the
     // sole owner of the current authoritative replication cursor and state.
     last_observed_commit: Option<ReplicationCursor>,
+    last_observed_recovery_boundary: Option<ReplicationCursor>,
 }
 
 impl<I> PredictionLineage<I> {
@@ -118,6 +122,7 @@ impl<I> PredictionLineage<I> {
             pending: BTreeMap::new(),
             pending_bytes: 0,
             last_observed_commit: None,
+            last_observed_recovery_boundary: None,
         }
     }
 
@@ -226,17 +231,23 @@ impl<I> PredictionLineage<I> {
         replication: &mut ClientReplicationSet<S>,
     ) -> Result<(), ClientSetError> {
         replication.require_connection_replacement_full(self.key)?;
+        if let Some((cursor, _)) = replication
+            .lineage(self.key)
+            .and_then(|lineage| lineage.latest_recovery_boundary())
+        {
+            self.last_observed_recovery_boundary = Some(cursor);
+        }
         self.invalidate_for_recovery(ClientRecoveryReason::ConnectionReplacement);
         Ok(())
     }
 
     pub fn confirm_host_restored_after_replay_failure<S>(
         &mut self,
-        lineage: &ClientLineage<S>,
+        replication: &ClientReplicationSet<S>,
     ) -> Result<SimulationTick, PredictionActivationError> {
-        if lineage.key() != self.key {
-            return Err(PredictionActivationError::LineageMismatch);
-        }
+        let lineage = replication
+            .lineage(self.key)
+            .ok_or(PredictionActivationError::ReplicationLineageMissing)?;
         if !matches!(
             self.state,
             PredictionState::Invalidated {
@@ -255,44 +266,43 @@ impl<I> PredictionLineage<I> {
         let tick = lineage
             .current_tick()
             .ok_or(PredictionActivationError::MissingCommittedTick)?;
+        let cursor = lineage
+            .current_cursor()
+            .expect("synchronized lineage with committed tick has a current cursor");
         if self.frontier().is_some_and(|frontier| tick < frontier) {
             return Err(PredictionActivationError::FrontierRegression);
         }
         self.pending.clear();
         self.pending_bytes = 0;
         self.state = PredictionState::Active { frontier: tick };
+        self.last_observed_commit = Some(cursor);
+        if let Some((boundary, _)) = lineage.latest_recovery_boundary() {
+            self.last_observed_recovery_boundary = Some(boundary);
+        }
         Ok(tick)
     }
 
     pub fn observe_replication<S, E, F>(
         &mut self,
-        outcome: ClientSnapshotOutcome,
-        lineage: &ClientLineage<S>,
+        replication: &ClientReplicationSet<S>,
         replay: F,
     ) -> Result<PredictionReconciliationOutcome, PredictionReconciliationError<E>>
     where
         F: FnMut(SimulationTick, &I) -> Result<(), E>,
     {
-        if lineage.key() != self.key {
-            return Err(PredictionReconciliationError::LineageMismatch);
-        }
+        let lineage = replication
+            .lineage(self.key)
+            .ok_or(PredictionReconciliationError::ReplicationLineageMissing)?;
 
-        if let ClientSnapshotOutcome::Committed(cursor) = outcome {
-            if lineage.current_cursor() != Some(cursor) {
-                return Err(PredictionReconciliationError::CommittedCursorMismatch);
-            }
-            if let Some(terminal_reason) = self.terminal_reason() {
-                return Ok(PredictionReconciliationOutcome::RemainsInvalidated {
-                    reason: terminal_reason,
-                });
-            }
-            if self.last_observed_commit == Some(cursor) {
-                return Ok(PredictionReconciliationOutcome::AlreadyObservedCommit { cursor });
-            }
-            let tick = lineage
-                .current_tick()
-                .ok_or(PredictionReconciliationError::MissingCommittedTick)?;
-            return self.reconcile_committed(cursor, tick, replay);
+        let mut observed_new_recovery = false;
+        if let Some((boundary, reason)) = lineage.latest_recovery_boundary()
+            && self
+                .last_observed_recovery_boundary
+                .is_none_or(|last_observed| boundary > last_observed)
+        {
+            self.last_observed_recovery_boundary = Some(boundary);
+            observed_new_recovery = true;
+            self.invalidate_for_recovery(reason);
         }
 
         if let ClientReplicationState::FullSnapshotRequired(reason) = lineage.replication_state() {
@@ -301,11 +311,36 @@ impl<I> PredictionLineage<I> {
                     reason: terminal_reason,
                 });
             }
-            self.invalidate_for_recovery(reason);
+            if !observed_new_recovery {
+                self.invalidate_for_recovery(reason);
+            }
             return Ok(PredictionReconciliationOutcome::InvalidatedByRecovery { reason });
         }
 
-        Ok(PredictionReconciliationOutcome::NoAuthoritativeCommit)
+        let Some(cursor) = lineage.current_cursor() else {
+            return Ok(PredictionReconciliationOutcome::NoAuthoritativeCommit);
+        };
+        if let Some(terminal_reason) = self.terminal_reason() {
+            return Ok(PredictionReconciliationOutcome::RemainsInvalidated {
+                reason: terminal_reason,
+            });
+        }
+        if let Some(last_observed) = self.last_observed_commit {
+            if cursor < last_observed {
+                return Err(PredictionReconciliationError::CommittedCursorRegression {
+                    last_observed,
+                    current: cursor,
+                });
+            }
+            if cursor == last_observed {
+                return Ok(PredictionReconciliationOutcome::NoAuthoritativeCommit);
+            }
+        }
+
+        let tick = lineage
+            .current_tick()
+            .ok_or(PredictionReconciliationError::MissingCommittedTick)?;
+        self.reconcile_committed(cursor, tick, replay)
     }
 
     fn reconcile_committed<E, F>(
@@ -431,53 +466,49 @@ mod tests {
         NonZeroUsize::new(value).unwrap()
     }
 
-    #[test]
-    fn repeated_commit_observation_does_not_replay_twice() {
-        let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
-        let retention =
-            ReplicationRetentionLimits::new(nz(64), nz(4), nz(128), nz(64), nz(4)).unwrap();
+    fn retention() -> ReplicationRetentionLimits {
+        ReplicationRetentionLimits::new(nz(64), nz(4), nz(128), nz(64), nz(4)).unwrap()
+    }
+
+    fn replication(key: ReplicationLineageKey) -> ClientReplicationSet<u32> {
         let mut replication =
             ClientReplicationSet::new(ClientAggregateLimits::new(nz(2), nz(8), nz(256)));
-        replication.add_lineage(key, retention).unwrap();
+        replication.add_lineage(key, retention()).unwrap();
+        replication
+    }
+
+    fn full(cursor: u64, tick: u64, value: u32) -> FullSnapshot<u32> {
+        FullSnapshot::new(
+            ReplicationCursor::new(cursor),
+            SimulationTick::new(tick),
+            AccountedState::new(value, 4),
+        )
+    }
+
+    #[test]
+    fn repeated_live_observation_does_not_replay_twice() {
+        let key = ReplicationLineageKey::new(SessionId::new(1), ParticipantId::new(1));
+        let mut replication = replication(key);
         let mut prediction = PredictionLineage::new(key, PredictionLimits::new(nz(4), nz(32), 8));
 
-        let initial = replication
-            .apply_full(
-                key,
-                FullSnapshot::new(
-                    ReplicationCursor::new(1),
-                    SimulationTick::new(10),
-                    AccountedState::new(10u32, 4),
-                ),
-                |_| Ok::<_, ()>(()),
-            )
+        replication
+            .apply_full(key, full(1, 10, 10), |_| Ok::<_, ()>(()))
             .unwrap();
         prediction
-            .observe_replication(initial, replication.lineage(key).unwrap(), |_, _| {
-                Ok::<_, ()>(())
-            })
+            .observe_replication(&replication, |_, _| Ok::<_, ()>(()))
             .unwrap();
         assert_eq!(
             prediction.admit_local(SimulationTick::new(11), &11, 4),
             PredictionInputOutcome::InputAccepted
         );
 
-        let committed_cursor = ReplicationCursor::new(2);
-        let committed = replication
-            .apply_full(
-                key,
-                FullSnapshot::new(
-                    committed_cursor,
-                    SimulationTick::new(10),
-                    AccountedState::new(20u32, 4),
-                ),
-                |_| Ok::<_, ()>(()),
-            )
+        replication
+            .apply_full(key, full(2, 10, 20), |_| Ok::<_, ()>(()))
             .unwrap();
         let mut replayed = 0usize;
         assert_eq!(
             prediction
-                .observe_replication(committed, replication.lineage(key).unwrap(), |_, _| {
+                .observe_replication(&replication, |_, _| {
                     replayed += 1;
                     Ok::<_, ()>(())
                 })
@@ -491,15 +522,141 @@ mod tests {
 
         assert_eq!(
             prediction
-                .observe_replication(committed, replication.lineage(key).unwrap(), |_, _| {
+                .observe_replication(&replication, |_, _| {
                     replayed += 1;
                     Ok::<_, ()>(())
                 })
                 .unwrap(),
-            PredictionReconciliationOutcome::AlreadyObservedCommit {
-                cursor: committed_cursor
-            }
+            PredictionReconciliationOutcome::NoAuthoritativeCommit
         );
         assert_eq!(replayed, 1);
+    }
+
+    #[test]
+    fn live_observation_reconciles_only_the_latest_unobserved_commit() {
+        let key = ReplicationLineageKey::new(SessionId::new(2), ParticipantId::new(2));
+        let mut replication = replication(key);
+        let mut prediction = PredictionLineage::new(key, PredictionLimits::new(nz(4), nz(32), 8));
+
+        replication
+            .apply_full(key, full(1, 10, 10), |_| Ok::<_, ()>(()))
+            .unwrap();
+        prediction
+            .observe_replication(&replication, |_, _| Ok::<_, ()>(()))
+            .unwrap();
+        assert_eq!(
+            prediction.admit_local(SimulationTick::new(13), &13, 4),
+            PredictionInputOutcome::InputAccepted
+        );
+
+        replication
+            .apply_full(key, full(2, 11, 20), |_| Ok::<_, ()>(()))
+            .unwrap();
+        replication
+            .apply_full(key, full(3, 12, 30), |_| Ok::<_, ()>(()))
+            .unwrap();
+
+        let mut replayed = Vec::new();
+        assert_eq!(
+            prediction
+                .observe_replication(&replication, |target, value| {
+                    replayed.push((target, *value));
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+            PredictionReconciliationOutcome::ReconciledReplay {
+                frontier: SimulationTick::new(12),
+                replayed: 1
+            }
+        );
+        assert_eq!(replayed, vec![(SimulationTick::new(13), 13)]);
+        assert_eq!(prediction.frontier(), Some(SimulationTick::new(12)));
+    }
+
+    #[test]
+    fn recovery_cleared_before_observation_still_discards_old_prediction_continuity() {
+        let key = ReplicationLineageKey::new(SessionId::new(3), ParticipantId::new(3));
+        let mut replication = replication(key);
+        let mut prediction = PredictionLineage::new(key, PredictionLimits::new(nz(4), nz(32), 8));
+
+        replication
+            .apply_full(key, full(1, 10, 10), |_| Ok::<_, ()>(()))
+            .unwrap();
+        prediction
+            .observe_replication(&replication, |_, _| Ok::<_, ()>(()))
+            .unwrap();
+        assert_eq!(
+            prediction.admit_local(SimulationTick::new(12), &12, 4),
+            PredictionInputOutcome::InputAccepted
+        );
+
+        replication
+            .require_connection_replacement_full(key)
+            .unwrap();
+        replication
+            .apply_full(key, full(2, 11, 20), |_| Ok::<_, ()>(()))
+            .unwrap();
+
+        let mut replay_called = false;
+        assert_eq!(
+            prediction
+                .observe_replication(&replication, |_, _| {
+                    replay_called = true;
+                    Ok::<_, ()>(())
+                })
+                .unwrap(),
+            PredictionReconciliationOutcome::ActivatedFromAuthoritative {
+                frontier: SimulationTick::new(11)
+            }
+        );
+        assert!(!replay_called);
+        assert_eq!(prediction.pending_count(), 0);
+        assert_eq!(prediction.frontier(), Some(SimulationTick::new(11)));
+    }
+
+    #[test]
+    fn missing_replication_lineage_is_explicit() {
+        let key = ReplicationLineageKey::new(SessionId::new(4), ParticipantId::new(4));
+        let replication =
+            ClientReplicationSet::<u32>::new(ClientAggregateLimits::new(nz(2), nz(8), nz(256)));
+        let mut prediction =
+            PredictionLineage::<u32>::new(key, PredictionLimits::new(nz(4), nz(32), 8));
+
+        assert!(matches!(
+            prediction.observe_replication(&replication, |_, _| Ok::<_, ()>(())),
+            Err(PredictionReconciliationError::ReplicationLineageMissing)
+        ));
+    }
+
+    #[test]
+    fn replaced_lineage_with_older_cursor_fails_closed() {
+        let key = ReplicationLineageKey::new(SessionId::new(5), ParticipantId::new(5));
+        let mut replication = replication(key);
+        let mut prediction =
+            PredictionLineage::<u32>::new(key, PredictionLimits::new(nz(4), nz(32), 8));
+
+        replication
+            .apply_full(key, full(5, 10, 50), |_| Ok::<_, ()>(()))
+            .unwrap();
+        prediction
+            .observe_replication(&replication, |_, _| Ok::<_, ()>(()))
+            .unwrap();
+
+        assert!(replication.remove_lineage(key));
+        replication.add_lineage(key, retention()).unwrap();
+        replication
+            .apply_full(key, full(4, 11, 40), |_| Ok::<_, ()>(()))
+            .unwrap();
+
+        match prediction.observe_replication(&replication, |_, _| Ok::<_, ()>(())) {
+            Err(PredictionReconciliationError::CommittedCursorRegression {
+                last_observed,
+                current,
+            }) => {
+                assert_eq!(last_observed, ReplicationCursor::new(5));
+                assert_eq!(current, ReplicationCursor::new(4));
+            }
+            other => panic!("unexpected observation result: {other:?}"),
+        }
     }
 }
