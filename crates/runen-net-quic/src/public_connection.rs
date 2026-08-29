@@ -503,7 +503,8 @@ impl Connection {
                     key: config.key,
                     mode: config.mode,
                     policy: config.policy,
-                    stable_max_message_bytes: config.stable_max_message_bytes,
+                    stable_max_message_bytes: NonZeroUsize::new(config.policy.max_message_bytes())
+                        .expect("Core flow policy maximum is non-zero"),
                     connection_limits: config.connection_limits,
                 },
             )

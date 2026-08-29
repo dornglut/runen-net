@@ -151,7 +151,6 @@ async fn run_flow(
                 mode,
                 policy: flow_policy(mode),
                 connection_limits: flow_connection_limits(),
-                stable_max_message_bytes: nz(MAX_MESSAGE_BYTES),
             },
         )
         .unwrap();
