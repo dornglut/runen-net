@@ -19,7 +19,7 @@ use runen_net::replication::{
     ClientSnapshotOutcome, DeltaSnapshot, FullSnapshot, ReplicationCursor, ReplicationLineageKey,
     ReplicationRetentionLimits,
 };
-use runen_net::session::{RetentionPolicy, Session, SessionLimits};
+use runen_net::session::{RecoveryDuration, RetentionPolicy, Session, SessionLimits};
 
 fn nz(value: usize) -> NonZeroUsize {
     NonZeroUsize::new(value).unwrap()
@@ -565,7 +565,7 @@ fn replacement_generation_rejects_old_recovery_completion() {
             participant,
             first_connection,
             RetentionPolicy::RetainForRecovery {
-                duration: NonZeroU64::new(10).unwrap(),
+                duration: RecoveryDuration::new(NonZeroU64::new(10).unwrap()),
             },
         )
         .unwrap();
