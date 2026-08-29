@@ -79,8 +79,11 @@ Outbound flows are opened with `OutboundFlowConfig`, which includes:
 
 - an outbound `DeliveryFlowKey`;
 - a fixed `DeliveryMode`;
-- `FlowResourcePolicy` and `DeliveryScopeLimits`;
-- an explicit stable maximum message size.
+- `FlowResourcePolicy` and `DeliveryScopeLimits`.
+
+The outbound message-size authority is specified once through `FlowResourcePolicy::max_message_bytes`. For the revision-1 QUIC facade, the adapter derives the peer-visible stable `OPEN_FLOW.max_message_bytes` contract from that Core policy value. The adapter still validates the derived contract against peer/profile and DATAGRAM constraints before establishment; callers do not maintain a second synchronized message-size field.
+
+For incoming flows, the peer has already requested its stable maximum. The receiving host may choose a local `FlowResourcePolicy::max_message_bytes` that is larger than that requested contract; admission fails only when the peer request exceeds the local policy ceiling.
 
 The adapter never silently changes reliable/unreliable semantics because of payload size, transport pressure, or DATAGRAM availability. See the normative [delivery](../spec/delivery/flow.md) and [pressure](../spec/delivery/pressure.md) specifications for the accepted behavior.
 
