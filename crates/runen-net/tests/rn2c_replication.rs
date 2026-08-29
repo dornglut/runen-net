@@ -240,7 +240,7 @@ fn client_recovery_is_persistent_and_atomic() {
                 SimulationTick::new(4),
                 (),
             ),
-            |_, _, _budget| Ok(image(4)),
+            |_, _, _| Ok(image(4)),
             |_| Ok::<_, ()>(()),
         )
         .unwrap();
@@ -259,7 +259,7 @@ fn client_recovery_is_persistent_and_atomic() {
                 SimulationTick::new(5),
                 (),
             ),
-            |_, _, _budget| Ok(image(5)),
+            |_, _, _| Ok(image(5)),
             |_| Ok::<_, ()>(()),
         )
         .unwrap();
@@ -325,7 +325,7 @@ fn delta_host_commit_failure_does_not_advance_protocol_state() {
                 SimulationTick::new(2),
                 (),
             ),
-            |_, _, _budget| Ok(image(2)),
+            |_, _, _| Ok(image(2)),
             |_| Err::<(), _>(()),
         )
         .unwrap();
