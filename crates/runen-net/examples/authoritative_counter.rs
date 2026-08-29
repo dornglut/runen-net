@@ -6,6 +6,7 @@
 
 use std::num::NonZeroUsize;
 
+use runen_net::delivery::adapter::DeliveryTransportAdapter;
 use runen_net::delivery::{
     DeliveryEndpoint, DeliveryFlowHandle, DeliveryFlowKey, DeliveryMode, DeliveryScopeLimits,
     FlowDirection, FlowResourcePolicy, OutboundPressureBehavior, ReceiveOutcome,
@@ -109,7 +110,7 @@ fn transfer_one(
         .commit_outbound_custody(outbound, preview.accepted_index())
         .unwrap();
     assert_eq!(
-        receiver.receive(inbound, transfer).unwrap(),
+        receiver.receive_transfer(inbound, transfer).unwrap(),
         ReceiveOutcome::Buffered {
             local_pressure_drops: 0
         }

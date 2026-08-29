@@ -2,8 +2,9 @@ use std::{future::Future, pin::Pin};
 
 use quinn::{Connection, ReadDatagram, SendDatagramError};
 use runen_net::delivery::{
-    CustodyCommitError, DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
-    FlowDirection, ReceiveOutcome, SubmissionOutcome,
+    DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
+    ReceiveOutcome, SubmissionOutcome,
+    adapter::{CustodyCommitError, DeliveryTransportAdapter},
 };
 
 use crate::quinn_binding::{AcceptedFlowRegistry, RegisteredFlow};

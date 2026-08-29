@@ -4,10 +4,11 @@ use std::num::NonZeroUsize;
 
 use runen_net::delivery::{
     DeliveryEndpoint, DeliveryFlowHandle, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
-    DeliveryPolicyError, DeliveryScopeLimits, DeliveryTransfer, FlowDirection,
-    FlowEstablishmentError, FlowResourcePolicy, FlowTerminationReason, OutboundPressureBehavior,
-    ReceiveOutcome, ReceiverPressureBehavior, ResourceScope, SessionAssociationError,
-    SessionAssociationOutcome, SubmissionOutcome,
+    DeliveryPolicyError, DeliveryScopeLimits, FlowDirection, FlowEstablishmentError,
+    FlowResourcePolicy, FlowTerminationReason, OutboundPressureBehavior, ReceiveOutcome,
+    ReceiverPressureBehavior, ResourceScope, SessionAssociationError, SessionAssociationOutcome,
+    SubmissionOutcome,
+    adapter::{DeliveryTransfer, DeliveryTransportAdapter},
 };
 use runen_net::identity::{ConnectionHandle, SessionId};
 use runen_net::session::{Session, SessionLimits};
@@ -671,7 +672,9 @@ fn direct_and_faulted_reliable_paths_have_identical_exposure() {
     );
     for payload in [b"left".as_slice(), b"right".as_slice()] {
         let transfer = submit_take(&mut direct_source, direct_source_flow, payload);
-        direct_target.receive(direct_target_flow, transfer).unwrap();
+        direct_target
+            .receive_transfer(direct_target_flow, transfer)
+            .unwrap();
     }
     let direct = exposed(&mut direct_target, direct_target_flow);
 

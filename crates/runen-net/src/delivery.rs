@@ -5,6 +5,8 @@ use std::sync::Arc;
 use crate::identity::{ConnectionHandle, SessionId};
 use crate::session::{Session, SessionPhase};
 
+pub mod adapter;
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct DeliveryFlowHandle(u64);
 
@@ -266,14 +268,14 @@ impl ScopeState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DeliveryTransfer {
+pub(crate) struct DeliveryTransfer {
     mode: DeliveryMode,
     accepted_index: u64,
     payload: Arc<Vec<u8>>,
 }
 
 impl DeliveryTransfer {
-    pub const fn mode(&self) -> DeliveryMode {
+    pub(crate) const fn mode(&self) -> DeliveryMode {
         self.mode
     }
 
@@ -282,38 +284,46 @@ impl DeliveryTransfer {
     ///
     /// This value is not a RunenNet wire identifier and has no meaning across
     /// delivery-flow lifetimes.
-    pub const fn accepted_index(&self) -> u64 {
+    pub(crate) const fn accepted_index(&self) -> u64 {
         self.accepted_index
     }
 
-    pub fn payload(&self) -> &[u8] {
+    pub(crate) fn payload(&self) -> &[u8] {
         self.payload.as_slice()
     }
 
-    pub fn payload_len(&self) -> usize {
+    pub(crate) fn payload_len(&self) -> usize {
         self.payload.len()
     }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub struct OutboundTransferMetadata {
+pub(crate) struct OutboundTransferMetadata {
     mode: DeliveryMode,
     accepted_index: u64,
     payload_len: usize,
 }
 
 impl OutboundTransferMetadata {
-    pub const fn mode(self) -> DeliveryMode {
+    pub(crate) const fn mode(self) -> DeliveryMode {
         self.mode
     }
 
-    pub const fn accepted_index(self) -> u64 {
+    pub(crate) const fn accepted_index(self) -> u64 {
         self.accepted_index
     }
 
-    pub const fn payload_len(self) -> usize {
+    pub(crate) const fn payload_len(self) -> usize {
         self.payload_len
     }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) enum CustodyCommitError {
+    UnknownFlow,
+    WrongDirection,
+    NoPendingMessage,
+    NotFront,
 }
 
 #[derive(Debug)]
@@ -421,14 +431,6 @@ pub enum DeliveryOperationError {
     UnknownFlow,
     WrongDirection,
     NotReliable,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum CustodyCommitError {
-    UnknownFlow,
-    WrongDirection,
-    NoPendingMessage,
-    NotFront,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -552,7 +554,7 @@ impl DeliveryEndpoint {
     /// This is a read-only transport handoff. It does not reserve the index, admit a message,
     /// mutate pressure/accounting state, or change submission semantics. `submit` remains the
     /// sole authority that accepts a message and advances the index.
-    pub fn next_outbound_accepted_index(
+    pub(crate) fn next_outbound_accepted_index(
         &self,
         key: DeliveryFlowKey,
     ) -> Result<Option<u64>, DeliveryOperationError> {
@@ -753,7 +755,7 @@ impl DeliveryEndpoint {
         })
     }
 
-    pub fn peek_outbound(
+    pub(crate) fn peek_outbound(
         &self,
         key: DeliveryFlowKey,
     ) -> Result<Option<DeliveryTransfer>, DeliveryOperationError> {
@@ -767,7 +769,7 @@ impl DeliveryEndpoint {
         Ok(flow.outbound.front().cloned())
     }
 
-    pub fn peek_outbound_metadata(
+    pub(crate) fn peek_outbound_metadata(
         &self,
         key: DeliveryFlowKey,
     ) -> Result<Option<OutboundTransferMetadata>, DeliveryOperationError> {
@@ -788,7 +790,7 @@ impl DeliveryEndpoint {
             }))
     }
 
-    pub fn commit_outbound_custody(
+    pub(crate) fn commit_outbound_custody(
         &mut self,
         key: DeliveryFlowKey,
         accepted_index: u64,
@@ -817,7 +819,7 @@ impl DeliveryEndpoint {
         Ok(transfer)
     }
 
-    pub fn receive_transport_payload(
+    pub(crate) fn receive_transport_payload(
         &mut self,
         key: DeliveryFlowKey,
         accepted_index: u64,
@@ -841,7 +843,7 @@ impl DeliveryEndpoint {
         )
     }
 
-    pub fn receive(
+    pub(crate) fn receive(
         &mut self,
         key: DeliveryFlowKey,
         transfer: DeliveryTransfer,
@@ -984,7 +986,7 @@ impl DeliveryEndpoint {
         })
     }
 
-    pub fn fail_reliable_custody(
+    pub(crate) fn fail_reliable_custody(
         &mut self,
         key: DeliveryFlowKey,
     ) -> Result<FlowTermination, DeliveryOperationError> {

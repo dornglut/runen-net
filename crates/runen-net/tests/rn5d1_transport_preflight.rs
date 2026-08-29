@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 use runen_net::delivery::{
     DeliveryEndpoint, DeliveryFlowHandle, DeliveryFlowKey, DeliveryMode, DeliveryOperationError,
     DeliveryScopeLimits, FlowDirection, FlowResourcePolicy, OutboundPressureBehavior,
-    ReceiverPressureBehavior, SubmissionOutcome,
+    ReceiverPressureBehavior, SubmissionOutcome, adapter::DeliveryTransportAdapter,
 };
 use runen_net::identity::ConnectionHandle;
 

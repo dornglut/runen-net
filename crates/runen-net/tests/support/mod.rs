@@ -1,6 +1,9 @@
 use std::collections::VecDeque;
 
-use runen_net::delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryTransfer, ReceiveOutcome};
+use runen_net::delivery::{
+    DeliveryEndpoint, DeliveryFlowKey, ReceiveOutcome,
+    adapter::{DeliveryTransfer, DeliveryTransportAdapter},
+};
 
 #[derive(Debug)]
 struct Staged {
@@ -98,7 +101,9 @@ impl FaultStage {
         target: &mut DeliveryEndpoint,
     ) -> ReceiveOutcome {
         let staged = self.remove(index);
-        target.receive(staged.target, staged.transfer).unwrap()
+        target
+            .receive_transfer(staged.target, staged.transfer)
+            .unwrap()
     }
 
     fn remove(&mut self, index: usize) -> Staged {
