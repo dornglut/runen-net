@@ -16,9 +16,9 @@ impl SubmissionOutcome {
     pub const fn acceptance(self) -> DeliveryAcceptance {
         match self {
             Self::Accepted { .. } => DeliveryAcceptance::Accepted,
-            Self::RejectedTooLarge
-            | Self::RejectedPressure
-            | Self::RejectedCounterExhausted => DeliveryAcceptance::NotAccepted,
+            Self::RejectedTooLarge | Self::RejectedPressure | Self::RejectedCounterExhausted => {
+                DeliveryAcceptance::NotAccepted
+            }
         }
     }
 }
