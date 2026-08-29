@@ -772,9 +772,9 @@ fn participant_removal_and_session_close_terminate_old_input_and_prediction_stat
     authority_input
         .submit(&session, participant, connection, tick(2), &2, 4)
         .unwrap();
-    let mut replication = replication(key);
+    let mut first_replication = replication(key);
     let mut prediction = PredictionLineage::new(key, prediction_limits());
-    activate_prediction(&mut prediction, &mut replication, key, 1, 1);
+    activate_prediction(&mut prediction, &mut first_replication, key, 1, 1);
     prediction.admit_local(tick(2), &2, 4);
 
     session.remove_participant(participant).unwrap();
@@ -802,7 +802,7 @@ fn participant_removal_and_session_close_terminate_old_input_and_prediction_stat
         prediction
             .observe_replication(
                 ClientSnapshotOutcome::Committed(ReplicationCursor::new(1)),
-                replication.lineage(key).unwrap(),
+                first_replication.lineage(key).unwrap(),
                 |_, _| Ok::<_, ()>(()),
             )
             .unwrap(),
