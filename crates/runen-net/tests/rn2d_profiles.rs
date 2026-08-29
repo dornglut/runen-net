@@ -382,7 +382,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
     assert_eq!(rejected, SubmissionOutcome::RejectedTooLarge);
     assert_eq!(
         authority
-            .record_delivery_submission(participant, rejected)
+            .record_delivery_acceptance(participant, rejected.acceptance())
             .unwrap(),
         None
     );
@@ -396,7 +396,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
 
     let accepted_full = sender.submit(full_outbound, b"full-1".to_vec()).unwrap();
     authority
-        .record_delivery_submission(participant, accepted_full)
+        .record_delivery_acceptance(participant, accepted_full.acceptance())
         .unwrap()
         .expect("RN1B acceptance records snapshot emission");
     assert!(stage.take(&mut sender, full_outbound, full_inbound));
@@ -440,7 +440,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
     assert_eq!(delta_two.base_cursor, Some(ReplicationCursor::new(1)));
     let accepted_delta_two = sender.submit(delta_outbound, b"delta-2".to_vec()).unwrap();
     authority
-        .record_delivery_submission(participant, accepted_delta_two)
+        .record_delivery_acceptance(participant, accepted_delta_two.acceptance())
         .unwrap();
     assert!(stage.take(&mut sender, delta_outbound, delta_inbound));
     stage.drop_at(0);
@@ -462,7 +462,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
     assert_eq!(delta_three.base_cursor, Some(ReplicationCursor::new(1)));
     let accepted_delta_three = sender.submit(delta_outbound, b"delta-3".to_vec()).unwrap();
     authority
-        .record_delivery_submission(participant, accepted_delta_three)
+        .record_delivery_acceptance(participant, accepted_delta_three.acceptance())
         .unwrap();
     assert!(stage.take(&mut sender, delta_outbound, delta_inbound));
     stage.deliver(0, &mut receiver);
@@ -535,7 +535,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         .unwrap();
     let accepted_full_four = sender.submit(full_outbound, b"full-4".to_vec()).unwrap();
     authority
-        .record_delivery_submission(participant, accepted_full_four)
+        .record_delivery_acceptance(participant, accepted_full_four.acceptance())
         .unwrap();
     assert!(stage.take(&mut sender, full_outbound, full_inbound));
     stage.deliver(0, &mut receiver);
@@ -639,7 +639,7 @@ fn authoritative_replication_profile_composes_delivery_ack_recovery_and_replacem
         }
     );
     authority
-        .record_delivery_submission(participant, accepted_full_five)
+        .record_delivery_acceptance(participant, accepted_full_five.acceptance())
         .unwrap();
     assert!(stage.take(&mut sender, replacement_outbound, replacement_inbound));
     stage.deliver(0, &mut receiver);
