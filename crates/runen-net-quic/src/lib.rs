@@ -1,9 +1,79 @@
 //! Production QUIC adapter package for RunenNet.
 //!
 //! Normative QUIC wire and transport semantics live in the repository
-//! `spec/transport/quic.md`. This crate is the downstream implementation
-//! boundary for that profile and does not own transport-independent RunenNet
-//! semantics.
+//! `spec/transport/quic.md`. This crate is the downstream implementation boundary for that profile
+//! and does not own transport-independent RunenNet semantics.
+//!
+//! # Ordinary lifecycle
+//!
+//! A normal application follows this public path:
+//!
+//! ```text
+//! EndpointConfig / ProfileConfig
+//!     -> ClientEndpoint::connect / ServerEndpoint::accept
+//!     -> ProfileReadyConnection
+//!     -> Connection::activate
+//!     -> Connection::poll + explicit host negotiation decisions
+//!     -> ConnectionEvent::Established
+//!     -> Core-keyed flow operations
+//!     -> consuming Connection::teardown
+//! ```
+//!
+//! [`EndpointConfig::baseline`] and [`ProfileConfig::baseline`] are the named finite first-use
+//! configuration path. Full limit structures remain available for expert transport tuning.
+//! `ClientEndpoint::connect` and `ServerEndpoint::accept` perform async transport/ProfileReady
+//! bootstrap without retaining mutable Core owners across `.await`.
+//!
+//! [`ProfileReadyConnection::activate`] consumes ProfileReady ownership and returns one durable
+//! [`Connection`]. The application keeps its `runen_net::protocol::NegotiationManager` and
+//! `runen_net::delivery::DeliveryEndpoint`; [`Connection::poll`] borrows them synchronously while
+//! progressing negotiation and established transport work. There is no hidden connection task,
+//! command queue, or second delivery-state authority.
+//!
+//! # Two different established stages
+//!
+//! Core compatibility establishment and QUIC I/O readiness are adjacent but intentionally distinct:
+//!
+//! 1. During polling, the Core `runen_net::protocol::NegotiationManager` reaches established
+//!    compatibility. Its `established(connection)` method returns
+//!    `runen_net::protocol::EstablishedNegotiation`, which is the proof consumed by Core session
+//!    admission/replacement.
+//! 2. The same public [`Connection`] then activates the negotiated state into its established QUIC
+//!    flow/delivery driver and emits [`ConnectionEvent::Established`]. That event means ordinary
+//!    QUIC flow I/O is ready; it is not the session-admission proof.
+//!
+//! A host that uses `runen_net::session::Session` may therefore obtain/use the Core established
+//! negotiation before or alongside observing the later QUIC established event, according to its
+//! lifecycle policy. The two values must not be substituted for one another.
+//!
+//! # Authority and identity
+//!
+//! QUIC client/server side does not choose RunenNet semantic Authority. [`SemanticRole`] declares
+//! the profile role independently; an Authority may be on either transport side.
+//!
+//! Public flow and connection operations remain keyed by Core
+//! `runen_net::identity::ConnectionHandle` and `runen_net::delivery::DeliveryFlowKey`. Quinn
+//! connection/stream/DATAGRAM identifiers remain private transport mechanics.
+//!
+//! # Events and payload custody
+//!
+//! [`ConnectionEvent`] reports durable host-visible progress or decisions. In particular,
+//! [`ConnectionEvent::DataReady`] identifies the Core flow with observable data; it does not copy or
+//! own the payload. The application reads the message from its
+//! `runen_net::delivery::DeliveryEndpoint`, preserving one delivery custody authority for QUIC and
+//! custom transports alike.
+//!
+//! Incoming flow requests are move-only host decisions, and retryable submission/decision errors
+//! preserve the owned request or payload where retry is legal. Teardown is consuming and returns
+//! [`ConnectionTeardown`] evidence; higher-level session retention/replacement policy remains in
+//! Core/the host.
+//!
+//! # Advanced transport boundary
+//!
+//! Ordinary applications using this crate do not need `runen_net::delivery::adapter`. That advanced
+//! sealed extension boundary is for custom transport realizations and is also what this QUIC crate
+//! uses internally. It operates on the same application-owned `DeliveryEndpoint` and cannot replace
+//! Core delivery acceptance, ordering, pressure, exposure, or termination semantics.
 
 mod facade;
 pub use facade::{
