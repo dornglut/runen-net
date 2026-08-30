@@ -94,6 +94,14 @@ pub enum FlowCommandError {
     ConnectionFailure,
 }
 
+impl fmt::Display for FlowCommandError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "RunenNet QUIC flow command failed: {self:?}")
+    }
+}
+
+impl std::error::Error for FlowCommandError {}
+
 /// Incoming decision failure that preserves the move-only request whenever retry is legal.
 #[derive(Debug)]
 pub enum IncomingFlowDecisionError {
@@ -115,6 +123,25 @@ impl IncomingFlowDecisionError {
         match self {
             Self::Retryable { request, .. } => Some(request),
             Self::Failed(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for IncomingFlowDecisionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retryable { reason, .. } => {
+                write!(formatter, "incoming flow decision can be retried: {reason}")
+            }
+            Self::Failed(reason) => write!(formatter, "incoming flow decision failed: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for IncomingFlowDecisionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Retryable { reason, .. } | Self::Failed(reason) => Some(reason),
         }
     }
 }
@@ -158,6 +185,28 @@ impl SubmissionError {
         match self {
             Self::Retryable { payload, .. } => Some(payload),
             Self::Failed(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for SubmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Retryable { reason, .. } => {
+                write!(
+                    formatter,
+                    "RunenNet QUIC submission can be retried: {reason}"
+                )
+            }
+            Self::Failed(reason) => write!(formatter, "RunenNet QUIC submission failed: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for SubmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Retryable { reason, .. } | Self::Failed(reason) => Some(reason),
         }
     }
 }
@@ -274,6 +323,8 @@ impl From<SubmissionOutcome> for SubmitOutcome {
 mod tests {
     use super::*;
 
+    fn assert_error<T: std::error::Error>() {}
+
     #[test]
     fn public_rejection_and_termination_vocabularies_map_exactly() {
         assert_eq!(
@@ -341,6 +392,27 @@ mod tests {
     }
 
     #[test]
+    fn public_flow_failures_have_standard_error_behavior() {
+        assert_error::<FlowCommandError>();
+        assert_error::<IncomingFlowDecisionError>();
+        assert_error::<SubmissionError>();
+
+        let incoming = IncomingFlowDecisionError::Failed(FlowCommandError::NotEstablished);
+        assert!(incoming.to_string().contains("NotEstablished"));
+        assert_eq!(
+            std::error::Error::source(&incoming).map(ToString::to_string),
+            Some(FlowCommandError::NotEstablished.to_string())
+        );
+
+        let failed = SubmissionError::Failed(FlowCommandError::UnknownFlow);
+        assert!(failed.to_string().contains("UnknownFlow"));
+        assert_eq!(
+            std::error::Error::source(&failed).map(ToString::to_string),
+            Some(FlowCommandError::UnknownFlow.to_string())
+        );
+    }
+
+    #[test]
     fn retryable_submission_preserves_owned_payload() {
         let key = DeliveryFlowKey::new(
             ConnectionHandle::new(1),
@@ -355,6 +427,10 @@ mod tests {
         assert_eq!(error.reason(), FlowCommandError::Busy);
         assert_eq!(error.key(), Some(key));
         assert_eq!(error.payload(), Some(b"retry".as_slice()));
+        assert_eq!(
+            std::error::Error::source(&error).map(ToString::to_string),
+            Some(FlowCommandError::Busy.to_string())
+        );
         assert_eq!(error.into_payload(), Some(b"retry".to_vec()));
     }
 }

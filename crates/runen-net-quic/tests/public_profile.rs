@@ -11,8 +11,8 @@ use rcgen::{CertifiedKey, generate_simple_self_signed};
 use runen_net_quic::{
     CertificateDer, ClientEndpoint, ClientTrust, EndpointConfig, EndpointResourceError,
     EndpointResourceLimits, PrivateKeyDer, ProfileBootstrapFailure, ProfileConfig,
-    ProfileConfigError, ProfileConnectionError, ProfileLimits, ReliableReceiveLimits, SemanticRole,
-    ServerEndpoint, ServerIdentity, TlsMaterialError,
+    ProfileConfigError, ProfileConnectionErrorKind, ProfileLimits, ReliableReceiveLimits,
+    SemanticRole, ServerEndpoint, ServerIdentity, TlsMaterialError,
 };
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use tokio::runtime::Builder;
@@ -169,20 +169,29 @@ fn public_same_role_profile_is_rejected_as_bootstrap_failure() {
             .await;
             assert!(client_result.is_err());
             assert!(server_result.is_err());
-            assert!(
-                matches!(
-                    client_result,
-                    Err(ProfileConnectionError::Bootstrap(
-                        ProfileBootstrapFailure::RoleMismatch
-                    ))
-                ) || matches!(
-                    server_result,
-                    Err(ProfileConnectionError::Bootstrap(
-                        ProfileBootstrapFailure::RoleMismatch
-                    ))
-                ),
-                "at least one endpoint must classify the exact peer-role mismatch"
-            );
+
+            let role_mismatch = client_result
+                .as_ref()
+                .err()
+                .filter(|error| {
+                    error.kind()
+                        == ProfileConnectionErrorKind::Bootstrap(
+                            ProfileBootstrapFailure::RoleMismatch,
+                        )
+                })
+                .or_else(|| {
+                    server_result.as_ref().err().filter(|error| {
+                        error.kind()
+                            == ProfileConnectionErrorKind::Bootstrap(
+                                ProfileBootstrapFailure::RoleMismatch,
+                            )
+                    })
+                });
+            let error = role_mismatch
+                .expect("at least one endpoint must classify the exact peer-role mismatch");
+            let source = std::error::Error::source(error)
+                .expect("bootstrap role mismatch must retain opaque diagnostic context");
+            assert!(source.to_string().contains("PeerRoleMismatch"));
 
             client.close();
             server.close();
@@ -229,10 +238,14 @@ fn public_capacity_one_server_refuses_overlap_and_reopens_after_release() {
                 server.accept(server_profile),
             )
             .await;
-            assert!(matches!(
-                overlap_server,
-                Err(ProfileConnectionError::AdmissionAtCapacity)
-            ));
+            let overlap_server_error = overlap_server
+                .as_ref()
+                .expect_err("overlapping server admission must fail");
+            assert_eq!(
+                overlap_server_error.kind(),
+                ProfileConnectionErrorKind::AdmissionAtCapacity
+            );
+            assert!(std::error::Error::source(overlap_server_error).is_none());
             assert!(overlap_client.is_err());
 
             drop(first_client);

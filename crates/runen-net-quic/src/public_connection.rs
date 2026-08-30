@@ -14,7 +14,8 @@ use runen_net::{
     },
     identity::ConnectionHandle,
     protocol::{
-        CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationRequirements,
+        CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerError,
+        NegotiationRequirements,
     },
 };
 
@@ -25,23 +26,24 @@ use crate::{
         KeyedDatagramSubmitError, KeyedFinishError, OutboundFinishOutcome,
     },
     control::{
-        ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
-        ProfileReadyParts, Settings, ValidatedControlProfile,
+        ControlFrame, ControlFrameError, ControlFrameType, ControlReceiver, ControlSender,
+        ProfileBootstrapError, ProfileReadyParts, Settings, ValidatedControlProfile,
     },
     datagram::{
-        DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress, DatagramSubmissionOutcome,
+        DatagramReceiveError, DatagramReceiveOutcome, DatagramSendError, DatagramSendProgress,
+        DatagramSubmissionOutcome,
     },
     datagram_driver::{DatagramIoError, DatagramOutboundProgress},
     endpoint::ConnectionSlotPermit,
     facade::{ProfileBootstrapFailure, ProfileReadyConnection, ReliableReceiveLimits},
     flow_control::{
-        FlowControlError, InboundAdmission, InboundAdmissionError, OutboundOpenError,
-        OutboundOpenRequest,
+        FlowControlConfigError, FlowControlError, InboundAdmission, InboundAdmissionError,
+        OutboundOpenError, OutboundOpenRequest,
     },
     flow_driver::FlowControlSendEffect,
     lifecycle::{
         AdmittedProfileReadyConnection, EstablishedNegotiatedConnection,
-        close_for_post_profile_control_error, close_negotiation_failed,
+        FlowControlActivationError, close_for_post_profile_control_error, close_negotiation_failed,
         close_negotiation_protocol_error, teardown_connection,
     },
     negotiation::{
@@ -52,7 +54,7 @@ use crate::{
         InboundFlowConfig, IncomingFlowDecisionError, IncomingFlowRequest, OutboundFlowConfig,
         SubmissionError, SubmitOutcome,
     },
-    quinn_binding::{ReceiveError, ReceiveProgress, SendError, SendProgress},
+    quinn_binding::{ReceiveError, ReceiveProgress, RegistryError, SendError, SendProgress},
     reliable_driver::{ActiveReliableProgress, ReliableIoError, ReliableIoStateError},
     wire::WireSide,
 };
@@ -100,9 +102,17 @@ pub enum ConnectionStateError {
     Terminal,
 }
 
-/// Public post-ProfileReady connection failures.
+impl fmt::Display for ConnectionStateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid RunenNet connection state: {self:?}")
+    }
+}
+
+impl std::error::Error for ConnectionStateError {}
+
+/// Stable application-facing classification for a post-ProfileReady connection failure.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ConnectionError {
+pub enum ConnectionErrorKind {
     LocalNegotiation {
         outcome: NegotiationFailure,
         report: NegotiationReportStatus,
@@ -123,16 +133,220 @@ pub enum ConnectionError {
     State(ConnectionStateError),
 }
 
-impl fmt::Display for ConnectionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "RunenNet connection progression failed: {self:?}"
-        )
+/// Public post-ProfileReady connection failure.
+///
+/// [`Self::kind`] is the stable application classification. Private transport/controller detail
+/// may be retained as an opaque diagnostic source for the first observable failure without making
+/// Quinn, wire, or driver types part of the public API.
+#[derive(Debug)]
+pub struct ConnectionError {
+    kind: ConnectionErrorKind,
+    diagnostic: Option<ConnectionDiagnostic>,
+}
+
+impl ConnectionError {
+    pub const fn kind(&self) -> ConnectionErrorKind {
+        self.kind
+    }
+
+    const fn classified(kind: ConnectionErrorKind) -> Self {
+        Self {
+            kind,
+            diagnostic: None,
+        }
+    }
+
+    fn diagnosed(kind: ConnectionErrorKind, diagnostic: ConnectionDiagnostic) -> Self {
+        Self {
+            kind,
+            diagnostic: Some(diagnostic),
+        }
+    }
+
+    const fn state(error: ConnectionStateError) -> Self {
+        Self::classified(ConnectionErrorKind::State(error))
     }
 }
 
-impl std::error::Error for ConnectionError {}
+impl PartialEq for ConnectionError {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind
+    }
+}
+
+impl Eq for ConnectionError {}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.diagnostic {
+            Some(diagnostic) => write!(
+                formatter,
+                "RunenNet connection progression failed: {:?}: {diagnostic}",
+                self.kind
+            ),
+            None => write!(
+                formatter,
+                "RunenNet connection progression failed: {:?}",
+                self.kind
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self.kind {
+            ConnectionErrorKind::State(ref error) => Some(error),
+            _ => self
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic as &(dyn std::error::Error + 'static)),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ConnectionDiagnostic {
+    Resource(ConnectionResourceDiagnostic),
+    Opaque(Box<OpaqueConnectionDiagnostic>),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum ConnectionResourceDiagnostic {
+    ProfileControlAllocation { cleanup_failed: bool },
+    Established(EstablishedResourceDiagnostic),
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum EstablishedResourceDiagnostic {
+    Allocation,
+    CapacityOverflow,
+}
+
+#[derive(Debug)]
+enum OpaqueConnectionDiagnostic {
+    ProfileControl(ProfileBootstrapError),
+    Control {
+        error: ProfileBootstrapError,
+        cleanup_error: Option<NegotiationControlError>,
+    },
+    Negotiation(NegotiationControlError),
+    EstablishedActivation(FlowControlConfigError),
+    EstablishedDriver(ConnectionDriverError),
+    UnexpectedCoreReceive(ReceiveOutcome),
+}
+
+impl ConnectionDiagnostic {
+    fn profile_control(error: ProfileBootstrapError) -> Self {
+        if profile_control_is_allocation(&error) {
+            Self::Resource(ConnectionResourceDiagnostic::ProfileControlAllocation {
+                cleanup_failed: false,
+            })
+        } else {
+            Self::Opaque(Box::new(OpaqueConnectionDiagnostic::ProfileControl(error)))
+        }
+    }
+
+    fn control(
+        error: ProfileBootstrapError,
+        cleanup_error: Option<NegotiationControlError>,
+    ) -> Self {
+        if profile_control_is_allocation(&error) {
+            Self::Resource(ConnectionResourceDiagnostic::ProfileControlAllocation {
+                cleanup_failed: cleanup_error.is_some(),
+            })
+        } else {
+            Self::Opaque(Box::new(OpaqueConnectionDiagnostic::Control {
+                error,
+                cleanup_error,
+            }))
+        }
+    }
+
+    fn negotiation(error: NegotiationControlError) -> Self {
+        Self::Opaque(Box::new(OpaqueConnectionDiagnostic::Negotiation(error)))
+    }
+
+    fn established_activation(error: FlowControlConfigError) -> Self {
+        Self::Opaque(Box::new(OpaqueConnectionDiagnostic::EstablishedActivation(
+            error,
+        )))
+    }
+
+    const fn established_resource(error: EstablishedResourceDiagnostic) -> Self {
+        Self::Resource(ConnectionResourceDiagnostic::Established(error))
+    }
+
+    fn established_driver(error: ConnectionDriverError) -> Self {
+        Self::Opaque(Box::new(OpaqueConnectionDiagnostic::EstablishedDriver(
+            error,
+        )))
+    }
+
+    fn unexpected_core_receive(outcome: ReceiveOutcome) -> Self {
+        Self::Opaque(Box::new(OpaqueConnectionDiagnostic::UnexpectedCoreReceive(
+            outcome,
+        )))
+    }
+}
+
+impl fmt::Display for ConnectionDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Resource(ConnectionResourceDiagnostic::ProfileControlAllocation {
+                cleanup_failed,
+            }) => write!(
+                formatter,
+                "profile control allocation failure; cleanup_failed={cleanup_failed}"
+            ),
+            Self::Resource(ConnectionResourceDiagnostic::Established(error)) => {
+                write!(formatter, "established resource failure: {error:?}")
+            }
+            Self::Opaque(diagnostic) => diagnostic.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ConnectionDiagnostic {}
+
+impl fmt::Display for OpaqueConnectionDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProfileControl(error) => {
+                write!(formatter, "profile control failure: {error:?}")
+            }
+            Self::Control {
+                error,
+                cleanup_error,
+            } => {
+                write!(formatter, "profile control failure: {error:?}")?;
+                if let Some(cleanup_error) = cleanup_error {
+                    write!(formatter, "; cleanup failure: {cleanup_error:?}")?;
+                }
+                Ok(())
+            }
+            Self::Negotiation(error) => {
+                write!(formatter, "negotiation controller failure: {error:?}")
+            }
+            Self::EstablishedActivation(error) => {
+                write!(formatter, "established activation failure: {error:?}")
+            }
+            Self::EstablishedDriver(error) => {
+                write!(formatter, "established driver failure: {error:?}")
+            }
+            Self::UnexpectedCoreReceive(outcome) => {
+                write!(formatter, "unexpected Core receive outcome: {outcome:?}")
+            }
+        }
+    }
+}
+
+fn profile_control_is_allocation(error: &ProfileBootstrapError) -> bool {
+    matches!(
+        error,
+        ProfileBootstrapError::Frame(ControlFrameError::Allocation(_))
+    )
+}
 
 /// Why an unreliable inbound payload was observably dropped before application exposure.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -189,7 +403,25 @@ pub enum ConnectionEvent {
 /// Categorized cleanup failure returned by consuming connection teardown.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ConnectionCleanupError {
-    NegotiationManagerState,
+    NegotiationManagerState(NegotiationManagerError),
+}
+
+impl fmt::Display for ConnectionCleanupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NegotiationManagerState(error) => {
+                write!(formatter, "RunenNet connection cleanup failed: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConnectionCleanupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NegotiationManagerState(error) => Some(error),
+        }
+    }
 }
 
 /// Host-relevant evidence returned by consuming connection teardown.
@@ -219,9 +451,14 @@ impl From<crate::lifecycle::ConnectionTeardown> for ConnectionTeardown {
         Self {
             connection: teardown.connection,
             flow_terminations: teardown.flow_terminations,
-            cleanup_error: teardown
-                .negotiation_cleanup_error
-                .map(|_| ConnectionCleanupError::NegotiationManagerState),
+            cleanup_error: teardown.negotiation_cleanup_error.map(|error| match error {
+                NegotiationControlError::ManagerState(error) => {
+                    ConnectionCleanupError::NegotiationManagerState(error)
+                }
+                _ => unreachable!(
+                    "NegotiationExchange::abort only returns negotiation-manager state failures"
+                ),
+            }),
         }
     }
 }
@@ -344,7 +581,8 @@ enum ConnectionState {
     },
     EstablishedFailed {
         driver: Box<EstablishedConnectionDriver>,
-        error: ConnectionError,
+        kind: ConnectionErrorKind,
+        pending_error: Option<ConnectionError>,
     },
     EstablishedActivationFailed {
         established: EstablishedNegotiatedConnection,
@@ -799,10 +1037,12 @@ impl Connection {
                             PendingSendDisposition::TerminalLocalFailure(outcome) => {
                                 close_negotiation_failed(&core.profile.connection);
                                 self.state = ConnectionState::Failed { core };
-                                return Poll::Ready(Err(ConnectionError::LocalNegotiation {
-                                    outcome: outcome.into(),
-                                    report: NegotiationReportStatus::Sent,
-                                }));
+                                return Poll::Ready(Err(ConnectionError::classified(
+                                    ConnectionErrorKind::LocalNegotiation {
+                                        outcome: outcome.into(),
+                                        report: NegotiationReportStatus::Sent,
+                                    },
+                                )));
                             }
                         },
                         Err(error) => {
@@ -810,21 +1050,23 @@ impl Connection {
                                 disposition
                             {
                                 close_negotiation_failed(&core.profile.connection);
-                                self.state = ConnectionState::Failed { core };
-                                return Poll::Ready(Err(ConnectionError::LocalNegotiation {
+                                let kind = ConnectionErrorKind::LocalNegotiation {
                                     outcome: outcome.into(),
                                     report: NegotiationReportStatus::Failed(
                                         ProfileBootstrapFailure::from(&error),
                                     ),
-                                }));
+                                };
+                                self.state = ConnectionState::Failed { core };
+                                return Poll::Ready(Err(ConnectionError::diagnosed(
+                                    kind,
+                                    ConnectionDiagnostic::profile_control(error),
+                                )));
                             }
                             close_for_post_profile_control_error(&core.profile.connection, &error);
-                            let cleanup_failed = core.exchange.abort(manager).is_err();
+                            let cleanup_error = core.exchange.abort(manager).err();
+                            let public_error = control_connection_error(error, cleanup_error);
                             self.state = ConnectionState::Failed { core };
-                            return Poll::Ready(Err(ConnectionError::Control {
-                                failure: ProfileBootstrapFailure::from(&error),
-                                cleanup_failed,
-                            }));
+                            return Poll::Ready(Err(public_error));
                         }
                     },
                 },
@@ -863,12 +1105,10 @@ impl Connection {
                         }
                         Err(error) => {
                             close_for_post_profile_control_error(&core.profile.connection, &error);
-                            let cleanup_failed = core.exchange.abort(manager).is_err();
+                            let cleanup_error = core.exchange.abort(manager).err();
+                            let public_error = control_connection_error(error, cleanup_error);
                             self.state = ConnectionState::Failed { core };
-                            return Poll::Ready(Err(ConnectionError::Control {
-                                failure: ProfileBootstrapFailure::from(&error),
-                                cleanup_failed,
-                            }));
+                            return Poll::Ready(Err(public_error));
                         }
                     },
                 },
@@ -894,11 +1134,15 @@ impl Connection {
                                 connection: self.connection,
                             }));
                         }
-                        Err(established) => {
+                        Err(error) => {
+                            let FlowControlActivationError { error, established } = error;
                             self.state = ConnectionState::EstablishedActivationFailed {
                                 established: *established,
                             };
-                            return Poll::Ready(Err(ConnectionError::EstablishedActivation));
+                            return Poll::Ready(Err(ConnectionError::diagnosed(
+                                ConnectionErrorKind::EstablishedActivation,
+                                ConnectionDiagnostic::established_activation(error),
+                            )));
                         }
                     }
                 }
@@ -919,44 +1163,71 @@ impl Connection {
                                     continue;
                                 }
                                 Err(error) => {
-                                    self.state =
-                                        ConnectionState::EstablishedFailed { driver, error };
+                                    let kind = error.kind();
+                                    self.state = ConnectionState::EstablishedFailed {
+                                        driver,
+                                        kind,
+                                        pending_error: None,
+                                    };
                                     return Poll::Ready(Err(error));
                                 }
                             }
                         }
                         Poll::Ready(Err(error)) => {
                             let (event, public_error) = map_established_driver_error(error);
-                            self.state = ConnectionState::EstablishedFailed {
-                                driver,
-                                error: public_error,
-                            };
+                            let kind = public_error.kind();
                             if let Some(event) = event {
+                                self.state = ConnectionState::EstablishedFailed {
+                                    driver,
+                                    kind,
+                                    pending_error: Some(public_error),
+                                };
                                 return Poll::Ready(Ok(event));
                             }
+                            self.state = ConnectionState::EstablishedFailed {
+                                driver,
+                                kind,
+                                pending_error: None,
+                            };
                             return Poll::Ready(Err(public_error));
                         }
                     }
                 }
-                ConnectionState::EstablishedFailed { driver, error } => {
-                    self.state = ConnectionState::EstablishedFailed { driver, error };
-                    return Poll::Ready(Err(error));
+                ConnectionState::EstablishedFailed {
+                    driver,
+                    kind,
+                    pending_error,
+                } => {
+                    if let Some(error) = pending_error {
+                        self.state = ConnectionState::EstablishedFailed {
+                            driver,
+                            kind,
+                            pending_error: None,
+                        };
+                        return Poll::Ready(Err(error));
+                    }
+                    self.state = ConnectionState::EstablishedFailed {
+                        driver,
+                        kind,
+                        pending_error: None,
+                    };
+                    return Poll::Ready(Err(ConnectionError::classified(kind)));
                 }
                 ConnectionState::EstablishedActivationFailed { established } => {
                     self.state = ConnectionState::EstablishedActivationFailed { established };
-                    return Poll::Ready(Err(ConnectionError::State(
+                    return Poll::Ready(Err(ConnectionError::state(
                         ConnectionStateError::Terminal,
                     )));
                 }
                 ConnectionState::Failed { core } => {
                     self.state = ConnectionState::Failed { core };
-                    return Poll::Ready(Err(ConnectionError::State(
+                    return Poll::Ready(Err(ConnectionError::state(
                         ConnectionStateError::Terminal,
                     )));
                 }
                 ConnectionState::Transitioning => {
                     self.state = ConnectionState::Transitioning;
-                    return Poll::Ready(Err(ConnectionError::State(
+                    return Poll::Ready(Err(ConnectionError::state(
                         ConnectionStateError::Terminal,
                     )));
                 }
@@ -982,11 +1253,11 @@ impl Connection {
             } => (core, sender, receiver),
             ConnectionState::Failed { core } => {
                 self.state = ConnectionState::Failed { core };
-                return Err(ConnectionError::State(ConnectionStateError::Terminal));
+                return Err(ConnectionError::state(ConnectionStateError::Terminal));
             }
             state => {
                 self.state = state;
-                return Err(ConnectionError::State(
+                return Err(ConnectionError::state(
                     ConnectionStateError::AuthoritySelectionNotRequired,
                 ));
             }
@@ -1075,11 +1346,8 @@ impl Connection {
 fn activate_established_driver(
     established: EstablishedNegotiatedConnection,
     reliable_receive: ReliableReceiveLimits,
-) -> Result<EstablishedConnectionDriver, Box<EstablishedNegotiatedConnection>> {
-    let flow_controlled = match established.into_flow_control() {
-        Ok(flow_controlled) => flow_controlled,
-        Err(error) => return Err(error.established),
-    };
+) -> Result<EstablishedConnectionDriver, FlowControlActivationError> {
+    let flow_controlled = established.into_flow_control()?;
     Ok(flow_controlled
         .into_reliable_io(
             reliable_receive.scratch_bytes,
@@ -1312,10 +1580,13 @@ fn map_established_progress(
                     key,
                     reason: UnreliableReceiveDropReason::StaleSequenced,
                 }),
-                ReceiveOutcome::DuplicateReliable
+                unexpected @ (ReceiveOutcome::DuplicateReliable
                 | ReceiveOutcome::RejectedModeMismatch
-                | ReceiveOutcome::TerminalReliableFailure => {
-                    return Err(ConnectionError::UnexpectedCoreState);
+                | ReceiveOutcome::TerminalReliableFailure) => {
+                    return Err(ConnectionError::diagnosed(
+                        ConnectionErrorKind::UnexpectedCoreState,
+                        ConnectionDiagnostic::unexpected_core_receive(unexpected),
+                    ));
                 }
             },
         },
@@ -1379,16 +1650,139 @@ fn map_established_driver_error(
     match error {
         ConnectionDriverError::ControlSend(error) => {
             let error = *error;
-            let public_error =
-                ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(&error.error));
-            (map_control_send_effect(error.effect), public_error)
+            let kind = ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::from(
+                &error.error,
+            ));
+            let event = map_control_send_effect(error.effect);
+            (
+                event,
+                ConnectionError::diagnosed(
+                    kind,
+                    ConnectionDiagnostic::profile_control(error.error),
+                ),
+            )
         }
-        ConnectionDriverError::ControlReceive(error) => (
-            None,
-            ConnectionError::EstablishedControl(ProfileBootstrapFailure::from(&error)),
-        ),
         ConnectionDriverError::State(ConnectionDriverStateError::Terminal) => {
-            (None, ConnectionError::State(ConnectionStateError::Terminal))
+            (None, ConnectionError::state(ConnectionStateError::Terminal))
+        }
+        error => {
+            let kind = established_driver_error_kind(&error);
+            if let Some(diagnostic) = connection_driver_resource_diagnostic(&error) {
+                return (
+                    None,
+                    ConnectionError::diagnosed(
+                        kind,
+                        ConnectionDiagnostic::established_resource(diagnostic),
+                    ),
+                );
+            }
+            (
+                None,
+                ConnectionError::diagnosed(kind, ConnectionDiagnostic::established_driver(error)),
+            )
+        }
+    }
+}
+
+fn connection_driver_resource_diagnostic(
+    error: &ConnectionDriverError,
+) -> Option<EstablishedResourceDiagnostic> {
+    if connection_driver_is_allocation(error) {
+        return Some(EstablishedResourceDiagnostic::Allocation);
+    }
+    if matches!(
+        error,
+        ConnectionDriverError::Reliable(ReliableIoError::State(
+            ReliableIoStateError::CapacityOverflow
+        ))
+    ) {
+        return Some(EstablishedResourceDiagnostic::CapacityOverflow);
+    }
+    None
+}
+
+fn connection_driver_is_allocation(error: &ConnectionDriverError) -> bool {
+    match error {
+        ConnectionDriverError::OutboundOpen(OutboundOpenError::Allocation(_)) => true,
+        ConnectionDriverError::InboundAdmission(error) => inbound_admission_is_allocation(error),
+        ConnectionDriverError::ControlReceive(error) => profile_control_is_allocation(error),
+        ConnectionDriverError::ControlSend(error) => profile_control_is_allocation(&error.error),
+        ConnectionDriverError::ReceivedFlowControl(error)
+        | ConnectionDriverError::FailurePreparation(error) => flow_control_is_allocation(error),
+        ConnectionDriverError::Reliable(error) => reliable_io_is_allocation(error),
+        ConnectionDriverError::Datagram(error) => datagram_io_is_allocation(error),
+        ConnectionDriverError::State(_)
+        | ConnectionDriverError::OutboundOpen(_)
+        | ConnectionDriverError::DatagramSubmission(_)
+        | ConnectionDriverError::DatagramProfileUnavailable => false,
+    }
+}
+
+fn inbound_admission_is_allocation(error: &InboundAdmissionError) -> bool {
+    matches!(
+        error,
+        InboundAdmissionError::Allocation(_)
+            | InboundAdmissionError::Registry(RegistryError::AllocationFailed)
+    )
+}
+
+fn flow_control_is_allocation(error: &FlowControlError) -> bool {
+    matches!(
+        error,
+        FlowControlError::Allocation(_)
+            | FlowControlError::Registry(RegistryError::AllocationFailed)
+    )
+}
+
+fn reliable_io_is_allocation(error: &ReliableIoError) -> bool {
+    match error {
+        ReliableIoError::Allocation(_) => true,
+        ReliableIoError::OutboundFinish { error, .. }
+        | ReliableIoError::OutboundAcquisitionBinding { error, .. }
+        | ReliableIoError::OutboundActiveBinding { error, .. } => send_error_is_allocation(error),
+        ReliableIoError::InboundConstruction(error)
+        | ReliableIoError::InboundActiveBinding { error, .. } => receive_error_is_allocation(error),
+        ReliableIoError::State(_) | ReliableIoError::Connection(_) => false,
+    }
+}
+
+fn send_error_is_allocation(error: &SendError) -> bool {
+    matches!(error, SendError::Registry(RegistryError::AllocationFailed))
+}
+
+fn receive_error_is_allocation(error: &ReceiveError) -> bool {
+    matches!(
+        error,
+        ReceiveError::AllocationFailed | ReceiveError::Registry(RegistryError::AllocationFailed)
+    )
+}
+
+fn datagram_io_is_allocation(error: &DatagramIoError) -> bool {
+    match error {
+        DatagramIoError::Allocation(_) => true,
+        DatagramIoError::Receive(failure) => {
+            matches!(failure.error, DatagramReceiveError::AllocationFailed)
+        }
+        DatagramIoError::Send {
+            error: DatagramSendError::AllocationFailed,
+            ..
+        } => true,
+        DatagramIoError::State(_)
+        | DatagramIoError::Connection(_)
+        | DatagramIoError::Send { .. } => false,
+    }
+}
+
+fn established_driver_error_kind(error: &ConnectionDriverError) -> ConnectionErrorKind {
+    match error {
+        ConnectionDriverError::ControlSend(error) => {
+            ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::from(&error.error))
+        }
+        ConnectionDriverError::ControlReceive(error) => {
+            ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::from(error))
+        }
+        ConnectionDriverError::State(ConnectionDriverStateError::Terminal) => {
+            ConnectionErrorKind::State(ConnectionStateError::Terminal)
         }
         ConnectionDriverError::Reliable(ReliableIoError::Allocation(_))
         | ConnectionDriverError::Reliable(ReliableIoError::State(
@@ -1400,7 +1794,7 @@ fn map_established_driver_error(
         | ConnectionDriverError::Datagram(DatagramIoError::Allocation(_))
         | ConnectionDriverError::ReceivedFlowControl(FlowControlError::Allocation(_))
         | ConnectionDriverError::FailurePreparation(FlowControlError::Allocation(_)) => {
-            (None, ConnectionError::EstablishedResource)
+            ConnectionErrorKind::EstablishedResource
         }
         ConnectionDriverError::Reliable(ReliableIoError::Connection(_))
         | ConnectionDriverError::Datagram(DatagramIoError::Connection(_))
@@ -1409,20 +1803,16 @@ fn map_established_driver_error(
             ..
         })
         | ConnectionDriverError::DatagramProfileUnavailable => {
-            (None, ConnectionError::EstablishedTransport)
+            ConnectionErrorKind::EstablishedTransport
         }
         ConnectionDriverError::State(ConnectionDriverStateError::ControlSendBusy)
         | ConnectionDriverError::OutboundOpen(_)
         | ConnectionDriverError::InboundAdmission(_)
-        | ConnectionDriverError::DatagramSubmission(_) => {
-            (None, ConnectionError::UnexpectedCoreState)
-        }
+        | ConnectionDriverError::DatagramSubmission(_) => ConnectionErrorKind::UnexpectedCoreState,
         ConnectionDriverError::ReceivedFlowControl(_)
         | ConnectionDriverError::Reliable(_)
         | ConnectionDriverError::Datagram(_)
-        | ConnectionDriverError::FailurePreparation(_) => {
-            (None, ConnectionError::EstablishedProtocol)
-        }
+        | ConnectionDriverError::FailurePreparation(_) => ConnectionErrorKind::EstablishedProtocol,
     }
 }
 
@@ -1462,10 +1852,10 @@ fn transition_from_local_operation(
             close_negotiation_failed(&core.profile.connection);
             LocalOperationTransition::Error(
                 ConnectionState::Failed { core },
-                ConnectionError::LocalNegotiation {
+                ConnectionError::classified(ConnectionErrorKind::LocalNegotiation {
                     outcome: outcome.into(),
                     report: NegotiationReportStatus::Unavailable,
-                },
+                }),
             )
         }
         Err(error) => {
@@ -1515,7 +1905,7 @@ fn transition_from_controller(
             close_negotiation_failed(&core.profile.connection);
             DriverTransition::Error(
                 ConnectionState::Failed { core },
-                ConnectionError::RemoteNegotiation(outcome.into()),
+                ConnectionError::classified(ConnectionErrorKind::RemoteNegotiation(outcome.into())),
             )
         }
         Err(NegotiationControlError::LocalFailure {
@@ -1535,10 +1925,10 @@ fn transition_from_controller(
             close_negotiation_failed(&core.profile.connection);
             DriverTransition::Error(
                 ConnectionState::Failed { core },
-                ConnectionError::LocalNegotiation {
+                ConnectionError::classified(ConnectionErrorKind::LocalNegotiation {
                     outcome: outcome.into(),
                     report: NegotiationReportStatus::Unavailable,
-                },
+                }),
             )
         }
         Err(error) => {
@@ -1555,24 +1945,46 @@ fn terminal_controller_error(
     match error {
         NegotiationControlError::LocalFailure { outcome, .. } => {
             close_negotiation_failed(&core.profile.connection);
-            ConnectionError::LocalNegotiation {
+            ConnectionError::classified(ConnectionErrorKind::LocalNegotiation {
                 outcome: outcome.into(),
                 report: NegotiationReportStatus::Unavailable,
-            }
+            })
         }
-        NegotiationControlError::ProfileProtocol(_) => {
+        NegotiationControlError::ProfileProtocol(error) => {
             close_negotiation_protocol_error(&core.profile.connection);
-            ConnectionError::NegotiationProtocol
+            ConnectionError::diagnosed(
+                ConnectionErrorKind::NegotiationProtocol,
+                ConnectionDiagnostic::negotiation(NegotiationControlError::ProfileProtocol(error)),
+            )
         }
-        NegotiationControlError::ManagerState(_) => {
+        NegotiationControlError::ManagerState(error) => {
             close_negotiation_failed(&core.profile.connection);
-            ConnectionError::ManagerState
+            ConnectionError::diagnosed(
+                ConnectionErrorKind::ManagerState,
+                ConnectionDiagnostic::negotiation(NegotiationControlError::ManagerState(error)),
+            )
         }
-        NegotiationControlError::UnexpectedCoreStatus(_) => {
+        NegotiationControlError::UnexpectedCoreStatus(status) => {
             close_negotiation_failed(&core.profile.connection);
-            ConnectionError::UnexpectedCoreState
+            ConnectionError::diagnosed(
+                ConnectionErrorKind::UnexpectedCoreState,
+                ConnectionDiagnostic::negotiation(NegotiationControlError::UnexpectedCoreStatus(
+                    status,
+                )),
+            )
         }
     }
+}
+
+fn control_connection_error(
+    error: ProfileBootstrapError,
+    cleanup_error: Option<NegotiationControlError>,
+) -> ConnectionError {
+    let kind = ConnectionErrorKind::Control {
+        failure: ProfileBootstrapFailure::from(&error),
+        cleanup_failed: cleanup_error.is_some(),
+    };
+    ConnectionError::diagnosed(kind, ConnectionDiagnostic::control(error, cleanup_error))
 }
 
 fn sending_state(
