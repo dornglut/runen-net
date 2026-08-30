@@ -15,6 +15,18 @@ The application owns `NegotiationManager` and `DeliveryEndpoint`. A public QUIC 
 
 `ConnectionHandle` and `DeliveryFlowKey` are host/Core identities. Wire flow identifiers and Quinn objects are intentionally not part of the ordinary public API.
 
+The larger Core map is:
+
+```text
+identity + protocol negotiation
+        -> session membership / authorization
+        -> delivery flows
+        -> replication
+        -> input / prediction
+```
+
+This is a navigation map, not a mandatory stack. A byte-channel application can stop at delivery; session, replication, and prediction are used only when the product needs those contracts.
+
 ## 1. Configure finite resources and TLS explicitly
 
 For ordinary first use, select the application-owned endpoint capacities and construct the named finite revision-1 baseline:
@@ -105,6 +117,15 @@ When polling yields `ConnectionEvent::AuthoritySelectionRequired`, semantic Auth
 
 When polling yields `ConnectionEvent::IncomingFlowRequested`, the host explicitly accepts or rejects the move-only request. Acceptance supplies the host-selected inbound `DeliveryFlowKey` and Core resource policy. This is application policy, not transport policy.
 
+### Core established negotiation vs QUIC established I/O
+
+There are two adjacent “established” observations, and they serve different owners:
+
+1. `NegotiationManager::established(connection_handle)` returns `EstablishedNegotiation` once Core compatibility negotiation is established. This is the compatibility proof consumed by `Session::admit_new` and `Session::bind_replacement`.
+2. `ConnectionEvent::Established` is emitted later by the QUIC facade after that negotiated state has been activated into the established flow/delivery driver. This event means ordinary QUIC flow I/O is ready.
+
+The event is therefore not a replacement for `EstablishedNegotiation`, and `EstablishedNegotiation` is not a transport-ready event. A host using `Session` can obtain the Core proof from its `NegotiationManager` and apply its membership policy while the same public QUIC `Connection` continues toward or has reached adapter I/O readiness.
+
 ## 6. Open and use Core-keyed flows
 
 Outbound flows are opened with `OutboundFlowConfig`, which includes:
@@ -150,6 +171,68 @@ Teardown releases connection-local adapter ownership and returns Core flow-termi
 
 Close the owning endpoint and await `wait_idle` when the application is finished with its QUIC endpoint.
 
+## 9. Add session membership and recovery only when needed
+
+A product that needs durable participant membership layers `Session` on the established Core negotiation evidence; the byte-channel path itself does not require session membership.
+
+The public lifecycle is:
+
+```text
+EstablishedNegotiation
+  -> Session::admit_new
+  -> Bound(participant, connection)
+  -> Session::connection_lost
+       -> terminate, or retain until RecoveryTime
+  -> establish compatibility on a different ConnectionHandle
+  -> Session::bind_replacement before expiry
+  -> remove/expire participant or Session::close
+```
+
+Retention uses explicit `RetentionPolicy` and the typed `RecoveryTime` / `RecoveryDuration` session clock. The host chooses that clock's units and origin consistently for the session. RunenNet does not turn it into wall-clock time, `SimulationTick`, reconnect backoff, or transport retry scheduling.
+
+The transport connection and participant are deliberately separate lifetimes: losing or tearing down a QUIC `Connection` does not by itself decide whether the participant remains a session member.
+
+## 10. Add replication and prediction as higher-level Core contracts
+
+Replication is optional. An authoritative host uses `AuthorityReplicationSession` to prepare full/delta candidates, submits the complete encoded message through its chosen delivery flow, and then records only the shared delivery-acceptance fact:
+
+```rust
+let submission = connection.submit(&mut delivery, flow, payload)?;
+authority.record_delivery_acceptance(participant, submission.acceptance())?;
+```
+
+A snapshot becomes emitted/acknowledgement-eligible only through the accepted Core delivery evidence; replication does not depend on QUIC rejection details. On the receiving side, the host reconstructs/commits the authoritative candidate through `ClientReplicationSet` while keeping application state ownership in its callback.
+
+Prediction is another optional layer. `PredictionLineage` is keyed by the same `ReplicationLineageKey` and observes the live `ClientReplicationSet`. The normal composition cycle is:
+
+```text
+commit initial authoritative full snapshot into ClientReplicationSet
+  -> PredictionLineage::observe_replication activates from that baseline
+  -> PredictionLineage::admit_local records future local input
+  -> commit a newer authoritative full/delta snapshot
+  -> PredictionLineage::observe_replication retires authoritative inputs
+       and replays only still-pending future inputs
+```
+
+The observation call supplies host-owned replay behavior:
+
+```rust
+prediction.observe_replication(&replication, |tick, input| {
+    // Reapply one still-pending predicted input to host-owned simulation state.
+    Ok::<_, ReplayError>(())
+})?;
+```
+
+Prediction's frontier is the latest authoritative `SimulationTick` it has observed from replication. Local input is admitted only for ticks newer than that frontier. A newer authoritative commit advances the frontier; pending inputs at or before it retire, while later inputs replay in RunenNet-defined order.
+
+Recovery is intentionally conservative. `PredictionLineage::require_connection_replacement_full(&mut replication)` composes connection-replacement recovery across the client replication and prediction state: replication requires a replacement full snapshot and prediction invalidates continuity. Other replication recovery boundaries are observed through the live `ClientReplicationSet` and likewise invalidate prediction as required.
+
+If host replay fails, reconciliation returns `PredictionReconciliationError::ReplayFailed` with the host error source and prediction becomes replay-failure-invalidated. After the host restores state from the synchronized authoritative replication lineage, `confirm_host_restored_after_replay_failure(&replication)` explicitly reactivates prediction. RunenNet does not restore gameplay state itself.
+
+RunenNet owns authoritative cursor/tick observation, prediction eligibility, retirement/order, recovery invalidation, and replay contracts. The host owns payload encoding, gameplay input meaning, authoritative state installation, and replay execution.
+
+The `runen-net` crate rustdoc links the relevant replication and input/prediction owner types. Applications that do not need replicated simulation do not need to learn this layer to use QUIC delivery.
+
 ## Advanced integration boundary
 
 Advanced consumers do not need a separate networking stack. They can combine:
@@ -160,6 +243,8 @@ Advanced consumers do not need a separate networking stack. They can combine:
 - application-owned session/world/scheduler state.
 
 Ordinary `runen-net-quic` applications do not need `runen_net::delivery::adapter`. A custom transport realization explicitly imports the sealed `DeliveryTransportAdapter` extension trait and operates on the same application-owned `DeliveryEndpoint`. The adapter boundary owns no delivery state and cannot replace or redefine Core acceptance, ordering/sequencing, pressure, exposure, or termination semantics.
+
+The Core-only `authoritative_counter` example uses this advanced adapter boundary because it intentionally demonstrates transport-independent direct delivery realization before replication. It is not the normal application path for production QUIC; use the QUIC standalone example for that path.
 
 Raw mutable Quinn access is not the ordinary escape hatch because bypassing the accepted stream/DATAGRAM/control owners could violate the QUIC profile. If an integration requires behavior beyond the public boundary, treat it as a separately reviewed framework requirement rather than bypassing RunenNet semantics.
 
