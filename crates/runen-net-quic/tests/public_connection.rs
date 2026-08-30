@@ -16,17 +16,19 @@ use runen_net::{
     },
     identity::ConnectionHandle,
     protocol::{
-        CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerLimits,
-        NegotiationRequirements, OfferLimits, ProtocolContract, ProtocolId, ProtocolRevision,
+        CompatibilityOffer, NegotiatedContract, NegotiationManager, NegotiationManagerError,
+        NegotiationManagerLimits, NegotiationRequirements, OfferLimits, ProtocolContract,
+        ProtocolId, ProtocolRevision,
     },
 };
 use runen_net_quic::{
-    CertificateDer, ClientEndpoint, ClientTrust, Connection, ConnectionError, ConnectionEvent,
-    ConnectionStateError, EndpointConfig, EndpointResourceLimits, FlowCommandError,
-    FlowRejectionReason, FlowTerminationCause, FlowTerminationOrigin, InboundFlowConfig,
-    NegotiationFailure, NegotiationReportStatus, OutboundFlowConfig, PrivateKeyDer, ProfileConfig,
-    ProfileLimits, ProfileReadyConnection, ReliableReceiveLimits, SemanticRole, ServerEndpoint,
-    ServerIdentity, SubmitOutcome,
+    CertificateDer, ClientEndpoint, ClientTrust, Connection, ConnectionCleanupError,
+    ConnectionError, ConnectionErrorKind, ConnectionEvent, ConnectionStateError, EndpointConfig,
+    EndpointResourceLimits, FlowCommandError, FlowRejectionReason, FlowTerminationCause,
+    FlowTerminationOrigin, InboundFlowConfig, NegotiationFailure, NegotiationReportStatus,
+    OutboundFlowConfig, PrivateKeyDer, ProfileBootstrapFailure, ProfileConfig, ProfileLimits,
+    ProfileReadyConnection, ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity,
+    SubmitOutcome,
 };
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use tokio::runtime::Builder;
@@ -59,6 +61,21 @@ fn public_connection_negotiates_with_host_identity_and_explicit_authority_on_eit
         .await
         .expect("public RN6C success scenarios timed out");
     });
+}
+
+#[test]
+fn public_cleanup_error_exposes_core_manager_source() {
+    fn assert_error<T: std::error::Error>() {}
+    assert_error::<ConnectionCleanupError>();
+
+    let error =
+        ConnectionCleanupError::NegotiationManagerState(NegotiationManagerError::UnknownConnection);
+    let source_text = NegotiationManagerError::UnknownConnection.to_string();
+    assert!(error.to_string().contains(&source_text));
+    assert_eq!(
+        std::error::Error::source(&error).map(ToString::to_string),
+        Some(source_text)
+    );
 }
 
 #[test]
@@ -230,25 +247,29 @@ fn invalid_authority_selection_preserves_local_and_remote_semantic_failure_categ
                         SERVER_CONNECTION,
                     );
                 }
-                match (client_error, server_error) {
+                match (client_error.take(), server_error.take()) {
                     (Some(client_error), Some(server_error)) => {
                         Poll::Ready((client_error, server_error))
                     }
-                    _ => Poll::Pending,
+                    (client, server) => {
+                        client_error = client;
+                        server_error = server;
+                        Poll::Pending
+                    }
                 }
             })
             .await;
 
             assert_eq!(
-                client_error,
-                ConnectionError::LocalNegotiation {
+                client_error.kind(),
+                ConnectionErrorKind::LocalNegotiation {
                     outcome: NegotiationFailure::InvalidSelection,
                     report: NegotiationReportStatus::Sent,
                 }
             );
             assert_eq!(
-                server_error,
-                ConnectionError::RemoteNegotiation(NegotiationFailure::InvalidSelection)
+                server_error.kind(),
+                ConnectionErrorKind::RemoteNegotiation(NegotiationFailure::InvalidSelection)
             );
 
             let client_teardown =
@@ -264,6 +285,73 @@ fn invalid_authority_selection_preserves_local_and_remote_semantic_failure_categ
         })
         .await
         .expect("public semantic-failure scenario timed out");
+    });
+}
+
+#[test]
+fn established_connection_failure_retains_source_then_repeats_kind() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, async {
+            let config = resource_limits(2).validate().unwrap();
+            let (client, server) = endpoints(config);
+            let mut client_host = new_host();
+            let mut server_host = new_host();
+            let (mut client_connection, server_connection) = establish_public_connection_pair(
+                &client,
+                &server,
+                config,
+                &mut client_host,
+                &mut server_host,
+            )
+            .await;
+
+            server.close();
+            let first_error = poll_fn(|cx| {
+                match client_connection.poll(
+                    cx,
+                    &mut client_host.negotiation,
+                    &mut client_host.delivery,
+                ) {
+                    Poll::Pending => Poll::Pending,
+                    Poll::Ready(Err(error)) => Poll::Ready(error),
+                    Poll::Ready(Ok(event)) => {
+                        panic!("closed peer produced unexpected public event: {event:?}")
+                    }
+                }
+            })
+            .await;
+
+            assert!(matches!(
+                first_error.kind(),
+                ConnectionErrorKind::EstablishedTransport
+                    | ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Transport)
+                    | ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Control)
+            ));
+            assert!(std::error::Error::source(&first_error).is_some());
+
+            let repeated_error = match poll_once(
+                &mut client_connection,
+                &mut client_host.negotiation,
+                &mut client_host.delivery,
+            ) {
+                Poll::Ready(Err(error)) => error,
+                other => panic!("terminal connection did not repeat its failure kind: {other:?}"),
+            };
+            assert_eq!(repeated_error.kind(), first_error.kind());
+
+            let client_teardown =
+                client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
+            let server_teardown =
+                server_connection.teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
+            assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
+
+            client.close();
+            join2(client.wait_idle(), server.wait_idle()).await;
+        })
+        .await
+        .expect("public established connection-failure scenario timed out");
     });
 }
 
@@ -861,11 +949,16 @@ async fn run_public_success(authority: AuthoritySide) {
         ),
         Poll::Pending
     ));
+    let state_error = non_authority_connection
+        .select_authority(&mut non_authority_host.negotiation, contract())
+        .unwrap_err();
     assert_eq!(
-        non_authority_connection
-            .select_authority(&mut non_authority_host.negotiation, contract())
-            .unwrap_err(),
-        ConnectionError::State(ConnectionStateError::AuthoritySelectionNotRequired)
+        state_error.kind(),
+        ConnectionErrorKind::State(ConnectionStateError::AuthoritySelectionNotRequired)
+    );
+    assert_eq!(
+        std::error::Error::source(&state_error).map(ToString::to_string),
+        Some(ConnectionStateError::AuthoritySelectionNotRequired.to_string())
     );
     authority_connection
         .select_authority(&mut authority_host.negotiation, contract())

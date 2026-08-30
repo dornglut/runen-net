@@ -52,7 +52,8 @@ use crate::{
         connect_profile_ready,
     },
     public_connection::{
-        Connection as PublicConnection, ConnectionError as PublicConnectionError, ConnectionEvent,
+        Connection as PublicConnection, ConnectionErrorKind as PublicConnectionErrorKind,
+        ConnectionEvent,
     },
     quinn_binding::{ReceiveProgress, SendProgress},
     wire::{ApplicationErrorCode, FlowId, FlowTerminateReason, WireSide, encode_varint},
@@ -207,8 +208,8 @@ async fn run_unknown_control_frame_scenario() {
     )
     .await;
     assert_eq!(
-        error,
-        PublicConnectionError::Control {
+        error.kind(),
+        PublicConnectionErrorKind::Control {
             failure: ProfileBootstrapFailure::Control,
             cleanup_failed: false,
         }

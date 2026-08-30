@@ -9,14 +9,15 @@ mod facade;
 pub use facade::{
     CertificateDer, ClientEndpoint, ClientTrust, EndpointBindError, EndpointConfig,
     EndpointResourceError, EndpointResourceLimits, PrivateKeyDer, ProfileBootstrapFailure,
-    ProfileConfig, ProfileConfigError, ProfileConnectionError, ProfileLimits,
-    ProfileReadyConnection, ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity,
-    TlsMaterialError,
+    ProfileConfig, ProfileConfigError, ProfileConnectionError, ProfileConnectionErrorKind,
+    ProfileLimits, ProfileReadyConnection, ReliableReceiveLimits, SemanticRole, ServerEndpoint,
+    ServerIdentity, TlsMaterialError,
 };
 mod public_connection;
 pub use public_connection::{
-    Connection, ConnectionCleanupError, ConnectionError, ConnectionEvent, ConnectionStateError,
-    ConnectionTeardown, NegotiationFailure, NegotiationReportStatus, UnreliableReceiveDropReason,
+    Connection, ConnectionCleanupError, ConnectionError, ConnectionErrorKind, ConnectionEvent,
+    ConnectionStateError, ConnectionTeardown, NegotiationFailure, NegotiationReportStatus,
+    UnreliableReceiveDropReason,
 };
 mod public_flow;
 pub use public_flow::{

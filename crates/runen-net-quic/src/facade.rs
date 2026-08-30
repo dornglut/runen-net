@@ -508,9 +508,9 @@ impl From<&ProfileBootstrapError> for ProfileBootstrapFailure {
     }
 }
 
-/// Public connection errors up to the ProfileReady boundary.
+/// Stable application classification for one ProfileReady connection failure.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum ProfileConnectionError {
+pub enum ProfileConnectionErrorKind {
     ConfigurationMismatch,
     AdmissionAtCapacity,
     ConnectSetup,
@@ -518,16 +518,74 @@ pub enum ProfileConnectionError {
     Bootstrap(ProfileBootstrapFailure),
 }
 
+#[derive(Debug)]
+struct ProfileConnectionDiagnostic(InternalProfileConnectionError);
+
+impl fmt::Display for ProfileConnectionDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            InternalProfileConnectionError::Preflight(error) => {
+                write!(formatter, "ProfileReady preflight detail: {error:?}")
+            }
+            InternalProfileConnectionError::Admission(error) => {
+                write!(formatter, "ProfileReady admission detail: {error:?}")
+            }
+            InternalProfileConnectionError::Connect(error) => {
+                write!(formatter, "QUIC connect setup detail: {error}")
+            }
+            InternalProfileConnectionError::Handshake(error) => {
+                write!(formatter, "QUIC handshake detail: {error}")
+            }
+            InternalProfileConnectionError::Bootstrap(error) => {
+                write!(formatter, "ProfileReady bootstrap detail: {error:?}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ProfileConnectionDiagnostic {}
+
+/// Public connection failure up to the ProfileReady boundary.
+///
+/// [`Self::kind`] is the stable application classifier. Lower-level QUIC/bootstrap detail is kept
+/// only as an opaque error source for diagnostics and is not a machine-readable public contract.
+#[derive(Debug)]
+pub struct ProfileConnectionError {
+    kind: ProfileConnectionErrorKind,
+    diagnostic: Option<ProfileConnectionDiagnostic>,
+}
+
+impl ProfileConnectionError {
+    pub const fn kind(&self) -> ProfileConnectionErrorKind {
+        self.kind
+    }
+}
+
 impl From<InternalProfileConnectionError> for ProfileConnectionError {
     fn from(error: InternalProfileConnectionError) -> Self {
         match error {
-            InternalProfileConnectionError::Preflight(_) => Self::ConfigurationMismatch,
-            InternalProfileConnectionError::Admission(_) => Self::AdmissionAtCapacity,
-            InternalProfileConnectionError::Connect(_) => Self::ConnectSetup,
-            InternalProfileConnectionError::Handshake(_) => Self::Handshake,
-            InternalProfileConnectionError::Bootstrap(error) => {
-                Self::Bootstrap(ProfileBootstrapFailure::from(&error))
-            }
+            InternalProfileConnectionError::Admission(_) => Self {
+                kind: ProfileConnectionErrorKind::AdmissionAtCapacity,
+                diagnostic: None,
+            },
+            error @ InternalProfileConnectionError::Preflight(_) => Self {
+                kind: ProfileConnectionErrorKind::ConfigurationMismatch,
+                diagnostic: Some(ProfileConnectionDiagnostic(error)),
+            },
+            error @ InternalProfileConnectionError::Connect(_) => Self {
+                kind: ProfileConnectionErrorKind::ConnectSetup,
+                diagnostic: Some(ProfileConnectionDiagnostic(error)),
+            },
+            error @ InternalProfileConnectionError::Handshake(_) => Self {
+                kind: ProfileConnectionErrorKind::Handshake,
+                diagnostic: Some(ProfileConnectionDiagnostic(error)),
+            },
+            InternalProfileConnectionError::Bootstrap(error) => Self {
+                kind: ProfileConnectionErrorKind::Bootstrap(ProfileBootstrapFailure::from(&error)),
+                diagnostic: Some(ProfileConnectionDiagnostic(
+                    InternalProfileConnectionError::Bootstrap(error),
+                )),
+            },
         }
     }
 }
@@ -536,12 +594,19 @@ impl fmt::Display for ProfileConnectionError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "RunenNet ProfileReady connection failed: {self:?}"
+            "RunenNet ProfileReady connection failed: {:?}",
+            self.kind
         )
     }
 }
 
-impl std::error::Error for ProfileConnectionError {}
+impl std::error::Error for ProfileConnectionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.diagnostic
+            .as_ref()
+            .map(|diagnostic| diagnostic as &(dyn std::error::Error + 'static))
+    }
+}
 
 /// Opaque ownership of one connection that completed the RunenNet QUIC ProfileReady gate.
 ///
