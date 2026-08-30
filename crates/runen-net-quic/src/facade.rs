@@ -150,6 +150,7 @@ impl fmt::Debug for EndpointConfig {
 }
 
 /// Public endpoint-resource validation failures.
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum EndpointResourceError {
     ZeroConnections,
@@ -321,6 +322,7 @@ impl fmt::Debug for ProfileConfig {
 }
 
 /// Public ProfileReady configuration failures.
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProfileConfigError {
     ControlFrameTooSmall,
@@ -409,6 +411,7 @@ impl ServerIdentity {
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TlsMaterialError {
     EmptyClientTrust,
@@ -424,6 +427,7 @@ impl fmt::Display for TlsMaterialError {
 impl std::error::Error for TlsMaterialError {}
 
 /// Failure while constructing a public client or server endpoint.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum EndpointBindError {
     TrustCertificateRejected,
@@ -474,6 +478,7 @@ impl std::error::Error for EndpointBindError {
 }
 
 /// Application-facing ProfileReady bootstrap failure categories.
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProfileBootstrapFailure {
     Transport,
@@ -509,6 +514,7 @@ impl From<&ProfileBootstrapError> for ProfileBootstrapFailure {
 }
 
 /// Stable application classification for one ProfileReady connection failure.
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum ProfileConnectionErrorKind {
     ConfigurationMismatch,
