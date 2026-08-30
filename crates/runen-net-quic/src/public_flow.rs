@@ -74,6 +74,7 @@ impl IncomingFlowRequest {
 /// Stable application-facing failure categories for established flow commands.
 ///
 /// Private driver, wire, and transport error topology deliberately remains behind this boundary.
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum FlowCommandError {
     NotEstablished,
@@ -273,6 +274,7 @@ impl From<FlowTerminateReason> for FlowTerminationCause {
 /// reject before Core acceptance when the current negotiated DATAGRAM size cannot carry the
 /// message. Loss of negotiated DATAGRAM capability is connection-terminal and is therefore
 /// reported through the connection error boundary, not as a submission outcome.
+#[non_exhaustive]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum SubmitOutcome {
     Accepted {
