@@ -261,6 +261,22 @@ impl EstablishedConnectionDriver {
         self.connection.send_datagram(datagram.into())
     }
 
+    #[cfg(test)]
+    pub(super) async fn send_raw_control_bytes_for_test(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), crate::control::ControlFrameError> {
+        let ControlSendState::Ready(sender) = &mut self.sender else {
+            panic!("test control injection requires the established sender to be ready");
+        };
+        sender.send_raw_bytes_for_test(bytes).await
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_for_test(&self, code: ApplicationErrorCode) {
+        self.connection.close(code.quinn(), b"test close");
+    }
+
     pub(super) fn peer_no_error_close_observed(&self) -> bool {
         matches!(
             self.connection.close_reason(),
