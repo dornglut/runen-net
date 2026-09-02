@@ -209,6 +209,7 @@ const fn opposite_side(side: WireSide) -> WireSide {
 pub(super) enum IoFailure {
     Read,
     Write,
+    ConnectionLost,
 }
 
 type FinishAckFuture =
@@ -270,8 +271,12 @@ impl PollReadReliable for RecvStream {
         cx: &mut Context<'_>,
         bytes: &mut [u8],
     ) -> Poll<Result<usize, IoFailure>> {
-        self.poll_read(cx, bytes)
-            .map(|result| result.map_err(|_| IoFailure::Read))
+        self.poll_read(cx, bytes).map(|result| {
+            result.map_err(|error| match error {
+                quinn::ReadError::ConnectionLost(_) => IoFailure::ConnectionLost,
+                _ => IoFailure::Read,
+            })
+        })
     }
 
     fn stop_reliable(&mut self, code: VarInt) {
