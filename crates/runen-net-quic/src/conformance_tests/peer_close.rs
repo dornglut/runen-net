@@ -195,10 +195,8 @@ fn nonzero_runennet_application_close_stays_on_failure_path() {
                 &mut client_side.host.delivery,
             );
             assert_clean_public_teardown(&client_teardown, FIRST_CONNECTION);
-            let server_teardown = server_driver.teardown(
-                &mut server_host.negotiation,
-                &mut server_host.delivery,
-            );
+            let server_teardown =
+                server_driver.teardown(&mut server_host.negotiation, &mut server_host.delivery);
             assert_eq!(server_teardown.connection, FIRST_CONNECTION);
             assert!(server_teardown.negotiation_cleanup_error.is_none());
             assert!(server_teardown.flow_terminations.is_empty());
@@ -245,7 +243,12 @@ fn quic_idle_timeout_stays_on_transport_failure_path() {
 
 async fn establish_public_pair_with_resources(
     resources: ValidatedEndpointResources,
-) -> (ConfiguredEndpoint, ConfiguredEndpoint, PublicSide, PublicSide) {
+) -> (
+    ConfiguredEndpoint,
+    ConfiguredEndpoint,
+    PublicSide,
+    PublicSide,
+) {
     let (client, server) = configured_endpoints_with_resources(resources);
     let server_address = server.endpoint().local_addr().unwrap();
     let (client_ready, server_ready) = join2(
@@ -315,7 +318,10 @@ async fn drive_public_pair_to_established(client: &mut PublicSide, server: &mut 
             }
         }
     }
-    assert!(authority_selected, "Authority was never explicitly selected");
+    assert!(
+        authority_selected,
+        "Authority was never explicitly selected"
+    );
 }
 
 async fn establish_public_reliable_flow(
