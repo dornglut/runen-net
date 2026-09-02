@@ -372,6 +372,7 @@ pub(super) enum ControlFrameError {
     NegotiationBodyTooLarge { received: u64, limit: u64 },
     Allocation(TryReserveError),
     EndOfStream,
+    TruncatedFrame,
     Read(ReadExactError),
     Write(WriteError),
     ZeroWriteProgress,
@@ -385,7 +386,10 @@ impl From<VarIntDecodeError> for ControlFrameError {
 
 impl From<ReadExactError> for ControlFrameError {
     fn from(error: ReadExactError) -> Self {
-        Self::Read(error)
+        match error {
+            ReadExactError::FinishedEarly(_) => Self::TruncatedFrame,
+            error => Self::Read(error),
+        }
     }
 }
 
@@ -928,7 +932,7 @@ async fn receive_frame_type(recv: &mut RecvStream) -> Result<ControlFrameType, C
     match recv.read_exact(&mut first).await {
         Ok(()) => {}
         Err(ReadExactError::FinishedEarly(0)) => return Err(ControlFrameError::EndOfStream),
-        Err(error) => return Err(ControlFrameError::Read(error)),
+        Err(error) => return Err(error.into()),
     }
     ControlFrameType::from_wire(read_stream_varint_after_first(recv, first[0]).await?)
 }
