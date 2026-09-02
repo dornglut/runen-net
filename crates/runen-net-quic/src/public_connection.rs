@@ -54,7 +54,9 @@ use crate::{
         InboundFlowConfig, IncomingFlowDecisionError, IncomingFlowRequest, OutboundFlowConfig,
         SubmissionError, SubmitOutcome,
     },
-    quinn_binding::{ReceiveError, ReceiveProgress, RegistryError, SendError, SendProgress},
+    quinn_binding::{
+        IoFailure, ReceiveError, ReceiveProgress, RegistryError, SendError, SendProgress,
+    },
     reliable_driver::{
         ActiveReliableProgress, ReliableFailureContext, ReliableIoError, ReliableIoStateError,
     },
@@ -1688,9 +1690,7 @@ fn map_control_send_effect(effect: FlowControlSendEffect) -> Option<ConnectionEv
     }
 }
 
-fn established_driver_error_is_connection_close_observation(
-    error: &ConnectionDriverError,
-) -> bool {
+fn established_driver_error_is_connection_close_observation(error: &ConnectionDriverError) -> bool {
     match error {
         ConnectionDriverError::ControlReceive(error) => {
             profile_control_is_connection_close_observation(error)
@@ -1701,11 +1701,11 @@ fn established_driver_error_is_connection_close_observation(
         ConnectionDriverError::Reliable(ReliableIoError::Connection(_)) => true,
         ConnectionDriverError::Reliable(ReliableIoError::InboundActiveBinding {
             context: ReliableFailureContext::Unresolved,
-            error: ReceiveError::Io(_),
+            error: ReceiveError::Io(IoFailure::ConnectionLost),
         }) => true,
         ConnectionDriverError::Datagram(DatagramIoError::Connection(_)) => true,
         ConnectionDriverError::Datagram(DatagramIoError::Send {
-            error: DatagramSendError::ProfileUnavailable | DatagramSendError::ConnectionLost,
+            error: DatagramSendError::ConnectionLost,
             ..
         }) => true,
         ConnectionDriverError::State(_)
@@ -1724,9 +1724,9 @@ fn profile_control_is_connection_close_observation(error: &ProfileBootstrapError
     matches!(
         error,
         ProfileBootstrapError::Connection(_)
-            | ProfileBootstrapError::Frame(ControlFrameError::Read(
-                ReadExactError::FinishedEarly(_)
-            ))
+            | ProfileBootstrapError::Frame(ControlFrameError::Read(ReadExactError::FinishedEarly(
+                _
+            )))
             | ProfileBootstrapError::Frame(ControlFrameError::Read(ReadExactError::ReadError(
                 ReadError::ConnectionLost(_)
             )))
