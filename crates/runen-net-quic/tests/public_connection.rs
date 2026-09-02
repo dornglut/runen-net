@@ -289,7 +289,7 @@ fn invalid_authority_selection_preserves_local_and_remote_semantic_failure_categ
 }
 
 #[test]
-fn established_connection_failure_retains_source_then_repeats_kind() {
+fn peer_no_error_close_is_one_shot_terminal_and_preserves_teardown() {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         tokio::time::timeout(SCENARIO_TIMEOUT, async {
@@ -307,38 +307,38 @@ fn established_connection_failure_retains_source_then_repeats_kind() {
             .await;
 
             server.close();
-            let first_error = poll_fn(|cx| {
+            let event = poll_fn(|cx| {
                 match client_connection.poll(
                     cx,
                     &mut client_host.negotiation,
                     &mut client_host.delivery,
                 ) {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(Err(error)) => Poll::Ready(error),
-                    Poll::Ready(Ok(event)) => {
-                        panic!("closed peer produced unexpected public event: {event:?}")
+                    Poll::Ready(Ok(event)) => Poll::Ready(event),
+                    Poll::Ready(Err(error)) => {
+                        panic!("peer NO_ERROR close surfaced as failure: {error:?}")
                     }
                 }
             })
             .await;
-
             assert!(matches!(
-                first_error.kind(),
-                ConnectionErrorKind::EstablishedTransport
-                    | ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Transport)
-                    | ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Control)
+                event,
+                ConnectionEvent::PeerNoErrorClosed {
+                    connection: CLIENT_CONNECTION
+                }
             ));
-            assert!(std::error::Error::source(&first_error).is_some());
 
-            let repeated_error = match poll_once(
+            match poll_once(
                 &mut client_connection,
                 &mut client_host.negotiation,
                 &mut client_host.delivery,
             ) {
-                Poll::Ready(Err(error)) => error,
-                other => panic!("terminal connection did not repeat its failure kind: {other:?}"),
-            };
-            assert_eq!(repeated_error.kind(), first_error.kind());
+                Poll::Ready(Err(error)) => assert_eq!(
+                    error.kind(),
+                    ConnectionErrorKind::State(ConnectionStateError::Terminal)
+                ),
+                other => panic!("peer NO_ERROR close did not become terminal: {other:?}"),
+            }
 
             let client_teardown =
                 client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
@@ -351,7 +351,78 @@ fn established_connection_failure_retains_source_then_repeats_kind() {
             join2(client.wait_idle(), server.wait_idle()).await;
         })
         .await
-        .expect("public established connection-failure scenario timed out");
+        .expect("public peer-NO_ERROR close scenario timed out");
+    });
+}
+
+#[test]
+fn established_teardown_orders_no_error_before_control_stream_drop() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, async {
+            let config = resource_limits(2).validate().unwrap();
+            let (client, server) = endpoints(config);
+            let mut client_host = new_host();
+            let mut server_host = new_host();
+
+            for _ in 0..8 {
+                let (mut client_connection, server_connection) = establish_public_connection_pair(
+                    &client,
+                    &server,
+                    config,
+                    &mut client_host,
+                    &mut server_host,
+                )
+                .await;
+
+                let server_teardown = server_connection
+                    .teardown(&mut server_host.negotiation, &mut server_host.delivery);
+                assert_clean_teardown(&server_teardown, SERVER_CONNECTION);
+
+                let event = poll_fn(|cx| {
+                    match client_connection.poll(
+                        cx,
+                        &mut client_host.negotiation,
+                        &mut client_host.delivery,
+                    ) {
+                        Poll::Pending => Poll::Pending,
+                        Poll::Ready(Ok(event)) => Poll::Ready(event),
+                        Poll::Ready(Err(error)) => {
+                            panic!("established teardown raced into public failure: {error:?}")
+                        }
+                    }
+                })
+                .await;
+                assert!(matches!(
+                    event,
+                    ConnectionEvent::PeerNoErrorClosed {
+                        connection: CLIENT_CONNECTION
+                    }
+                ));
+
+                match poll_once(
+                    &mut client_connection,
+                    &mut client_host.negotiation,
+                    &mut client_host.delivery,
+                ) {
+                    Poll::Ready(Err(error)) => assert_eq!(
+                        error.kind(),
+                        ConnectionErrorKind::State(ConnectionStateError::Terminal)
+                    ),
+                    other => panic!("peer NO_ERROR close did not become terminal: {other:?}"),
+                }
+
+                let client_teardown = client_connection
+                    .teardown(&mut client_host.negotiation, &mut client_host.delivery);
+                assert_clean_teardown(&client_teardown, CLIENT_CONNECTION);
+            }
+
+            client.close();
+            server.close();
+            join2(client.wait_idle(), server.wait_idle()).await;
+        })
+        .await
+        .expect("repeated established teardown ordering proof timed out");
     });
 }
 
