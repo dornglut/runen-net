@@ -101,7 +101,10 @@ mod conformance_tests {
     use runen_net::delivery::FlowTermination;
 
     include!("conformance_tests.rs");
-    mod peer_close;
+    mod peer_close {
+        include!("conformance_tests/peer_close.rs");
+        include!("conformance_tests/peer_close_send_effect.rs");
+    }
 }
 #[allow(
     dead_code,
