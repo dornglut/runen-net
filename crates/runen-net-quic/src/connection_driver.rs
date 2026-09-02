@@ -39,6 +39,7 @@ use crate::{
 
 const DRIVER_CATEGORY_COUNT: usize = 8;
 const ESTABLISHED_DATA_CLOSE_REASON: &[u8] = b"established data failed";
+const ESTABLISHED_TEARDOWN_CLOSE_REASON: &[u8] = b"established connection teardown";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum DriverPhase {
@@ -567,6 +568,12 @@ impl EstablishedConnectionDriver {
             phase: _,
             poll_cursor: _,
         } = self;
+        if connection.close_reason().is_none() {
+            connection.close(
+                ApplicationErrorCode::NoError.quinn(),
+                ESTABLISHED_TEARDOWN_CLOSE_REASON,
+            );
+        }
         drop((
             connection,
             flow_control,
