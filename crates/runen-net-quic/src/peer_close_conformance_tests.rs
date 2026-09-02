@@ -227,7 +227,7 @@ fn truncated_control_failure_wins_over_concurrent_peer_no_error() {
             establish_public_pair(resources).await;
         let PublicSide {
             connection: server_connection,
-            mut host: server_host,
+            host: mut server_host,
         } = server;
         let (mut server_driver, reliable_receive) = server_connection
             .into_established_internal()
