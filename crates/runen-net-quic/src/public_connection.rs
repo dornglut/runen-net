@@ -6,7 +6,10 @@ use std::{
     task::{Context, Poll},
 };
 
-use quinn::Connection as QuinnConnection;
+use quinn::{
+    Connection as QuinnConnection, ReadError as QuinnReadError,
+    ReadExactError as QuinnReadExactError, WriteError as QuinnWriteError,
+};
 use runen_net::{
     delivery::{
         DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
@@ -369,6 +372,9 @@ pub enum ConnectionEvent {
     Established {
         connection: ConnectionHandle,
     },
+    PeerNoErrorClosed {
+        connection: ConnectionHandle,
+    },
     IncomingFlowRequested {
         request: IncomingFlowRequest,
     },
@@ -579,6 +585,10 @@ enum ConnectionState {
     Established {
         driver: Box<EstablishedConnectionDriver>,
     },
+    EstablishedPeerNoErrorClosed {
+        driver: Box<EstablishedConnectionDriver>,
+        close_event_pending: bool,
+    },
     EstablishedFailed {
         driver: Box<EstablishedConnectionDriver>,
         kind: ConnectionErrorKind,
@@ -601,6 +611,7 @@ impl fmt::Debug for ConnectionState {
             Self::AuthoritySelection { .. } => "AuthoritySelection",
             Self::NegotiatedEstablished { .. } => "NegotiatedEstablished",
             Self::Established { .. } => "Established",
+            Self::EstablishedPeerNoErrorClosed { .. } => "EstablishedPeerNoErrorClosed",
             Self::EstablishedFailed { .. } => "EstablishedFailed",
             Self::EstablishedActivationFailed { .. } => "EstablishedActivationFailed",
             Self::Failed { .. } => "Failed",
@@ -713,7 +724,8 @@ impl Connection {
     ) -> Result<(), FlowCommandError> {
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerNoErrorClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
@@ -767,7 +779,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerNoErrorClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
@@ -831,7 +844,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerNoErrorClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
@@ -896,7 +910,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerNoErrorClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
@@ -970,7 +985,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerNoErrorClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
@@ -1174,6 +1190,26 @@ impl Connection {
                             }
                         }
                         Poll::Ready(Err(error)) => {
+                            if driver.peer_no_error_close_observed()
+                                && connection_driver_error_is_connection_close_observation(&error)
+                            {
+                                let preceding_event = peer_no_error_preceding_event(error);
+                                if let Some(event) = preceding_event {
+                                    self.state = ConnectionState::EstablishedPeerNoErrorClosed {
+                                        driver,
+                                        close_event_pending: true,
+                                    };
+                                    return Poll::Ready(Ok(event));
+                                }
+                                self.state = ConnectionState::EstablishedPeerNoErrorClosed {
+                                    driver,
+                                    close_event_pending: false,
+                                };
+                                return Poll::Ready(Ok(ConnectionEvent::PeerNoErrorClosed {
+                                    connection: self.connection,
+                                }));
+                            }
+
                             let (event, public_error) = map_established_driver_error(error);
                             let kind = public_error.kind();
                             if let Some(event) = event {
@@ -1192,6 +1228,27 @@ impl Connection {
                             return Poll::Ready(Err(public_error));
                         }
                     }
+                }
+                ConnectionState::EstablishedPeerNoErrorClosed {
+                    driver,
+                    close_event_pending,
+                } => {
+                    if close_event_pending {
+                        self.state = ConnectionState::EstablishedPeerNoErrorClosed {
+                            driver,
+                            close_event_pending: false,
+                        };
+                        return Poll::Ready(Ok(ConnectionEvent::PeerNoErrorClosed {
+                            connection: self.connection,
+                        }));
+                    }
+                    self.state = ConnectionState::EstablishedPeerNoErrorClosed {
+                        driver,
+                        close_event_pending: false,
+                    };
+                    return Poll::Ready(Err(ConnectionError::state(
+                        ConnectionStateError::Terminal,
+                    )));
                 }
                 ConnectionState::EstablishedFailed {
                     driver,
@@ -1315,6 +1372,7 @@ impl Connection {
                 established.teardown(manager, delivery).into()
             }
             ConnectionState::Established { driver }
+            | ConnectionState::EstablishedPeerNoErrorClosed { driver, .. }
             | ConnectionState::EstablishedFailed { driver, .. } => {
                 (*driver).teardown(manager, delivery).into()
             }
@@ -1628,6 +1686,53 @@ fn map_control_send_effect(effect: FlowControlSendEffect) -> Option<ConnectionEv
         | FlowControlSendEffect::InboundRejected { .. }
         | FlowControlSendEffect::InboundAccepted(_) => None,
     }
+}
+
+fn peer_no_error_preceding_event(error: ConnectionDriverError) -> Option<ConnectionEvent> {
+    match error {
+        ConnectionDriverError::ControlSend(error) => map_control_send_effect(error.effect),
+        _ => None,
+    }
+}
+
+fn connection_driver_error_is_connection_close_observation(error: &ConnectionDriverError) -> bool {
+    match error {
+        ConnectionDriverError::ControlReceive(error) => {
+            profile_control_error_is_connection_close_observation(error)
+        }
+        ConnectionDriverError::ControlSend(error) => {
+            profile_control_error_is_connection_close_observation(&error.error)
+        }
+        ConnectionDriverError::Reliable(ReliableIoError::Connection(_))
+        | ConnectionDriverError::Datagram(DatagramIoError::Connection(_))
+        | ConnectionDriverError::Datagram(DatagramIoError::Send {
+            error: DatagramSendError::ProfileUnavailable | DatagramSendError::ConnectionLost,
+            ..
+        })
+        | ConnectionDriverError::DatagramProfileUnavailable => true,
+        ConnectionDriverError::State(_)
+        | ConnectionDriverError::OutboundOpen(_)
+        | ConnectionDriverError::InboundAdmission(_)
+        | ConnectionDriverError::DatagramSubmission(_)
+        | ConnectionDriverError::ReceivedFlowControl(_)
+        | ConnectionDriverError::Reliable(_)
+        | ConnectionDriverError::Datagram(_)
+        | ConnectionDriverError::FailurePreparation(_) => false,
+    }
+}
+
+fn profile_control_error_is_connection_close_observation(error: &ProfileBootstrapError) -> bool {
+    matches!(
+        error,
+        ProfileBootstrapError::Connection(_)
+            | ProfileBootstrapError::Frame(ControlFrameError::Read(
+                QuinnReadExactError::FinishedEarly(_)
+                    | QuinnReadExactError::ReadError(QuinnReadError::ConnectionLost(_))
+            ))
+            | ProfileBootstrapError::Frame(ControlFrameError::Write(
+                QuinnWriteError::ConnectionLost(_)
+            ))
+    )
 }
 
 const fn flow_terminated_event(
