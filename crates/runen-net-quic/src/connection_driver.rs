@@ -259,6 +259,14 @@ impl EstablishedConnectionDriver {
         self.connection.send_datagram(datagram.into())
     }
 
+    pub(super) fn peer_no_error_close_observed(&self) -> bool {
+        matches!(
+            self.connection.close_reason(),
+            Some(quinn::ConnectionError::ApplicationClosed(close))
+                if close.error_code == ApplicationErrorCode::NoError.quinn()
+        )
+    }
+
     pub(super) fn poll_step(
         &mut self,
         cx: &mut Context<'_>,
