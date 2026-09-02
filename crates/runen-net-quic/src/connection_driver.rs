@@ -11,8 +11,7 @@ use runen_net::{
 
 use crate::{
     control::{
-        ControlFrame, ControlFrameError, ControlFrameType, ControlReceiver, ControlSender,
-        ProfileBootstrapError,
+        ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
     },
     datagram::{DatagramReceiveOutcome, DatagramSubmissionError, DatagramSubmissionOutcome},
     datagram_driver::{DatagramConnectionIo, DatagramIoError, DatagramOutboundProgress},
@@ -644,7 +643,6 @@ impl EstablishedConnectionDriver {
         let flow_driver::ControlReceiveCompletion { receiver, result } = completion;
         match result {
             Err(error) => {
-                let error = self.normalize_peer_no_error_control_end(error);
                 close_for_post_profile_control_error(&self.connection, &error);
                 self.receiver = ControlReceiveState::Terminal;
                 self.enter_terminal(None);
@@ -662,30 +660,6 @@ impl EstablishedConnectionDriver {
                     self.process_received_frame(receiver, frame, endpoint)
                 }
             }
-        }
-    }
-
-    fn normalize_peer_no_error_control_end(
-        &self,
-        error: ProfileBootstrapError,
-    ) -> ProfileBootstrapError {
-        if !matches!(
-            &error,
-            ProfileBootstrapError::Frame(ControlFrameError::EndOfStream)
-        ) {
-            return error;
-        }
-        let Some(close_reason) = self.connection.close_reason() else {
-            return error;
-        };
-        if matches!(
-            &close_reason,
-            quinn::ConnectionError::ApplicationClosed(close)
-                if close.error_code == ApplicationErrorCode::NoError.quinn()
-        ) {
-            ProfileBootstrapError::Connection(close_reason)
-        } else {
-            error
         }
     }
 
