@@ -8,12 +8,9 @@ use std::{
     time::Duration,
 };
 
-use quinn::{
-    ConnectionError as QuinnConnectionError, VarInt,
-    rustls::{
-        RootCertStore,
-        pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
-    },
+use quinn::rustls::{
+    RootCertStore,
+    pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer},
 };
 use rcgen::{CertifiedKey, generate_simple_self_signed};
 use runen_net::{
@@ -31,7 +28,6 @@ use runen_net::{
 use tokio::runtime::Builder;
 
 use crate::{
-    connection_driver::EstablishedConnectionDriver,
     control::{LocalControlLimits, SemanticRole, ValidatedControlProfile},
     endpoint::{
         ConfiguredEndpoint, EndpointResourceLimits, ValidatedEndpointResources,
@@ -303,53 +299,82 @@ async fn establish_public_pair(
         .expect("server failed ProfileReady")
         .expect("server endpoint closed before ProfileReady");
 
-    let mut client = PublicSide {
-        connection: activate_public(client_ready, new_host()),
-        host: new_host_placeholder(),
-    };
-    let mut server = PublicSide {
-        connection: activate_public(server_ready, new_host()),
-        host: new_host_placeholder(),
-    };
-
-    // `activate_public` must consume and mutate the same HostState retained beside the connection.
-    // Rebuild explicitly rather than maintaining a second manager/delivery authority.
     let mut client_host = new_host();
     let mut server_host = new_host();
-    client.connection = activate_public_with_host(
-        reconnect_admitted_placeholder(),
-        &mut client_host,
-    );
-    server.connection = activate_public_with_host(
-        reconnect_admitted_placeholder(),
-        &mut server_host,
-    );
-    client.host = client_host;
-    server.host = server_host;
+    let client_connection = activate_public_with_host(client_ready, &mut client_host);
+    let server_connection = activate_public_with_host(server_ready, &mut server_host);
+    let mut client = PublicSide {
+        connection: client_connection,
+        host: client_host,
+    };
+    let mut server = PublicSide {
+        connection: server_connection,
+        host: server_host,
+    };
 
-    unreachable!("placeholder implementation replaced before compilation")
-}
+    let mut client_established = false;
+    let mut server_established = false;
+    let mut authority_selected = false;
+    poll_fn(|cx| {
+        if !client_established {
+            match client.connection.poll(
+                cx,
+                &mut client.host.negotiation,
+                &mut client.host.delivery,
+            ) {
+                Poll::Pending => {}
+                Poll::Ready(Ok(ConnectionEvent::AuthoritySelectionRequired { connection })) => {
+                    assert_eq!(connection, CONNECTION);
+                    assert!(!authority_selected);
+                    client
+                        .connection
+                        .select_authority(&mut client.host.negotiation, contract())
+                        .expect("valid authority selection failed");
+                    authority_selected = true;
+                    cx.waker().wake_by_ref();
+                }
+                Poll::Ready(Ok(ConnectionEvent::Established { connection })) => {
+                    assert_eq!(connection, CONNECTION);
+                    client_established = true;
+                }
+                Poll::Ready(Ok(other)) => {
+                    panic!("unexpected client event during negotiation: {other:?}")
+                }
+                Poll::Ready(Err(error)) => panic!("client negotiation failed: {error:?}"),
+            }
+        }
 
-fn activate_public(
-    admitted: AdmittedProfileReadyConnection,
-    mut host: HostState,
-) -> PublicConnection {
-    ProfileReadyConnection::from_profile(admitted, reliable_receive_limits())
-        .activate(
-            CONNECTION,
-            offer(),
-            NegotiationRequirements::default(),
-            &mut host.negotiation,
-        )
-        .expect("valid public activation failed")
-}
+        if !server_established {
+            match server.connection.poll(
+                cx,
+                &mut server.host.negotiation,
+                &mut server.host.delivery,
+            ) {
+                Poll::Pending => {}
+                Poll::Ready(Ok(ConnectionEvent::Established { connection })) => {
+                    assert_eq!(connection, CONNECTION);
+                    server_established = true;
+                }
+                Poll::Ready(Ok(ConnectionEvent::AuthoritySelectionRequired { .. })) => {
+                    panic!("NonAuthority server requested authority selection")
+                }
+                Poll::Ready(Ok(other)) => {
+                    panic!("unexpected server event during negotiation: {other:?}")
+                }
+                Poll::Ready(Err(error)) => panic!("server negotiation failed: {error:?}"),
+            }
+        }
 
-fn new_host_placeholder() -> HostState {
-    new_host()
-}
+        if client_established && server_established {
+            assert!(authority_selected);
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
 
-fn reconnect_admitted_placeholder() -> AdmittedProfileReadyConnection {
-    panic!("placeholder")
+    (client_endpoint, server_endpoint, client, server)
 }
 
 fn activate_public_with_host(
