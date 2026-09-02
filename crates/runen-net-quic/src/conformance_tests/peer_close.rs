@@ -178,7 +178,7 @@ fn nonzero_runennet_application_close_stays_on_failure_path() {
                 establish_public_pair_with_resources(resources()).await;
             let PublicSide {
                 connection: server_connection,
-                mut host: server_host,
+                host: mut server_host,
             } = server_side;
             let (server_driver, _receive_limits) = server_connection
                 .into_established_internal()
