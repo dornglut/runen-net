@@ -296,11 +296,31 @@ impl EstablishedConnectionDriver {
             )));
         }
 
+        // A peer NO_ERROR close wakes every transport direction at once. Give the sole control
+        // receiver one final arbitration poll before round-robin data categories can terminalize
+        // the driver. A clean connection-shaped control EOF is still normalized by the public
+        // facade, while an already-consumed malformed or partial frame retains its control error.
+        let peer_no_error_close = self.peer_no_error_close_observed();
+        if peer_no_error_close {
+            match self.poll_control_receive(cx, endpoint) {
+                DriverStep::None => {}
+                DriverStep::Progress(progress) => {
+                    self.poll_cursor = next_poll_cursor(1);
+                    return Poll::Ready(Ok(progress));
+                }
+                DriverStep::Error(error) => {
+                    self.poll_cursor = next_poll_cursor(1);
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+
         let start = self.poll_cursor % DRIVER_CATEGORY_COUNT;
         for offset in 0..DRIVER_CATEGORY_COUNT {
             let index = (start + offset) % DRIVER_CATEGORY_COUNT;
             let step = match index {
                 0 => self.poll_control_send(cx),
+                1 if peer_no_error_close => DriverStep::None,
                 1 => self.poll_control_receive(cx, endpoint),
                 2 if self.data_poll_allowed() => {
                     self.poll_reliable_outbound_acquisition(cx, endpoint)
