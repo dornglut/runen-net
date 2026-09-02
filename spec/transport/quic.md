@@ -502,7 +502,7 @@ Wire revision 1 reserves these QUIC application error codes for RunenNet profile
 | 5 | `FLOW_PROTOCOL_ERROR` |
 | 6 | `RELIABLE_DELIVERY_FAILED` |
 
-`NO_ERROR` means that the sending endpoint intentionally terminates the established RunenNet profile connection without reporting a RunenNet profile or transport failure. It is connection-level termination intent only. It is not evidence that a higher application protocol completed successfully, that any particular accepted message was exposed, or that every delivery flow terminated normally.
+`NO_ERROR` means that the sending endpoint closes the established RunenNet profile connection without reporting a RunenNet profile failure through the application close code. It is connection-level close information only. It is not evidence that a higher application protocol completed successfully, that any particular accepted message was exposed, or that every delivery flow terminated normally.
 
 Receiving `NO_ERROR` still terminates the control stream, negotiated connection contract, and any residual delivery flows under their existing semantic owners. `NO_ERROR` MUST NOT convert residual flow termination into `Normal`, suppress reliable-delivery-failure evidence, or otherwise weaken the delivery obligations owned by the Core delivery specification.
 
