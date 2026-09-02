@@ -102,6 +102,7 @@ mod conformance_tests {
 
     include!("conformance_tests.rs");
     mod peer_close;
+    mod peer_close_precedence;
 }
 #[allow(
     dead_code,
