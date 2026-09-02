@@ -97,7 +97,15 @@ pub use public_flow::{
 };
 
 #[cfg(test)]
-mod conformance_tests;
+mod conformance_tests {
+    use runen_net::delivery::FlowTermination;
+
+    include!("conformance_tests.rs");
+    mod peer_close {
+        include!("conformance_tests/peer_close.rs");
+        include!("conformance_tests/peer_close_send_effect.rs");
+    }
+}
 #[allow(
     dead_code,
     reason = "RN5E5A5L lands the crate-private established connection orchestrator before RN5E5 loopback conformance"

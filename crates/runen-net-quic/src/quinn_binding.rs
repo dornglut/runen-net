@@ -4,7 +4,7 @@ use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use quinn::{RecvStream, SendStream, VarInt};
+use quinn::{RecvStream, SendStream, StoppedError, VarInt, WriteError};
 use runen_net::delivery::{
     DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
     FlowTermination, FlowTerminationReason, ReceiveOutcome,
@@ -209,6 +209,7 @@ const fn opposite_side(side: WireSide) -> WireSide {
 pub(super) enum IoFailure {
     Read,
     Write,
+    ConnectionLost,
 }
 
 type FinishAckFuture =
@@ -231,9 +232,14 @@ impl PollWriteReliable for SendStream {
         cx: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<Result<usize, IoFailure>> {
-        Pin::new(self)
-            .poll_write(cx, bytes)
-            .map(|result| result.map_err(|_| IoFailure::Write))
+        Pin::new(self).poll_write(cx, bytes).map(|result| {
+            result.map_err(|error| match error {
+                WriteError::ConnectionLost(_) => IoFailure::ConnectionLost,
+                WriteError::Stopped(_) | WriteError::ClosedStream | WriteError::ZeroRttRejected => {
+                    IoFailure::Write
+                }
+            })
+        })
     }
 
     fn reset_reliable(&mut self, code: VarInt) {
@@ -246,7 +252,12 @@ impl PollWriteReliable for SendStream {
 
     fn finish_ack_future(&self) -> FinishAckFuture {
         let future = self.stopped();
-        Box::pin(async move { future.await.map_err(|_| IoFailure::Write) })
+        Box::pin(async move {
+            future.await.map_err(|error| match error {
+                StoppedError::ConnectionLost(_) => IoFailure::ConnectionLost,
+                StoppedError::ZeroRttRejected => IoFailure::Write,
+            })
+        })
     }
 }
 
@@ -270,8 +281,12 @@ impl PollReadReliable for RecvStream {
         cx: &mut Context<'_>,
         bytes: &mut [u8],
     ) -> Poll<Result<usize, IoFailure>> {
-        self.poll_read(cx, bytes)
-            .map(|result| result.map_err(|_| IoFailure::Read))
+        self.poll_read(cx, bytes).map(|result| {
+            result.map_err(|error| match error {
+                quinn::ReadError::ConnectionLost(_) => IoFailure::ConnectionLost,
+                _ => IoFailure::Read,
+            })
+        })
     }
 
     fn stop_reliable(&mut self, code: VarInt) {
@@ -561,6 +576,10 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
                     self.terminal = true;
                     Poll::Ready(Ok(SendProgress::Closed { termination }))
                 }
+                Poll::Ready(Err(IoFailure::ConnectionLost)) => {
+                    self.terminal = true;
+                    Poll::Ready(Err(SendError::Io(IoFailure::ConnectionLost)))
+                }
                 Poll::Ready(Ok(Some(_))) | Poll::Ready(Err(_)) => self.fail(
                     endpoint,
                     registry,
@@ -583,6 +602,10 @@ impl<W: PollWriteReliable> OutboundReliable<W> {
         };
         match self.writer.poll_write_step(cx, segment) {
             Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(IoFailure::ConnectionLost)) => {
+                self.terminal = true;
+                Poll::Ready(Err(SendError::Io(IoFailure::ConnectionLost)))
+            }
             Poll::Ready(Err(error)) => self.fail(
                 endpoint,
                 registry,
@@ -896,6 +919,10 @@ impl<R: PollReadReliable> InboundReliable<R> {
         }
         let read = match self.reader.poll_read_step(cx, &mut self.scratch) {
             Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(IoFailure::ConnectionLost)) => {
+                self.terminal = true;
+                return Poll::Ready(Err(ReceiveError::Io(IoFailure::ConnectionLost)));
+            }
             Poll::Ready(Err(error)) => {
                 return self.fail(
                     endpoint,
@@ -1130,6 +1157,7 @@ mod tests {
         Pending,
         Write(usize),
         Error,
+        ConnectionLost,
     }
 
     #[derive(Debug, Copy, Clone)]
@@ -1138,6 +1166,7 @@ mod tests {
         PendingThenAck,
         Stopped,
         Error,
+        ConnectionLost,
     }
 
     #[derive(Debug)]
@@ -1162,6 +1191,7 @@ mod tests {
                     ApplicationErrorCode::ReliableDeliveryFailed.quinn(),
                 ))),
                 FinishAckAction::Error => Poll::Ready(Err(IoFailure::Write)),
+                FinishAckAction::ConnectionLost => Poll::Ready(Err(IoFailure::ConnectionLost)),
             }
         }
     }
@@ -1205,6 +1235,7 @@ mod tests {
             {
                 WriteAction::Pending => Poll::Pending,
                 WriteAction::Error => Poll::Ready(Err(IoFailure::Write)),
+                WriteAction::ConnectionLost => Poll::Ready(Err(IoFailure::ConnectionLost)),
                 WriteAction::Write(limit) => {
                     let written = limit.min(bytes.len());
                     self.bytes.extend_from_slice(&bytes[..written]);
@@ -1236,6 +1267,7 @@ mod tests {
         Data(Vec<u8>),
         Fin,
         Error,
+        ConnectionLost,
     }
 
     #[derive(Debug)]
@@ -1269,6 +1301,7 @@ mod tests {
                 ReadAction::Pending => Poll::Pending,
                 ReadAction::Fin => Poll::Ready(Ok(0)),
                 ReadAction::Error => Poll::Ready(Err(IoFailure::Read)),
+                ReadAction::ConnectionLost => Poll::Ready(Err(IoFailure::ConnectionLost)),
                 ReadAction::Data(data) => {
                     assert!(data.len() <= bytes.len());
                     bytes[..data.len()].copy_from_slice(&data);
@@ -1595,6 +1628,33 @@ mod tests {
     }
 
     #[test]
+    fn outbound_connection_loss_preserves_core_for_connection_teardown() {
+        let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 35);
+        endpoint.submit(key, b"abc".to_vec()).unwrap();
+        let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
+        registry
+            .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
+            .unwrap();
+        let mut binding = OutboundReliable::bind(
+            &mut registry,
+            flow_id,
+            MockWriter::new([WriteAction::ConnectionLost]),
+        )
+        .unwrap();
+        let mut cx = context();
+        assert_eq!(
+            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
+            Poll::Ready(Err(SendError::Io(IoFailure::ConnectionLost)))
+        );
+        assert!(binding.take_failure_termination().is_none());
+        assert!(endpoint.flow_contract(key).is_some());
+        assert_eq!(endpoint.pending_messages(), 1);
+        assert_eq!(registry.active_len(), 1);
+        assert!(binding.writer.resets.is_empty());
+    }
+
+    #[test]
     fn outbound_accepted_index_exhaustion_is_terminal_and_non_wrapping() {
         let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 29);
         endpoint.submit(key, b"x".to_vec()).unwrap();
@@ -1690,6 +1750,36 @@ mod tests {
             assert_eq!(registry.active_len(), 0);
             assert_eq!(binding.writer.resets, vec![6]);
         }
+    }
+
+    #[test]
+    fn outbound_connection_loss_after_fin_preserves_core_for_connection_teardown() {
+        let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Outbound, 36);
+        let flow_id = FlowId::new(WireSide::Client, 0).unwrap();
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
+        registry
+            .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
+            .unwrap();
+        let writer = MockWriter::new([]).with_finish_ack(FinishAckAction::ConnectionLost);
+        let mut binding = OutboundReliable::bind(&mut registry, flow_id, writer).unwrap();
+        let mut cx = context();
+        assert!(matches!(
+            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
+            Poll::Ready(Ok(SendProgress::Progressed { .. }))
+        ));
+        assert_eq!(
+            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
+            Poll::Ready(Ok(SendProgress::Idle))
+        );
+        binding.request_finish_normal(&endpoint).unwrap();
+        assert_eq!(
+            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
+            Poll::Ready(Err(SendError::Io(IoFailure::ConnectionLost)))
+        );
+        assert!(binding.take_failure_termination().is_none());
+        assert!(endpoint.flow_contract(key).is_some());
+        assert_eq!(registry.active_len(), 1);
+        assert!(binding.writer.resets.is_empty());
     }
 
     #[test]
@@ -1944,6 +2034,34 @@ mod tests {
         );
         assert_eq!(endpoint.flow_contract(key), None);
         assert_eq!(binding.reader.stops, vec![6]);
+    }
+
+    #[test]
+    fn inbound_connection_loss_preserves_core_for_connection_teardown() {
+        let (mut endpoint, key) = endpoint_with_flow(FlowDirection::Inbound, 8);
+        let flow_id = FlowId::new(WireSide::Server, 0).unwrap();
+        let mut registry = AcceptedFlowRegistry::new(WireSide::Client, nz(4));
+        registry
+            .register_consumed_accepted_flow(&endpoint, flow_id, key, nz(64))
+            .unwrap();
+        let reader = MockReader::new(
+            false,
+            [ReadAction::Data(vec![1]), ReadAction::ConnectionLost],
+        );
+        let mut binding = InboundReliable::new(reader, nz(8), nz(64)).unwrap();
+        let mut cx = context();
+        assert_eq!(
+            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
+            Poll::Ready(Ok(ReceiveProgress::Associated { flow_id }))
+        );
+        assert_eq!(
+            binding.poll_step(&mut cx, &mut endpoint, &mut registry),
+            Poll::Ready(Err(ReceiveError::Io(IoFailure::ConnectionLost)))
+        );
+        assert!(binding.take_failure_termination().is_none());
+        assert!(endpoint.flow_contract(key).is_some());
+        assert_eq!(registry.active_len(), 1);
+        assert!(binding.reader.stops.is_empty());
     }
 
     #[test]

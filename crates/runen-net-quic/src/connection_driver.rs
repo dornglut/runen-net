@@ -28,6 +28,7 @@ use crate::{
         ConnectionTeardown, EstablishedIoParts, EstablishedTeardown,
         close_for_post_profile_control_error, close_for_received_flow_control_error,
     },
+    quinn_binding::{IoFailure, ReceiveError, SendError},
     reliable_driver::{
         ActiveReliableProgress, OutboundAcquisitionProgress, ReliableConnectionIo,
         ReliableEstablishedIoParts, ReliableIoError, ReliableIoStateError,
@@ -37,6 +38,7 @@ use crate::{
 
 const DRIVER_CATEGORY_COUNT: usize = 8;
 const ESTABLISHED_DATA_CLOSE_REASON: &[u8] = b"established data failed";
+const ESTABLISHED_TEARDOWN_CLOSE_REASON: &[u8] = b"established connection teardown";
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum DriverPhase {
@@ -259,6 +261,30 @@ impl EstablishedConnectionDriver {
         self.connection.send_datagram(datagram.into())
     }
 
+    #[cfg(test)]
+    pub(super) async fn send_raw_control_bytes_for_test(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), crate::control::ControlFrameError> {
+        let ControlSendState::Ready(sender) = &mut self.sender else {
+            panic!("test control injection requires the established sender to be ready");
+        };
+        sender.send_raw_bytes_for_test(bytes).await
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_for_test(&self, code: ApplicationErrorCode) {
+        self.connection.close(code.quinn(), b"test close");
+    }
+
+    pub(super) fn peer_no_error_close_observed(&self) -> bool {
+        matches!(
+            self.connection.close_reason(),
+            Some(quinn::ConnectionError::ApplicationClosed(close))
+                if close.error_code == ApplicationErrorCode::NoError.quinn()
+        )
+    }
+
     pub(super) fn poll_step(
         &mut self,
         cx: &mut Context<'_>,
@@ -270,11 +296,31 @@ impl EstablishedConnectionDriver {
             )));
         }
 
+        // A peer NO_ERROR close wakes every transport direction at once. Give the sole control
+        // receiver one final arbitration poll before round-robin data categories can terminalize
+        // the driver. A clean connection-shaped control EOF is still normalized by the public
+        // facade, while an already-consumed malformed or partial frame retains its control error.
+        let peer_no_error_close = self.peer_no_error_close_observed();
+        if peer_no_error_close {
+            match self.poll_control_receive(cx, endpoint) {
+                DriverStep::None => {}
+                DriverStep::Progress(progress) => {
+                    self.poll_cursor = next_poll_cursor(1);
+                    return Poll::Ready(Ok(progress));
+                }
+                DriverStep::Error(error) => {
+                    self.poll_cursor = next_poll_cursor(1);
+                    return Poll::Ready(Err(error));
+                }
+            }
+        }
+
         let start = self.poll_cursor % DRIVER_CATEGORY_COUNT;
         for offset in 0..DRIVER_CATEGORY_COUNT {
             let index = (start + offset) % DRIVER_CATEGORY_COUNT;
             let step = match index {
                 0 => self.poll_control_send(cx),
+                1 if peer_no_error_close => DriverStep::None,
                 1 => self.poll_control_receive(cx, endpoint),
                 2 if self.data_poll_allowed() => {
                     self.poll_reliable_outbound_acquisition(cx, endpoint)
@@ -557,6 +603,12 @@ impl EstablishedConnectionDriver {
             phase: _,
             poll_cursor: _,
         } = self;
+        if connection.close_reason().is_none() {
+            connection.close(
+                ApplicationErrorCode::NoError.quinn(),
+                ESTABLISHED_TEARDOWN_CLOSE_REASON,
+            );
+        }
         drop((
             connection,
             flow_control,
@@ -848,6 +900,10 @@ impl EstablishedConnectionDriver {
                 DriverStep::Progress(EstablishedConnectionProgress::Reliable(progress))
             }
             Poll::Ready(Err(error)) => {
+                if reliable_active_error_is_connection_loss(&error) {
+                    self.enter_terminal(None);
+                    return DriverStep::Error(ConnectionDriverError::Reliable(error));
+                }
                 let disposition = match &error {
                     ReliableIoError::OutboundActiveBinding {
                         context,
@@ -886,6 +942,10 @@ impl EstablishedConnectionDriver {
                 DriverStep::Progress(EstablishedConnectionProgress::Reliable(progress))
             }
             Poll::Ready(Err(error)) => {
+                if reliable_active_error_is_connection_loss(&error) {
+                    self.enter_terminal(None);
+                    return DriverStep::Error(ConnectionDriverError::Reliable(error));
+                }
                 let disposition = match &error {
                     ReliableIoError::InboundActiveBinding {
                         context,
@@ -1079,6 +1139,19 @@ impl EstablishedConnectionDriver {
     }
 }
 
+fn reliable_active_error_is_connection_loss(error: &ReliableIoError) -> bool {
+    matches!(
+        error,
+        ReliableIoError::OutboundActiveBinding {
+            error: SendError::Io(IoFailure::ConnectionLost),
+            ..
+        } | ReliableIoError::InboundActiveBinding {
+            error: ReceiveError::Io(IoFailure::ConnectionLost),
+            ..
+        }
+    )
+}
+
 const fn control_operation_error(
     phase: DriverPhase,
     sender: ControlSendPhase,
@@ -1148,7 +1221,7 @@ mod tests {
     use runen_net::delivery::{DeliveryOperationError, FlowDirection};
 
     use super::*;
-    use crate::wire::WireSide;
+    use crate::{reliable_driver::ReliableFailureContext, wire::WireSide};
 
     fn assert_static<T: 'static>() {}
 
@@ -1161,6 +1234,36 @@ mod tests {
         assert_static::<EstablishedConnectionDriver>();
         assert_static::<ControlSendState>();
         assert_static::<ControlReceiveState>();
+    }
+
+    #[test]
+    fn reliable_connection_loss_is_connection_terminal_before_flow_failure_routing() {
+        let flow_id = flow(1);
+        assert!(reliable_active_error_is_connection_loss(
+            &ReliableIoError::OutboundActiveBinding {
+                context: ReliableFailureContext::Unresolved,
+                error: SendError::Io(IoFailure::ConnectionLost),
+            }
+        ));
+        assert!(reliable_active_error_is_connection_loss(
+            &ReliableIoError::InboundActiveBinding {
+                context: ReliableFailureContext::Unresolved,
+                error: ReceiveError::Io(IoFailure::ConnectionLost),
+            }
+        ));
+        assert!(!reliable_active_error_is_connection_loss(
+            &ReliableIoError::OutboundActiveBinding {
+                context: ReliableFailureContext::ResolvedDetached {
+                    flow_id,
+                    key: DeliveryFlowKey::new(
+                        runen_net::identity::ConnectionHandle::new(1),
+                        FlowDirection::Outbound,
+                        runen_net::delivery::DeliveryFlowHandle::new(1),
+                    ),
+                },
+                error: SendError::Io(IoFailure::Write),
+            }
+        ));
     }
 
     #[test]

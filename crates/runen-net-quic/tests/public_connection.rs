@@ -26,9 +26,8 @@ use runen_net_quic::{
     ConnectionError, ConnectionErrorKind, ConnectionEvent, ConnectionStateError, EndpointConfig,
     EndpointResourceLimits, FlowCommandError, FlowRejectionReason, FlowTerminationCause,
     FlowTerminationOrigin, InboundFlowConfig, NegotiationFailure, NegotiationReportStatus,
-    OutboundFlowConfig, PrivateKeyDer, ProfileBootstrapFailure, ProfileConfig, ProfileLimits,
-    ProfileReadyConnection, ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity,
-    SubmitOutcome,
+    OutboundFlowConfig, PrivateKeyDer, ProfileConfig, ProfileLimits, ProfileReadyConnection,
+    ReliableReceiveLimits, SemanticRole, ServerEndpoint, ServerIdentity, SubmitOutcome,
 };
 use rustls_pki_types::PrivatePkcs8KeyDer;
 use tokio::runtime::Builder;
@@ -289,7 +288,7 @@ fn invalid_authority_selection_preserves_local_and_remote_semantic_failure_categ
 }
 
 #[test]
-fn established_connection_failure_retains_source_then_repeats_kind() {
+fn peer_no_error_close_is_one_terminal_lifecycle_event() {
     let runtime = Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         tokio::time::timeout(SCENARIO_TIMEOUT, async {
@@ -307,38 +306,39 @@ fn established_connection_failure_retains_source_then_repeats_kind() {
             .await;
 
             server.close();
-            let first_error = poll_fn(|cx| {
+            let closed_connection = poll_fn(|cx| {
                 match client_connection.poll(
                     cx,
                     &mut client_host.negotiation,
                     &mut client_host.delivery,
                 ) {
                     Poll::Pending => Poll::Pending,
-                    Poll::Ready(Err(error)) => Poll::Ready(error),
+                    Poll::Ready(Ok(ConnectionEvent::PeerClosed { connection })) => {
+                        Poll::Ready(connection)
+                    }
                     Poll::Ready(Ok(event)) => {
-                        panic!("closed peer produced unexpected public event: {event:?}")
+                        panic!("peer NO_ERROR close produced unexpected event: {event:?}")
+                    }
+                    Poll::Ready(Err(error)) => {
+                        panic!("peer NO_ERROR close was exposed as failure: {error:?}")
                     }
                 }
             })
             .await;
+            assert_eq!(closed_connection, CLIENT_CONNECTION);
 
-            assert!(matches!(
-                first_error.kind(),
-                ConnectionErrorKind::EstablishedTransport
-                    | ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Transport)
-                    | ConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Control)
-            ));
-            assert!(std::error::Error::source(&first_error).is_some());
-
-            let repeated_error = match poll_once(
+            let terminal_error = match poll_once(
                 &mut client_connection,
                 &mut client_host.negotiation,
                 &mut client_host.delivery,
             ) {
                 Poll::Ready(Err(error)) => error,
-                other => panic!("terminal connection did not repeat its failure kind: {other:?}"),
+                other => panic!("peer-closed connection did not become terminal: {other:?}"),
             };
-            assert_eq!(repeated_error.kind(), first_error.kind());
+            assert_eq!(
+                terminal_error.kind(),
+                ConnectionErrorKind::State(ConnectionStateError::Terminal)
+            );
 
             let client_teardown =
                 client_connection.teardown(&mut client_host.negotiation, &mut client_host.delivery);
@@ -351,7 +351,7 @@ fn established_connection_failure_retains_source_then_repeats_kind() {
             join2(client.wait_idle(), server.wait_idle()).await;
         })
         .await
-        .expect("public established connection-failure scenario timed out");
+        .expect("public peer NO_ERROR close scenario timed out");
     });
 }
 

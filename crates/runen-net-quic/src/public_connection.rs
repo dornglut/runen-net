@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use quinn::Connection as QuinnConnection;
+use quinn::{Connection as QuinnConnection, ReadError, ReadExactError, WriteError};
 use runen_net::{
     delivery::{
         DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, DeliveryOperationError, FlowDirection,
@@ -54,7 +54,9 @@ use crate::{
         InboundFlowConfig, IncomingFlowDecisionError, IncomingFlowRequest, OutboundFlowConfig,
         SubmissionError, SubmitOutcome,
     },
-    quinn_binding::{ReceiveError, ReceiveProgress, RegistryError, SendError, SendProgress},
+    quinn_binding::{
+        IoFailure, ReceiveError, ReceiveProgress, RegistryError, SendError, SendProgress,
+    },
     reliable_driver::{ActiveReliableProgress, ReliableIoError, ReliableIoStateError},
     wire::WireSide,
 };
@@ -369,6 +371,13 @@ pub enum ConnectionEvent {
     Established {
         connection: ConnectionHandle,
     },
+    /// The established peer closed the `runennet/1` QUIC connection with `NO_ERROR`.
+    ///
+    /// This is connection-lifecycle information only. It does not imply application-protocol
+    /// success, complete message exposure, or normal delivery-flow termination.
+    PeerClosed {
+        connection: ConnectionHandle,
+    },
     IncomingFlowRequested {
         request: IncomingFlowRequest,
     },
@@ -579,6 +588,10 @@ enum ConnectionState {
     Established {
         driver: Box<EstablishedConnectionDriver>,
     },
+    EstablishedPeerClosed {
+        driver: Box<EstablishedConnectionDriver>,
+        close_pending: bool,
+    },
     EstablishedFailed {
         driver: Box<EstablishedConnectionDriver>,
         kind: ConnectionErrorKind,
@@ -601,6 +614,7 @@ impl fmt::Debug for ConnectionState {
             Self::AuthoritySelection { .. } => "AuthoritySelection",
             Self::NegotiatedEstablished { .. } => "NegotiatedEstablished",
             Self::Established { .. } => "Established",
+            Self::EstablishedPeerClosed { .. } => "EstablishedPeerClosed",
             Self::EstablishedFailed { .. } => "EstablishedFailed",
             Self::EstablishedActivationFailed { .. } => "EstablishedActivationFailed",
             Self::Failed { .. } => "Failed",
@@ -713,7 +727,8 @@ impl Connection {
     ) -> Result<(), FlowCommandError> {
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
@@ -767,7 +782,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
@@ -831,7 +847,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
@@ -896,7 +913,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => {
@@ -970,7 +988,8 @@ impl Connection {
 
         let driver = match &mut self.state {
             ConnectionState::Established { driver } => driver,
-            ConnectionState::EstablishedFailed { .. }
+            ConnectionState::EstablishedPeerClosed { .. }
+            | ConnectionState::EstablishedFailed { .. }
             | ConnectionState::EstablishedActivationFailed { .. }
             | ConnectionState::Failed { .. }
             | ConnectionState::Transitioning => return Err(FlowCommandError::Terminal),
@@ -1174,6 +1193,23 @@ impl Connection {
                             }
                         }
                         Poll::Ready(Err(error)) => {
+                            if driver.peer_no_error_close_observed()
+                                && established_driver_error_is_connection_close_observation(&error)
+                            {
+                                let preceding_event = peer_close_preceding_event(error);
+                                let close_pending = preceding_event.is_some();
+                                self.state = ConnectionState::EstablishedPeerClosed {
+                                    driver,
+                                    close_pending,
+                                };
+                                if let Some(event) = preceding_event {
+                                    return Poll::Ready(Ok(event));
+                                }
+                                return Poll::Ready(Ok(ConnectionEvent::PeerClosed {
+                                    connection: self.connection,
+                                }));
+                            }
+
                             let (event, public_error) = map_established_driver_error(error);
                             let kind = public_error.kind();
                             if let Some(event) = event {
@@ -1192,6 +1228,27 @@ impl Connection {
                             return Poll::Ready(Err(public_error));
                         }
                     }
+                }
+                ConnectionState::EstablishedPeerClosed {
+                    driver,
+                    close_pending,
+                } => {
+                    if close_pending {
+                        self.state = ConnectionState::EstablishedPeerClosed {
+                            driver,
+                            close_pending: false,
+                        };
+                        return Poll::Ready(Ok(ConnectionEvent::PeerClosed {
+                            connection: self.connection,
+                        }));
+                    }
+                    self.state = ConnectionState::EstablishedPeerClosed {
+                        driver,
+                        close_pending: false,
+                    };
+                    return Poll::Ready(Err(ConnectionError::state(
+                        ConnectionStateError::Terminal,
+                    )));
                 }
                 ConnectionState::EstablishedFailed {
                     driver,
@@ -1315,6 +1372,7 @@ impl Connection {
                 established.teardown(manager, delivery).into()
             }
             ConnectionState::Established { driver }
+            | ConnectionState::EstablishedPeerClosed { driver, .. }
             | ConnectionState::EstablishedFailed { driver, .. } => {
                 (*driver).teardown(manager, delivery).into()
             }
@@ -1630,6 +1688,58 @@ fn map_control_send_effect(effect: FlowControlSendEffect) -> Option<ConnectionEv
     }
 }
 
+fn established_driver_error_is_connection_close_observation(error: &ConnectionDriverError) -> bool {
+    match error {
+        ConnectionDriverError::ControlReceive(error) => {
+            profile_control_is_connection_close_observation(error)
+        }
+        ConnectionDriverError::ControlSend(error) => {
+            profile_control_is_connection_close_observation(&error.error)
+        }
+        ConnectionDriverError::Reliable(ReliableIoError::Connection(_)) => true,
+        ConnectionDriverError::Reliable(ReliableIoError::OutboundActiveBinding {
+            error: SendError::Io(IoFailure::ConnectionLost),
+            ..
+        })
+        | ConnectionDriverError::Reliable(ReliableIoError::InboundActiveBinding {
+            error: ReceiveError::Io(IoFailure::ConnectionLost),
+            ..
+        }) => true,
+        ConnectionDriverError::Datagram(DatagramIoError::Connection(_)) => true,
+        ConnectionDriverError::Datagram(DatagramIoError::Send {
+            error: DatagramSendError::ConnectionLost,
+            ..
+        }) => true,
+        ConnectionDriverError::State(_)
+        | ConnectionDriverError::OutboundOpen(_)
+        | ConnectionDriverError::InboundAdmission(_)
+        | ConnectionDriverError::DatagramSubmission(_)
+        | ConnectionDriverError::DatagramProfileUnavailable
+        | ConnectionDriverError::ReceivedFlowControl(_)
+        | ConnectionDriverError::Reliable(_)
+        | ConnectionDriverError::Datagram(_)
+        | ConnectionDriverError::FailurePreparation(_) => false,
+    }
+}
+
+fn profile_control_is_connection_close_observation(error: &ProfileBootstrapError) -> bool {
+    matches!(
+        error,
+        ProfileBootstrapError::Connection(_)
+            | ProfileBootstrapError::Frame(ControlFrameError::Read(ReadExactError::ReadError(
+                ReadError::ConnectionLost(_)
+            )))
+            | ProfileBootstrapError::Frame(ControlFrameError::Write(WriteError::ConnectionLost(_)))
+    )
+}
+
+fn peer_close_preceding_event(error: ConnectionDriverError) -> Option<ConnectionEvent> {
+    match error {
+        ConnectionDriverError::ControlSend(error) => map_control_send_effect(error.effect),
+        _ => None,
+    }
+}
+
 const fn flow_terminated_event(
     key: DeliveryFlowKey,
     origin: FlowTerminationOrigin,
@@ -1797,6 +1907,14 @@ fn established_driver_error_kind(error: &ConnectionDriverError) -> ConnectionErr
             ConnectionErrorKind::EstablishedResource
         }
         ConnectionDriverError::Reliable(ReliableIoError::Connection(_))
+        | ConnectionDriverError::Reliable(ReliableIoError::OutboundActiveBinding {
+            error: SendError::Io(IoFailure::ConnectionLost),
+            ..
+        })
+        | ConnectionDriverError::Reliable(ReliableIoError::InboundActiveBinding {
+            error: ReceiveError::Io(IoFailure::ConnectionLost),
+            ..
+        })
         | ConnectionDriverError::Datagram(DatagramIoError::Connection(_))
         | ConnectionDriverError::Datagram(DatagramIoError::Send {
             error: DatagramSendError::ProfileUnavailable | DatagramSendError::ConnectionLost,
