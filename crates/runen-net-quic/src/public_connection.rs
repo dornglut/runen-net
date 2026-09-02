@@ -7,8 +7,7 @@ use std::{
 };
 
 use quinn::{
-    Connection as QuinnConnection, ReadError as QuinnReadError,
-    ReadExactError as QuinnReadExactError, WriteError as QuinnWriteError,
+    Connection as QuinnConnection, ReadError as QuinnReadError, WriteError as QuinnWriteError,
 };
 use runen_net::{
     delivery::{
@@ -1726,8 +1725,7 @@ fn profile_control_error_is_connection_close_observation(error: &ProfileBootstra
         error,
         ProfileBootstrapError::Connection(_)
             | ProfileBootstrapError::Frame(ControlFrameError::Read(
-                QuinnReadExactError::FinishedEarly(_)
-                    | QuinnReadExactError::ReadError(QuinnReadError::ConnectionLost(_))
+                quinn::ReadExactError::ReadError(QuinnReadError::ConnectionLost(_))
             ))
             | ProfileBootstrapError::Frame(ControlFrameError::Write(
                 QuinnWriteError::ConnectionLost(_)
