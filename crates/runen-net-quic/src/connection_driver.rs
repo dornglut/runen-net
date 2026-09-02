@@ -11,7 +11,8 @@ use runen_net::{
 
 use crate::{
     control::{
-        ControlFrame, ControlFrameType, ControlReceiver, ControlSender, ProfileBootstrapError,
+        ControlFrame, ControlFrameError, ControlFrameType, ControlReceiver, ControlSender,
+        ProfileBootstrapError,
     },
     datagram::{DatagramReceiveOutcome, DatagramSubmissionError, DatagramSubmissionOutcome},
     datagram_driver::{DatagramConnectionIo, DatagramIoError, DatagramOutboundProgress},
@@ -257,6 +258,35 @@ impl EstablishedConnectionDriver {
         datagram: Vec<u8>,
     ) -> Result<(), quinn::SendDatagramError> {
         self.connection.send_datagram(datagram.into())
+    }
+
+    #[cfg(test)]
+    pub(super) async fn send_raw_control_bytes_for_test(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(), ControlFrameError> {
+        let ControlSendState::Ready(sender) = &mut self.sender else {
+            panic!("test control injection requires the established sender to be ready");
+        };
+        sender.send_raw_bytes_for_test(bytes).await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn finish_control_stream_for_test(&mut self) -> Result<(), ControlFrameError> {
+        let ControlSendState::Ready(sender) = &mut self.sender else {
+            panic!("test control finish requires the established sender to be ready");
+        };
+        sender.finish_for_test().await
+    }
+
+    #[cfg(test)]
+    pub(super) fn close_for_test(&self, code: ApplicationErrorCode) {
+        self.connection.close(code.quinn(), b"test close");
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_closed_for_test(&self) -> quinn::ConnectionError {
+        self.connection.closed().await
     }
 
     pub(super) fn peer_no_error_close_observed(&self) -> bool {
@@ -635,6 +665,7 @@ impl EstablishedConnectionDriver {
         let flow_driver::ControlReceiveCompletion { receiver, result } = completion;
         match result {
             Err(error) => {
+                let error = self.normalize_peer_no_error_control_end(error);
                 close_for_post_profile_control_error(&self.connection, &error);
                 self.receiver = ControlReceiveState::Terminal;
                 self.enter_terminal(None);
@@ -652,6 +683,30 @@ impl EstablishedConnectionDriver {
                     self.process_received_frame(receiver, frame, endpoint)
                 }
             }
+        }
+    }
+
+    fn normalize_peer_no_error_control_end(
+        &self,
+        error: ProfileBootstrapError,
+    ) -> ProfileBootstrapError {
+        if !matches!(
+            &error,
+            ProfileBootstrapError::Frame(ControlFrameError::EndOfStream)
+        ) {
+            return error;
+        }
+        let Some(close_reason) = self.connection.close_reason() else {
+            return error;
+        };
+        if matches!(
+            &close_reason,
+            quinn::ConnectionError::ApplicationClosed(close)
+                if close.error_code == ApplicationErrorCode::NoError.quinn()
+        ) {
+            ProfileBootstrapError::Connection(close_reason)
+        } else {
+            error
         }
     }
 
