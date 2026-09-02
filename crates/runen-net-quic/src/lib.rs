@@ -115,7 +115,7 @@ mod connection_driver;
 mod control;
 #[allow(
     dead_code,
-    reason = "RN5D3 lands crate-private DATAGRAM realization before later RN5E control/lifecycle wiring"
+    reason = "RN5D3 lands crate-private DATAGRAM realization before RN5E/RN6 wiring"
 )]
 mod datagram;
 #[allow(
