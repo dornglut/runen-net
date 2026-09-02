@@ -98,6 +98,8 @@ pub use public_flow::{
 
 #[cfg(test)]
 mod conformance_tests {
+    use runen_net::delivery::FlowTermination;
+
     include!("conformance_tests.rs");
     mod peer_close;
 }
@@ -113,7 +115,7 @@ mod connection_driver;
 mod control;
 #[allow(
     dead_code,
-    reason = "RN5D3 lands crate-private DATAGRAM realization before RN5E/RN6 wiring"
+    reason = "RN5D3 lands crate-private DATAGRAM realization before later RN5E control/lifecycle wiring"
 )]
 mod datagram;
 #[allow(
