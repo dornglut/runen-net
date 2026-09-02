@@ -1,15 +1,15 @@
 use std::collections::TryReserveError;
 
 use quinn::{
-    Connection, ConnectionError, ReadExactError, RecvStream, SendStream, Side, WriteError,
-    crypto::rustls::HandshakeData,
+    Connection, ConnectionError, ReadError, ReadExactError, RecvStream, SendStream, Side,
+    WriteError, crypto::rustls::HandshakeData,
 };
 
 use crate::{
     endpoint::ValidatedEndpointResources,
     wire::{
-        EncodedVarInt, MAX_VARINT, VarIntDecodeError, VarIntEncodeError, WireSide, decode_varint,
-        encode_varint,
+        ApplicationErrorCode, EncodedVarInt, MAX_VARINT, VarIntDecodeError, VarIntEncodeError,
+        WireSide, decode_varint, encode_varint,
     },
 };
 
@@ -676,15 +676,6 @@ impl ControlSender {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(super) async fn finish_for_test(&mut self) -> Result<(), ControlFrameError> {
-        self.send.finish().map_err(WriteError::from)?;
-        match self.send.stopped().await.map_err(WriteError::from)? {
-            None => Ok(()),
-            Some(error_code) => Err(ControlFrameError::Write(WriteError::Stopped(error_code))),
-        }
-    }
-
     pub(super) async fn send_frame(
         &mut self,
         frame_type: ControlFrameType,
@@ -955,7 +946,9 @@ async fn receive_frame_body(
         .map_err(ControlFrameError::Allocation)?;
     body.resize(body_len, 0);
     if !body.is_empty() {
-        recv.read_exact(&mut body).await?;
+        recv.read_exact(&mut body)
+            .await
+            .map_err(mid_frame_read_error)?;
     }
     Ok(ControlFrame { frame_type, body })
 }
@@ -983,7 +976,9 @@ fn validate_inbound_body_length(
 
 async fn read_stream_varint(recv: &mut RecvStream) -> Result<u64, ControlFrameError> {
     let mut first = [0u8; 1];
-    recv.read_exact(&mut first).await?;
+    recv.read_exact(&mut first)
+        .await
+        .map_err(mid_frame_read_error)?;
     read_stream_varint_after_first(recv, first[0]).await
 }
 
@@ -995,11 +990,25 @@ async fn read_stream_varint_after_first(
     bytes[0] = first;
     let encoded_len = 1usize << (first >> 6);
     if encoded_len > 1 {
-        recv.read_exact(&mut bytes[1..encoded_len]).await?;
+        recv.read_exact(&mut bytes[1..encoded_len])
+            .await
+            .map_err(mid_frame_read_error)?;
     }
     let (value, consumed) = decode_varint(&bytes[..encoded_len])?;
     debug_assert_eq!(consumed, encoded_len);
     Ok(value)
+}
+
+fn mid_frame_read_error(error: ReadExactError) -> ControlFrameError {
+    if matches!(
+        &error,
+        ReadExactError::ReadError(ReadError::ConnectionLost(ConnectionError::ApplicationClosed(
+            close
+        ))) if close.error_code == ApplicationErrorCode::NoError.quinn()
+    ) {
+        return ControlFrameError::TruncatedFrame;
+    }
+    error.into()
 }
 
 #[cfg(test)]
