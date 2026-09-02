@@ -492,6 +492,7 @@ fn control_frame_close_code(error: &ControlFrameError) -> Option<ApplicationErro
         | ControlFrameError::BodyTooLarge { .. }
         | ControlFrameError::NegotiationBodyTooLarge { .. }
         | ControlFrameError::EndOfStream
+        | ControlFrameError::TruncatedFrame
         | ControlFrameError::Read(ReadExactError::FinishedEarly(_))
         | ControlFrameError::Read(ReadExactError::ReadError(ReadError::Reset(_)))
         | ControlFrameError::Write(WriteError::Stopped(_)) => {
@@ -630,6 +631,7 @@ mod tests {
                 limit: 64,
             },
             ControlFrameError::EndOfStream,
+            ControlFrameError::TruncatedFrame,
             ControlFrameError::Read(ReadExactError::FinishedEarly(0)),
             ControlFrameError::Read(ReadExactError::ReadError(ReadError::Reset(
                 VarInt::from_u32(2),
