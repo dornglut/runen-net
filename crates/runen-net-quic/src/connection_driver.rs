@@ -3,7 +3,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use quinn::Connection;
+use quinn::{Connection, ConnectionError as QuinnConnectionError};
 use runen_net::{
     delivery::{DeliveryEndpoint, DeliveryFlowKey, DeliveryMode, FlowTermination},
     protocol::NegotiationManager,
@@ -257,6 +257,14 @@ impl EstablishedConnectionDriver {
         datagram: Vec<u8>,
     ) -> Result<(), quinn::SendDatagramError> {
         self.connection.send_datagram(datagram.into())
+    }
+
+    pub(super) fn peer_no_error_close_observed(&self) -> bool {
+        matches!(
+            self.connection.close_reason(),
+            Some(QuinnConnectionError::ApplicationClosed(close))
+                if close.error_code == ApplicationErrorCode::NoError.quinn()
+        )
     }
 
     pub(super) fn poll_step(
