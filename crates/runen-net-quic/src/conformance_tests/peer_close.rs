@@ -1,4 +1,10 @@
-use std::task::{Context, Waker};
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    task::{Context, Wake, Waker},
+};
 
 use crate::{
     public_connection::{ConnectionError, ConnectionStateError},
@@ -10,6 +16,49 @@ use super::*;
 struct PublicSide {
     connection: PublicConnection,
     host: HostState,
+}
+
+#[derive(Default)]
+struct WakeSignal {
+    fired: AtomicBool,
+    waiter: Mutex<Option<Waker>>,
+}
+
+impl WakeSignal {
+    fn signal(&self) {
+        self.fired.store(true, Ordering::Release);
+        let waiter = self.waiter.lock().unwrap().take();
+        if let Some(waiter) = waiter {
+            waiter.wake();
+        }
+    }
+
+    async fn notified(&self) {
+        poll_fn(|cx| {
+            if self.fired.swap(false, Ordering::AcqRel) {
+                return Poll::Ready(());
+            }
+
+            *self.waiter.lock().unwrap() = Some(cx.waker().clone());
+            if self.fired.swap(false, Ordering::AcqRel) {
+                self.waiter.lock().unwrap().take();
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+    }
+}
+
+impl Wake for WakeSignal {
+    fn wake(self: Arc<Self>) {
+        self.signal();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.signal();
+    }
 }
 
 #[test]
@@ -241,6 +290,126 @@ fn quic_idle_timeout_stays_on_transport_failure_path() {
     });
 }
 
+#[test]
+fn malformed_control_remains_failure_when_no_error_close_is_also_sent() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, async {
+            let (client, server, mut client_side, server_side) =
+                establish_public_pair_with_resources(resources()).await;
+            let PublicSide {
+                connection: server_connection,
+                host: mut server_host,
+            } = server_side;
+            let (mut server_driver, _receive_limits) = server_connection
+                .into_established_internal()
+                .expect("server was not established for malformed-control injection");
+
+            let signal = Arc::new(WakeSignal::default());
+            let waker = Waker::from(Arc::clone(&signal));
+            assert!(matches!(
+                poll_public_with_waker(&mut client_side, &waker),
+                Poll::Pending
+            ));
+            server_driver
+                .send_raw_control_bytes_for_test(&[10])
+                .await
+                .expect("malformed established control byte was not written");
+            signal.notified().await;
+
+            // The malformed byte reached an established receiver before NO_ERROR is sent. The
+            // next public progression must keep that independent protocol failure fail-closed.
+            server_driver.close_for_test(ApplicationErrorCode::NoError);
+            let error = next_public_result(&mut client_side)
+                .await
+                .expect_err("malformed established control became normal peer close");
+            assert_eq!(
+                error.kind(),
+                PublicConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Control)
+            );
+
+            let client_teardown = client_side.connection.teardown(
+                &mut client_side.host.negotiation,
+                &mut client_side.host.delivery,
+            );
+            assert_clean_public_teardown(&client_teardown, FIRST_CONNECTION);
+            let server_teardown =
+                server_driver.teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            assert_eq!(server_teardown.connection, FIRST_CONNECTION);
+            assert!(server_teardown.negotiation_cleanup_error.is_none());
+            assert!(server_teardown.flow_terminations.is_empty());
+
+            close_test_endpoints(&client, &server, b"malformed close precedence proof").await;
+        })
+        .await
+        .expect("malformed-control/NO_ERROR precedence proof timed out");
+    });
+}
+
+#[test]
+fn partial_control_eof_remains_failure_when_teardown_sends_no_error() {
+    let runtime = Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(SCENARIO_TIMEOUT, async {
+            let (client, server, mut client_side, server_side) =
+                establish_public_pair_with_resources(resources()).await;
+            let PublicSide {
+                connection: server_connection,
+                host: mut server_host,
+            } = server_side;
+            let (mut server_driver, _receive_limits) = server_connection
+                .into_established_internal()
+                .expect("server was not established for partial-control injection");
+
+            let signal = Arc::new(WakeSignal::default());
+            let waker = Waker::from(Arc::clone(&signal));
+            assert!(matches!(
+                poll_public_with_waker(&mut client_side, &waker),
+                Poll::Pending
+            ));
+
+            // OPEN_FLOW followed by the first octet of a two-octet body-length varint. The client
+            // must consume this prefix and remain blocked on the missing second length octet.
+            server_driver
+                .send_raw_control_bytes_for_test(&[6, 0x40])
+                .await
+                .expect("partial established control prefix was not written");
+            signal.notified().await;
+            assert!(matches!(
+                poll_public_with_waker(&mut client_side, &waker),
+                Poll::Pending
+            ));
+
+            // Established teardown orders the existing NO_ERROR close before dropping the control
+            // stream. Because the receiver already consumed a partial frame, that later EOF/close
+            // must remain a control failure rather than being normalized to PeerClosed.
+            let server_teardown =
+                server_driver.teardown(&mut server_host.negotiation, &mut server_host.delivery);
+            assert_eq!(server_teardown.connection, FIRST_CONNECTION);
+            assert!(server_teardown.negotiation_cleanup_error.is_none());
+            assert!(server_teardown.flow_terminations.is_empty());
+
+            let error = next_public_result(&mut client_side)
+                .await
+                .expect_err("partial established control EOF became normal peer close");
+            assert_eq!(
+                error.kind(),
+                PublicConnectionErrorKind::EstablishedControl(ProfileBootstrapFailure::Control)
+            );
+
+            let client_teardown = client_side.connection.teardown(
+                &mut client_side.host.negotiation,
+                &mut client_side.host.delivery,
+            );
+            assert_clean_public_teardown(&client_teardown, FIRST_CONNECTION);
+
+            close_test_endpoints(&client, &server, b"partial close precedence proof").await;
+        })
+        .await
+        .expect("partial-control/NO_ERROR precedence proof timed out");
+    });
+}
+
 async fn establish_public_pair_with_resources(
     resources: ValidatedEndpointResources,
 ) -> (
@@ -439,11 +608,18 @@ async fn next_public_pair_result(
     .await
 }
 
-#[allow(dead_code)]
-fn poll_public_once(side: &mut PublicSide) -> Poll<Result<ConnectionEvent, ConnectionError>> {
-    let mut cx = Context::from_waker(Waker::noop());
+fn poll_public_with_waker(
+    side: &mut PublicSide,
+    waker: &Waker,
+) -> Poll<Result<ConnectionEvent, ConnectionError>> {
+    let mut cx = Context::from_waker(waker);
     side.connection
         .poll(&mut cx, &mut side.host.negotiation, &mut side.host.delivery)
+}
+
+#[allow(dead_code)]
+fn poll_public_once(side: &mut PublicSide) -> Poll<Result<ConnectionEvent, ConnectionError>> {
+    poll_public_with_waker(side, Waker::noop())
 }
 
 fn only_termination(teardown: &crate::public_connection::ConnectionTeardown) -> FlowTermination {
