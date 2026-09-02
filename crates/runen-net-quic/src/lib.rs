@@ -97,7 +97,10 @@ pub use public_flow::{
 };
 
 #[cfg(test)]
-mod conformance_tests;
+mod conformance_tests {
+    include!("conformance_tests.rs");
+    mod peer_close;
+}
 #[allow(
     dead_code,
     reason = "RN5E5A5L lands the crate-private established connection orchestrator before RN5E5 loopback conformance"
