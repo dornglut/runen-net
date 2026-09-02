@@ -502,13 +502,25 @@ Wire revision 1 reserves these QUIC application error codes for RunenNet profile
 | 5 | `FLOW_PROTOCOL_ERROR` |
 | 6 | `RELIABLE_DELIVERY_FAILED` |
 
+`NO_ERROR` means that the sending endpoint closes the established RunenNet profile connection without reporting a RunenNet profile failure through the application close code. It is connection-level close information only. It is not evidence that a higher application protocol completed successfully, that any particular accepted message was exposed, or that every delivery flow terminated normally.
+
+Receiving `NO_ERROR` still terminates the control stream, negotiated connection contract, and any residual delivery flows under their existing semantic owners. `NO_ERROR` MUST NOT convert residual flow termination into `Normal`, suppress reliable-delivery-failure evidence, or otherwise weaken the delivery obligations owned by the Core delivery specification.
+
+A conforming application-facing QUIC realization MUST preserve peer `NO_ERROR` as stable observable connection-lifecycle information distinct from transport loss and non-zero RunenNet profile failures. Ordinary callers MUST NOT need to parse diagnostic reason text, downcast transport-library-private errors, or access private transport topology to make that distinction.
+
 An implementation MAY include a bounded diagnostic reason phrase when the QUIC API permits one. Diagnostic text is not semantic identity and MUST NOT be parsed as a protocol contract.
 
 A protocol error in connection-level bootstrap/control state terminates the profile connection. A failure isolated to one established delivery flow SHOULD terminate only that flow when the QUIC realization can do so without ambiguity or semantic leakage; connection termination remains permitted when safe isolation is impossible.
 
 ## Connection close and replacement
 
+QUIC `CONNECTION_CLOSE` is an immediate transport close, not a RunenNet delivery-drain acknowledgement. Wire revision 1 does not define a generic graceful connection-drain handshake.
+
+An application protocol that needs to distinguish graceful application shutdown from unexpected connection termination MUST establish its own peer-visible completion condition before requesting endpoint close with `NO_ERROR`. A `NO_ERROR` close MAY follow such an application-level agreement, but the connection close is not itself that agreement and MUST NOT be treated as proof of it.
+
 QUIC connection close or loss terminates the control stream, negotiation contract, and every delivery flow on that connection.
+
+These `NO_ERROR` rules add no control frame, wire field, or application error code and change no existing frame encoding. They are byte-compatible with `runennet/1` and do not require a new ALPN wire revision.
 
 A replacement QUIC connection MUST repeat ALPN authentication, profile settings, DATAGRAM support checks, compatibility negotiation, and delivery-flow establishment from fresh connection-scoped state.
 
