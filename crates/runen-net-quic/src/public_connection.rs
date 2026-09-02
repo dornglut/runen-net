@@ -57,9 +57,7 @@ use crate::{
     quinn_binding::{
         IoFailure, ReceiveError, ReceiveProgress, RegistryError, SendError, SendProgress,
     },
-    reliable_driver::{
-        ActiveReliableProgress, ReliableFailureContext, ReliableIoError, ReliableIoStateError,
-    },
+    reliable_driver::{ActiveReliableProgress, ReliableIoError, ReliableIoStateError},
     wire::WireSide,
 };
 
@@ -1699,9 +1697,13 @@ fn established_driver_error_is_connection_close_observation(error: &ConnectionDr
             profile_control_is_connection_close_observation(&error.error)
         }
         ConnectionDriverError::Reliable(ReliableIoError::Connection(_)) => true,
-        ConnectionDriverError::Reliable(ReliableIoError::InboundActiveBinding {
-            context: ReliableFailureContext::Unresolved,
+        ConnectionDriverError::Reliable(ReliableIoError::OutboundActiveBinding {
+            error: SendError::Io(IoFailure::ConnectionLost),
+            ..
+        })
+        | ConnectionDriverError::Reliable(ReliableIoError::InboundActiveBinding {
             error: ReceiveError::Io(IoFailure::ConnectionLost),
+            ..
         }) => true,
         ConnectionDriverError::Datagram(DatagramIoError::Connection(_)) => true,
         ConnectionDriverError::Datagram(DatagramIoError::Send {
@@ -1724,9 +1726,6 @@ fn profile_control_is_connection_close_observation(error: &ProfileBootstrapError
     matches!(
         error,
         ProfileBootstrapError::Connection(_)
-            | ProfileBootstrapError::Frame(ControlFrameError::Read(ReadExactError::FinishedEarly(
-                _
-            )))
             | ProfileBootstrapError::Frame(ControlFrameError::Read(ReadExactError::ReadError(
                 ReadError::ConnectionLost(_)
             )))
@@ -1908,6 +1907,14 @@ fn established_driver_error_kind(error: &ConnectionDriverError) -> ConnectionErr
             ConnectionErrorKind::EstablishedResource
         }
         ConnectionDriverError::Reliable(ReliableIoError::Connection(_))
+        | ConnectionDriverError::Reliable(ReliableIoError::OutboundActiveBinding {
+            error: SendError::Io(IoFailure::ConnectionLost),
+            ..
+        })
+        | ConnectionDriverError::Reliable(ReliableIoError::InboundActiveBinding {
+            error: ReceiveError::Io(IoFailure::ConnectionLost),
+            ..
+        })
         | ConnectionDriverError::Datagram(DatagramIoError::Connection(_))
         | ConnectionDriverError::Datagram(DatagramIoError::Send {
             error: DatagramSendError::ProfileUnavailable | DatagramSendError::ConnectionLost,
