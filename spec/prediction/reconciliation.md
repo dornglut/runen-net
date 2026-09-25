@@ -408,8 +408,8 @@ An implementation of this semantic area MUST be testable for at least the follow
 7. an unauthorized connection cannot create applicable participant input;
 8. a locally predicted batch cannot be applied as tracked prediction when pending-prediction admission failed;
 9. failure while applying a newly admitted tracked-prediction batch invalidates prediction continuity, clears pending replay eligibility, preserves the authoritative replication frontier, and requires explicit host restoration before reactivation;
-11. a local tracked-prediction candidate at or before the reconciliation frontier is PredictionInputNotNewerThanFrontier and is not applied;
-10. same-key local pending prediction is classified deterministically as DuplicateInput or ConflictingInput while newer than the frontier;
+10. a local tracked-prediction candidate at or before the reconciliation frontier is PredictionInputNotNewerThanFrontier and is not applied;
+11. same-key local pending prediction is classified deterministically as DuplicateInput or ConflictingInput while newer than the frontier;
 12. authoritative commit at tick T advances/establishes the frontier and retires all pending predicted batches at ticks less than or equal to T;
 13. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order with their target-tick meaning preserved;
 14. an authoritative candidate that fails before commit does not advance the frontier, retire, or replay pending prediction;
