@@ -21,6 +21,7 @@ This revision defines:
 - authoritative-commit-before-replay ordering;
 - retirement of predicted input covered by authoritative progression;
 - ordered replay of still-pending later input;
+- initial local prediction host-application failure behavior;
 - reconciliation failure behavior and observable outcome classes;
 - conservative prediction behavior across replication recovery and connection replacement.
 
@@ -177,6 +178,17 @@ If pending-prediction resource admission fails, the endpoint MUST NOT apply the 
 
 A host MAY choose not to predict an otherwise valid local input batch.
 
+If a newly admitted tracked-prediction batch cannot be applied successfully to the host's
+prediction-relevant state, the endpoint MUST invalidate the current prediction continuity.
+Every pending batch from that continuity MUST leave replay eligibility, while the committed
+authoritative replication lineage and reconciliation frontier remain unchanged. Delivery
+acceptance or rejection does not alter this rule.
+
+Before prediction is re-enabled after such a host-application failure, the host MUST
+re-establish prediction-relevant state from the current synchronized authoritative lineage.
+The restoration requirement is the same host-state safety boundary used after reconciliation
+replay failure; the two failure sites MUST NOT create independent prediction authorities.
+
 ## Prediction continuity state
 
 For one active participant replication lineage, local prediction continuity is one of:
@@ -300,7 +312,7 @@ Authority-side input outcomes:
 Participant-side prediction outcomes/states:
 
 - PredictionActive;
-- PredictionInvalidated with a reason class;
+- PredictionInvalidated with a reason class, including initial host-application failure;
 - PredictionInputNotNewerThanFrontier;
 - PendingPredictionResourceRejected;
 - authoritative commit with no pending replay required;
@@ -395,15 +407,16 @@ An implementation of this semantic area MUST be testable for at least the follow
 6. input/resource saturation fails explicitly without unbounded growth or silent key reuse;
 7. an unauthorized connection cannot create applicable participant input;
 8. a locally predicted batch cannot be applied as tracked prediction when pending-prediction admission failed;
-9. a local tracked-prediction candidate at or before the reconciliation frontier is PredictionInputNotNewerThanFrontier and is not applied;
-10. same-key local pending prediction is classified deterministically as DuplicateInput or ConflictingInput while newer than the frontier;
-11. authoritative commit at tick T advances/establishes the frontier and retires all pending predicted batches at ticks less than or equal to T;
-12. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order with their target-tick meaning preserved;
-13. an authoritative candidate that fails before commit does not advance the frontier, retire, or replay pending prediction;
-14. replay or intervening prediction-step failure leaves the authoritative commit/frontier valid but invalidates prediction continuity, clears RunenNet replay state, and does not expose a partially replayed state as valid prediction;
-15. entering FullSnapshotRequired invalidates and clears pre-recovery replay eligibility;
-16. authorized connection replacement does not transfer, automatically resubmit, or replay pre-replacement pending input after the required replacement full baseline and does not reset authority input-window/key identity;
-17. participant removal and session close prevent old input/prediction state from becoming applicable to a later participant/session lifetime.
+9. failure while applying a newly admitted tracked-prediction batch invalidates prediction continuity, clears pending replay eligibility, preserves the authoritative replication frontier, and requires explicit host restoration before reactivation;
+10. a local tracked-prediction candidate at or before the reconciliation frontier is PredictionInputNotNewerThanFrontier and is not applied;
+11. same-key local pending prediction is classified deterministically as DuplicateInput or ConflictingInput while newer than the frontier;
+12. authoritative commit at tick T advances/establishes the frontier and retires all pending predicted batches at ticks less than or equal to T;
+13. after that commit, pending batches later than T replay exactly once for that reconciliation in ascending target-tick order with their target-tick meaning preserved;
+14. an authoritative candidate that fails before commit does not advance the frontier, retire, or replay pending prediction;
+15. replay or intervening prediction-step failure leaves the authoritative commit/frontier valid but invalidates prediction continuity, clears RunenNet replay state, and does not expose a partially replayed state as valid prediction;
+16. entering FullSnapshotRequired invalidates and clears pre-recovery replay eligibility;
+17. authorized connection replacement does not transfer, automatically resubmit, or replay pre-replacement pending input after the required replacement full baseline and does not reset authority input-window/key identity;
+18. participant removal and session close prevent old input/prediction state from becoming applicable to a later participant/session lifetime.
 
 ## Open items
 

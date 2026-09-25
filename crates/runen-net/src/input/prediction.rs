@@ -19,6 +19,7 @@ pub enum PredictionInvalidationReason {
     InitialBaseline,
     ReplicationRecovery(ClientRecoveryReason),
     ConnectionLoss,
+    LocalApplicationFailure,
     ReplayFailure,
     ParticipantMembershipEnded,
     SessionClosed,
@@ -75,7 +76,7 @@ pub enum PredictionReconciliationOutcome {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum PredictionActivationError {
     ReplicationLineageMissing,
-    NotReplayFailure,
+    NotHostStateFailure,
     ReplicationNotSynchronized,
     MissingCommittedTick,
     FrontierRegression,
@@ -212,6 +213,12 @@ impl<I> PredictionLineage<I> {
         }
     }
 
+    pub fn local_application_failed(&mut self) {
+        if self.terminal_reason().is_none() {
+            self.invalidate(PredictionInvalidationReason::LocalApplicationFailure);
+        }
+    }
+
     pub fn participant_membership_ended(&mut self) {
         self.terminate(PredictionInvalidationReason::ParticipantMembershipEnded);
     }
@@ -241,7 +248,7 @@ impl<I> PredictionLineage<I> {
         Ok(())
     }
 
-    pub fn confirm_host_restored_after_replay_failure<S>(
+    pub fn confirm_host_restored_after_prediction_failure<S>(
         &mut self,
         replication: &ClientReplicationSet<S>,
     ) -> Result<SimulationTick, PredictionActivationError> {
@@ -251,11 +258,12 @@ impl<I> PredictionLineage<I> {
         if !matches!(
             self.state,
             PredictionState::Invalidated {
-                reason: PredictionInvalidationReason::ReplayFailure,
+                reason: PredictionInvalidationReason::LocalApplicationFailure
+                    | PredictionInvalidationReason::ReplayFailure,
                 ..
             }
         ) {
-            return Err(PredictionActivationError::NotReplayFailure);
+            return Err(PredictionActivationError::NotHostStateFailure);
         }
         if !matches!(
             lineage.replication_state(),

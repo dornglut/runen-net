@@ -714,6 +714,69 @@ fn missing_base_recovery_invalidates_prediction_from_live_state() {
 }
 
 #[test]
+fn local_application_failure_invalidates_pending_until_host_restore() {
+    let key = ReplicationLineageKey::new(SessionId::new(24), ParticipantId::new(24));
+    let mut replication = replication(key);
+    let mut prediction = PredictionLineage::new(key, prediction_limits());
+    activate_prediction(&mut prediction, &mut replication, key, 1, 10);
+    assert_eq!(
+        prediction.admit_local(tick(11), &11, 4),
+        PredictionInputOutcome::InputAccepted
+    );
+    assert_eq!(
+        prediction.admit_local(tick(12), &12, 4),
+        PredictionInputOutcome::InputAccepted
+    );
+
+    prediction.local_application_failed();
+
+    assert_eq!(
+        prediction.state(),
+        PredictionState::Invalidated {
+            reason: PredictionInvalidationReason::LocalApplicationFailure,
+            frontier: Some(tick(10))
+        }
+    );
+    assert_eq!(prediction.pending_count(), 0);
+    assert_eq!(prediction.pending_bytes(), 0);
+    assert_eq!(
+        replication.lineage(key).unwrap().current_cursor(),
+        Some(ReplicationCursor::new(1))
+    );
+    assert_eq!(
+        replication.lineage(key).unwrap().current_tick(),
+        Some(tick(10))
+    );
+    assert_eq!(
+        prediction.admit_local(tick(13), &13, 4),
+        PredictionInputOutcome::PredictionInvalidated(
+            PredictionInvalidationReason::LocalApplicationFailure
+        )
+    );
+
+    assert_eq!(
+        prediction
+            .confirm_host_restored_after_prediction_failure(&replication)
+            .unwrap(),
+        tick(10)
+    );
+    assert_eq!(
+        prediction.state(),
+        PredictionState::Active { frontier: tick(10) }
+    );
+    assert_eq!(
+        prediction.confirm_host_restored_after_prediction_failure(&replication),
+        Err(PredictionActivationError::NotHostStateFailure)
+    );
+
+    prediction.session_closed();
+    assert_eq!(
+        prediction.confirm_host_restored_after_prediction_failure(&replication),
+        Err(PredictionActivationError::NotHostStateFailure)
+    );
+}
+
+#[test]
 fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore() {
     let key = ReplicationLineageKey::new(SessionId::new(14), ParticipantId::new(14));
     let mut replication = replication(key);
@@ -766,7 +829,7 @@ fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore
 
     assert_eq!(
         prediction
-            .confirm_host_restored_after_replay_failure(&replication)
+            .confirm_host_restored_after_prediction_failure(&replication)
             .unwrap(),
         tick(11)
     );
@@ -786,8 +849,8 @@ fn replay_failure_preserves_commit_but_invalidates_prediction_until_host_restore
     );
     assert!(!replay_called);
     assert_eq!(
-        prediction.confirm_host_restored_after_replay_failure(&replication),
-        Err(PredictionActivationError::NotReplayFailure)
+        prediction.confirm_host_restored_after_prediction_failure(&replication),
+        Err(PredictionActivationError::NotHostStateFailure)
     );
 }
 
