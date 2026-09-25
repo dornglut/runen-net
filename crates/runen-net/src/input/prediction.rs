@@ -258,8 +258,7 @@ impl<I> PredictionLineage<I> {
         if !matches!(
             self.state,
             PredictionState::Invalidated {
-                reason:
-                    PredictionInvalidationReason::LocalApplicationFailure
+                reason: PredictionInvalidationReason::LocalApplicationFailure
                     | PredictionInvalidationReason::ReplayFailure,
                 ..
             }
