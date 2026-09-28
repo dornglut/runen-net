@@ -21,7 +21,7 @@ Consumer integrations may depend on RunenNet plus their host frameworks outside 
 
 Networking semantics are established before transport realization. Transport-independent semantic packages MUST NOT depend on a production transport, socket API, or executor-specific runtime API. Transport/runtime adapters may realize accepted contracts but MUST NOT silently alter any accepted RunenNet semantic contract.
 
-Terms or feature families that are not yet normatively defined — including currently deferred priority, keyed supersession, advanced reconnect/history, prediction, and interest semantics — are not implementation authority merely because a future adapter or consumer needs them.
+Terms or feature families that are not yet normatively defined — including currently deferred priority, keyed supersession, advanced reconnect/history, interest/relevancy extensions, and lag compensation — are not implementation authority merely because a future adapter or consumer needs them. Participant input prediction and authoritative reconciliation are already normatively defined under `spec/prediction/reconciliation.md`; that accepted networking contract does not make gameplay simulation, rollback realization, interpolation, or presentation RunenNet authority.
 
 World/game policy such as spatial relevancy, ownership facts, and application simulation remains consumer-owned and enters RunenNet through explicit host-neutral contracts.
 
